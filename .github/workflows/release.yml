@@ -16,16 +16,24 @@ jobs:
       - name: Cache Bazel repository cache
         uses: actions/cache@v4
         with:
-          path: ~/.cache/bazel
+          path: .bazel_cache
           key: bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock') }}
           restore-keys: |
             bazel-${{ runner.os }}-
+
+      - name: Cache Bazel Disk Cache
+        uses: actions/cache@v4
+        with:
+          path: .disk_cache
+          key: bazel-${{ runner.os }}
+          restore-keys: |
+            bazel-${{ runner.os }}
 
       - name: Build binary in devcontainer
         uses: devcontainers/ci@v0.3
         with:
           runCmd: |
-            bazel build --config=minify //cpp_formatting:trailing_return_types
+            bazel build --disk_cache=/workspace/.disk_cache --repository_cache=/workspace/.bazel_cache --config=minify //cpp_formatting:trailing_return_types
             cp -L bazel-bin/cpp_formatting/trailing_return_types trailing_return_types-linux-x86_64
 
       - name: Publish release

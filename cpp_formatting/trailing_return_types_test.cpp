@@ -1,5 +1,6 @@
-#include "gtest/gtest.h"
-#include "trailing_return_types_lib.h"
+#include "cpp_formatting/trailing_return_types_lib.h"
+
+#include <gtest/gtest.h>
 
 // ---------------------------------------------------------------------------
 // Helper
@@ -231,33 +232,35 @@ TEST(TrailingReturnTypes, ConversionOperatorNotRewritten) {
 TEST(TrailingReturnTypes, NamespacedReferenceForwardDeclRewritten) {
   // A declaration-only function with a complex namespaced return type should
   // be rewritten just like a definition.
-  EXPECT_EQ(
-      rewrite("namespace std { struct ostream {}; }\n"
-              "struct S {};\n"
-              "std::ostream &operator<<(std::ostream &os, const S &s);"),
-      "namespace std { struct ostream {}; }\n"
-      "struct S {};\n"
-      "auto operator<<(std::ostream &os, const S &s) -> std::ostream &;");
+  EXPECT_EQ(rewrite("namespace std { struct ostream {}; }\n"
+                    "struct S {};\n"
+                    "std::ostream &operator<<(std::ostream &os, const S &s);"),
+            "namespace std { struct ostream {}; }\n"
+            "struct S {};\n"
+            "auto operator<<(std::ostream &os, const S &s) -> std::ostream &;");
 }
 
 TEST(TrailingReturnTypes, NamespacedReferenceReturn) {
   EXPECT_EQ(
-      rewrite("namespace std { struct ostream {}; }\n"
-              "std::ostream &getStream() { static std::ostream os; return os; }"),
+      rewrite(
+          "namespace std { struct ostream {}; }\n"
+          "std::ostream &getStream() { static std::ostream os; return os; }"),
       "namespace std { struct ostream {}; }\n"
-      "auto getStream() -> std::ostream & { static std::ostream os; return os; }");
+      "auto getStream() -> std::ostream & { static std::ostream os; return os; "
+      "}");
 }
 
 TEST(TrailingReturnTypes, FriendNamespacedReferenceReturn) {
-  EXPECT_EQ(
-      rewrite("namespace std { struct ostream {}; }\n"
-              "struct S {\n"
-              "  friend std::ostream &operator<<(std::ostream &os, const S &s) { return os; }\n"
-              "};"),
-      "namespace std { struct ostream {}; }\n"
-      "struct S {\n"
-      "  friend auto operator<<(std::ostream &os, const S &s) -> std::ostream & { return os; }\n"
-      "};");
+  EXPECT_EQ(rewrite("namespace std { struct ostream {}; }\n"
+                    "struct S {\n"
+                    "  friend std::ostream &operator<<(std::ostream &os, const "
+                    "S &s) { return os; }\n"
+                    "};"),
+            "namespace std { struct ostream {}; }\n"
+            "struct S {\n"
+            "  friend auto operator<<(std::ostream &os, const S &s) -> "
+            "std::ostream & { return os; }\n"
+            "};");
 }
 
 // ---------------------------------------------------------------------------
@@ -306,42 +309,47 @@ TEST(TrailingReturnTypes, TemplateParamAsReturnType) {
             "template<typename T> auto identity(T x) -> T { return x; }");
 }
 
-
 // WiredOperatorIssue: originally filed with `#include <ostream>` /
 // `#include <chrono>`, but the test helper (runToolOnCodeWithArgs) cannot
 // resolve system headers in the sandbox.  Inline stubs reproduce the same
 // AST structure that triggered the bug (LValueReferenceTypeLoc range).
-static const char* kOstreamStub =
-    "namespace std { struct ostream {}; }\n";
+static const char* kOstreamStub = "namespace std { struct ostream {}; }\n";
 static const char* kChronoStub =
     "namespace std { struct ostream {}; "
     "namespace chrono { struct nanoseconds {}; } }\n";
 
 TEST(WiredOperatorIssue, NoChrono) {
-  EXPECT_EQ(
-      rewrite((std::string(kOstreamStub) +
-               "struct F { friend std::ostream &operator<<(std::ostream &os, const F &) { return os; } };").c_str()),
-      std::string(kOstreamStub) +
-      "struct F { friend auto operator<<(std::ostream &os, const F &) -> std::ostream & { return os; } };");
+  EXPECT_EQ(rewrite((std::string(kOstreamStub) +
+                     "struct F { friend std::ostream &operator<<(std::ostream "
+                     "&os, const F &) { return os; } };")
+                        .c_str()),
+            std::string(kOstreamStub) +
+                "struct F { friend auto operator<<(std::ostream &os, const F "
+                "&) -> std::ostream & { return os; } };");
 }
 
 TEST(WiredOperatorIssue, WithChrono) {
-  EXPECT_EQ(
-      rewrite((std::string(kChronoStub) +
-               "struct F { friend std::ostream &operator<<(std::ostream &os, const F &) { return os; } };").c_str()),
-      std::string(kChronoStub) +
-      "struct F { friend auto operator<<(std::ostream &os, const F &) -> std::ostream & { return os; } };");
+  EXPECT_EQ(rewrite((std::string(kChronoStub) +
+                     "struct F { friend std::ostream &operator<<(std::ostream "
+                     "&os, const F &) { return os; } };")
+                        .c_str()),
+            std::string(kChronoStub) +
+                "struct F { friend auto operator<<(std::ostream &os, const F "
+                "&) -> std::ostream & { return os; } };");
 }
 
 TEST(TrailingReturnTypes, DefaultedComparisonOperator) {
-  EXPECT_EQ(
-      rewrite(
-        R"cpp(
+  EXPECT_EQ(rewrite(
+                R"cpp(
 #include <compare>
-struct F { auto operator<=>(const F&) const = default; };
-        )cpp"),
-        R"cpp(
+                  struct F {
+                    auto operator<=>(const F&) const = default;
+                  };
+                )cpp"),
+            R"cpp(
 #include <compare>
-struct F { auto operator<=>(const F&) const = default; };
-        )cpp");
+              struct F {
+                auto operator<=>(const F&) const = default;
+              };
+            )cpp");
 }

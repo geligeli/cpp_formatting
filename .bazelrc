@@ -4,6 +4,7 @@ build:minify -c opt
 build:minify --copt=-ffunction-sections
 build:minify --copt=-fdata-sections
 build:minify --copt=-flto
+build:minify --copt=-Os
 build:minify --cxxopt=-fno-exceptions
 build:minify --cxxopt=-fno-rtti
 build:minify --linkopt=-flto
@@ -11,6 +12,7 @@ build:minify --linkopt=-fno-ident
 build:minify --linkopt=-fno-asynchronous-unwind-tables
 build:minify --linkopt=-Wl,--gc-sections
 build:minify --linkopt=-Wl,--strip-all
-# build:minify --linkopt=-Wl,--icf=safe
 build:minify --action_env=CC=clang
 build:minify --action_env=CXX=clang++
+build:minify --features=fully_static_link
+build:minify --platform_suffix=-minify

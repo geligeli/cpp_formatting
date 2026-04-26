@@ -1,4 +1,4 @@
-#include "trailing_return_types_lib.h"
+#include "cpp_formatting/trailing_return_types_lib.h"
 
 #include "clang/ASTMatchers/ASTMatchers.h"
 #include "clang/Frontend/CompilerInstance.h"

@@ -1,9 +1,9 @@
+#include <cstdio>
+
 #include "clang/Tooling/CommonOptionsParser.h"
 #include "clang/Tooling/Tooling.h"
+#include "cpp_formatting/trailing_return_types_lib.h"
 #include "llvm/Support/CommandLine.h"
-#include "trailing_return_types_lib.h"
-
-#include <cstdio>
 
 using namespace clang::tooling;
 using namespace llvm;
@@ -25,8 +25,7 @@ std::string detectClangResourceDir() {
   if (!F) return {};
   char Buf[512];
   std::string Result;
-  while (fgets(Buf, sizeof(Buf), F))
-    Result += Buf;
+  while (fgets(Buf, sizeof(Buf), F)) Result += Buf;
   pclose(F);
   while (!Result.empty() && (Result.back() == '\n' || Result.back() == '\r'))
     Result.pop_back();
@@ -53,17 +52,18 @@ int main(int argc, const char** argv) {
   CommonOptionsParser& OptionsParser = ExpectedParser.get();
   ClangTool Tool(OptionsParser.getCompilations(),
                  OptionsParser.getSourcePathList());
-  Tool.appendArgumentsAdjuster([](const std::vector<std::string> &Args, StringRef Filename) {
-    std::vector<std::string> AdjustedArgs;
-    for (const auto &Arg : Args) {
-      // Strip the offending Bazel/GCC flag
-      if (Arg == "-fno-canonical-system-headers") {
-          continue;
-      }
-      AdjustedArgs.push_back(Arg);
-    }
-    return AdjustedArgs;
-  });
+  Tool.appendArgumentsAdjuster(
+      [](const std::vector<std::string>& Args, StringRef Filename) {
+        std::vector<std::string> AdjustedArgs;
+        for (const auto& Arg : Args) {
+          // Strip the offending Bazel/GCC flag
+          if (Arg == "-fno-canonical-system-headers") {
+            continue;
+          }
+          AdjustedArgs.push_back(Arg);
+        }
+        return AdjustedArgs;
+      });
   // Automatically supply the host Clang resource directory so the tool can
   // find built-in headers (stddef.h etc.) without requiring the user to pass
   // --extra-arg=-resource-dir=... manually.  Skip if the compilation database

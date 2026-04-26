@@ -1,4 +1,5 @@
-#pragma once
+#ifndef CPP_FORMATTING_TRAILING_RETURN_TYPES_LIB_H_
+#define CPP_FORMATTING_TRAILING_RETURN_TYPES_LIB_H_
 
 #include <memory>
 #include <string>
@@ -78,5 +79,8 @@ class TrailingReturnTypesAction : public clang::ASTFrontendAction {
 /// Parses \p Code as C++17, applies the trailing-return-type rewrite, and
 /// returns the transformed source.  Returns the original string if the tool
 /// fails to parse the input.
-std::string rewriteToTrailingReturnTypes(llvm::StringRef Code,
-                                         const std::vector<std::string> &Args = {"-std=c++17", "-xc++"});
+std::string rewriteToTrailingReturnTypes(
+    llvm::StringRef Code,
+    const std::vector<std::string>& Args = {"-std=c++17", "-xc++"});
+
+#endif  // CPP_FORMATTING_TRAILING_RETURN_TYPES_LIB_H_
