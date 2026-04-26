@@ -1,0 +1,14 @@
+module(name = "cpp_formatting", version = "0.1.0")
+
+# Good practice to include rules_cc when building C++ with Bzlmod
+bazel_dep(name = "rules_cc", version = "0.2.17")
+bazel_dep(name = "llvm-project", version = "17.0.3.bcr.4")
+bazel_dep(name = "googletest", version = "1.14.0.bcr.1")
+bazel_dep(name = "rules_shell", version = "0.4.1")
+
+# 2. Apply the patch using an override
+single_version_override(
+    module_name = "llvm-project",
+    patches = ["//patches:llvm_smallvector_cstdint.patch"],
+    patch_strip = 1,
+)

@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bazel build:*)",
+      "Bash(bazel test:*)",
+      "Read(//home/ubuntu/.cache/bazel/_bazel_ubuntu/eab0d61a99b6696edb3d2aff87b585e8/execroot/_main/bazel-out/k8-fastbuild/testlogs/trailing_return_types_test/**)",
+      "Read(//home/ubuntu/.cache/bazel/_bazel_ubuntu/eab0d61a99b6696edb3d2aff87b585e8/execroot/_main/bazel-out/k8-fastbuild/testlogs/trailing_return_types_integration_test/**)",
+      "Bash(bazel run:*)",
+      "Bash(clang -print-resource-dir)",
+      "Read(//usr/lib/llvm-21/lib/clang/21/include/**)",
+      "Read(//usr/lib/**)"
+    ]
+  }
+}

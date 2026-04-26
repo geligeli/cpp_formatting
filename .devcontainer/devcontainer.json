@@ -1,0 +1,19 @@
+{
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "GitHub.copilot-chat",
+                "GitHub.copilot",
+                "BazelBuild.vscode-bazel",
+                "llvm-vs-code-extensions.vscode-clangd",
+                "ms-vscode.cpptools",
+                "Anthropic.claude-code"
+            ]
+        }
+    },
+    "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+    "workspaceFolder": "/workspace"
+}
