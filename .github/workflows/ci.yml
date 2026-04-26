@@ -17,17 +17,18 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .bazel_cache
-          key: bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock') }}
+          key: bazel-repo-cache-ci-${{ runner.os }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock') }}-${{ github.run_id }}
           restore-keys: |
-            bazel-${{ runner.os }}-
+            bazel-repo-cache-ci-${{ runner.os }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock') }}-
+            bazel-repo-cache-ci-${{ runner.os }}-
 
       - name: Cache Bazel Disk Cache
         uses: actions/cache@v4
         with:
           path: .disk_cache
-          key: bazel-${{ runner.os }}
+          key: bazel-disk-cache-ci-${{ runner.os }}-${{ github.run_id }}
           restore-keys: |
-            bazel-${{ runner.os }}
+            bazel-disk-cache-ci-${{ runner.os }}-
 
       - name: Build and test in devcontainer
         uses: devcontainers/ci@v0.3
