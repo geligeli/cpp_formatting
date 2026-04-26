@@ -20,7 +20,7 @@ namespace {
 
 /// Run `clang -print-resource-dir` and return the trimmed path, or an empty
 /// string if the command is unavailable or fails.
-std::string detectClangResourceDir() {
+auto detectClangResourceDir() -> std::string {
   FILE* F = popen("clang -print-resource-dir 2>/dev/null", "r");
   if (!F) return {};
   char Buf[512];
@@ -35,14 +35,14 @@ std::string detectClangResourceDir() {
 struct ActionFactory : FrontendActionFactory {
   OutputMode Mode;
   explicit ActionFactory(OutputMode M) : Mode(M) {}
-  std::unique_ptr<clang::FrontendAction> create() override {
+  auto create() -> std::unique_ptr<clang::FrontendAction> override {
     return std::make_unique<TrailingReturnTypesAction>(Mode);
   }
 };
 
 }  // namespace
 
-int main(int argc, const char** argv) {
+auto main(int argc, const char** argv) -> int {
   auto ExpectedParser =
       CommonOptionsParser::create(argc, argv, TrailingReturnTypesCategory);
   if (!ExpectedParser) {

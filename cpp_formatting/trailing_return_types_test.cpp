@@ -7,7 +7,7 @@
 // ---------------------------------------------------------------------------
 
 // Thin wrapper so tests read as: rewrite("...") == "..."
-static std::string rewrite(const char* code) {
+static auto rewrite(const char* code) -> std::string {
   return rewriteToTrailingReturnTypes(code, {"-std=c++20", "-xc++"});
 }
 

@@ -62,8 +62,8 @@ class TrailingReturnTypesAction : public clang::ASTFrontendAction {
 
   void EndSourceFileAction() override;
 
-  std::unique_ptr<clang::ASTConsumer> CreateASTConsumer(
-      clang::CompilerInstance& CI, llvm::StringRef File) override;
+  auto CreateASTConsumer(
+      clang::CompilerInstance& CI, llvm::StringRef File) -> std::unique_ptr<clang::ASTConsumer> override;
 
  private:
   OutputMode Mode;
@@ -79,8 +79,8 @@ class TrailingReturnTypesAction : public clang::ASTFrontendAction {
 /// Parses \p Code as C++17, applies the trailing-return-type rewrite, and
 /// returns the transformed source.  Returns the original string if the tool
 /// fails to parse the input.
-std::string rewriteToTrailingReturnTypes(
+auto rewriteToTrailingReturnTypes(
     llvm::StringRef Code,
-    const std::vector<std::string>& Args = {"-std=c++17", "-xc++"});
+    const std::vector<std::string>& Args = {"-std=c++17", "-xc++"}) -> std::string;
 
 #endif  // CPP_FORMATTING_TRAILING_RETURN_TYPES_LIB_H_
