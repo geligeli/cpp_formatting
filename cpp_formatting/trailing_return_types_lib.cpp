@@ -19,7 +19,8 @@ using namespace clang::tooling;
 /// own sigil (`&`) as their local begin; the pointee's location is stored in
 /// the next TypeLoc in the chain.  Iterating the chain and taking the minimum
 /// gives the true start of the written type.
-static auto getTypeLocLeftmostBegin(TypeLoc TL, SourceManager &SM) -> SourceLocation {
+static auto getTypeLocLeftmostBegin(TypeLoc TL, SourceManager& SM)
+    -> SourceLocation {
   SourceLocation Best;
   unsigned BestOffset = UINT_MAX;
   for (TypeLoc Cur = TL; !Cur.isNull(); Cur = Cur.getNextTypeLoc()) {
@@ -39,8 +40,8 @@ static auto getTypeLocLeftmostBegin(TypeLoc TL, SourceManager &SM) -> SourceLoca
 /// qualifier keywords.  This is needed because Clang's QualifiedTypeLoc
 /// does not extend its source range to cover leading qualifier keywords;
 /// the range begins at the unqualified type (e.g. the `int` in `const int*`).
-static auto skipQualifiersBackward(SourceLocation Start,
-                                             SourceManager& SM) -> SourceLocation {
+static auto skipQualifiersBackward(SourceLocation Start, SourceManager& SM)
+    -> SourceLocation {
   bool Inv = false;
   FileID FID = SM.getFileID(Start);
   llvm::StringRef Buf = SM.getBufferData(FID, &Inv);
@@ -175,8 +176,9 @@ void TrailingReturnTypesAction::EndSourceFileAction() {
   }
 }
 
-auto TrailingReturnTypesAction::CreateASTConsumer(
-    CompilerInstance& CI, StringRef /*File*/) -> std::unique_ptr<ASTConsumer> {
+auto TrailingReturnTypesAction::CreateASTConsumer(CompilerInstance& CI,
+                                                  StringRef /*File*/)
+    -> std::unique_ptr<ASTConsumer> {
   TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
   registerTrailingReturnMatchers(Finder, Callback);
   return Finder.newASTConsumer();
@@ -200,8 +202,8 @@ class CaptureAction : public ASTFrontendAction {
     TheRewriter.getEditBuffer(SM.getMainFileID()).write(OS);
   }
 
-  auto CreateASTConsumer(CompilerInstance& CI,
-                                                 StringRef /*File*/) -> std::unique_ptr<ASTConsumer> override {
+  auto CreateASTConsumer(CompilerInstance& CI, StringRef /*File*/)
+      -> std::unique_ptr<ASTConsumer> override {
     TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
     registerTrailingReturnMatchers(Finder, Callback);
     return Finder.newASTConsumer();
@@ -221,7 +223,8 @@ class CaptureAction : public ASTFrontendAction {
 // ---------------------------------------------------------------------------
 
 auto rewriteToTrailingReturnTypes(llvm::StringRef Code,
-const std::vector<std::string> &Args) -> std::string {
+                                  const std::vector<std::string>& Args)
+    -> std::string {
   std::string Output;
   bool Success = runToolOnCodeWithArgs(std::make_unique<CaptureAction>(Output),
                                        Code, Args);

@@ -3,8 +3,8 @@ int add(int a, int b) { return a + b; }
 double scale(double x) { return x * 2.0; }
 
 const int* sentinel() {
-    static int val = -1;
-    return &val;
+  static int val = -1;
+  return &val;
 }
 
 void reset(int& x) { x = 0; }

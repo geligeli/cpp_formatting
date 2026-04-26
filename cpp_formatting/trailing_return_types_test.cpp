@@ -1,6 +1,6 @@
-#include "cpp_formatting/trailing_return_types_lib.h"
-
 #include <gtest/gtest.h>
+
+#include "cpp_formatting/trailing_return_types_lib.h"
 
 // ---------------------------------------------------------------------------
 // Helper
