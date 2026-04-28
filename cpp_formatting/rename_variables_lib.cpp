@@ -364,6 +364,23 @@ auto RenameAllGlobalVariables(VariableRenameCallback CB, OutputMode Mode,
 }
 
 // ---------------------------------------------------------------------------
+// Source ordering helper
+// ---------------------------------------------------------------------------
+
+auto orderSourcesForRename(const std::vector<std::string>& SourcePaths)
+    -> std::vector<std::string> {
+  std::vector<std::string> sources, headers;
+  for (const auto& P : SourcePaths) {
+    llvm::StringRef ext = llvm::StringRef(P).rsplit('.').second;
+    (ext == "h" || ext == "hh" || ext == "hpp" || ext == "hxx" ? headers
+                                                               : sources)
+        .push_back(P);
+  }
+  sources.insert(sources.end(), headers.begin(), headers.end());
+  return sources;
+}
+
+// ---------------------------------------------------------------------------
 // Test helper
 // ---------------------------------------------------------------------------
 

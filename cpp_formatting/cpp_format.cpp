@@ -234,7 +234,8 @@ auto main(int argc, const char** argv) -> int {
       return newName != name;
     };
 
-    ClangTool Tool(OptionsParser.getCompilations(), SourcePaths);
+    ClangTool Tool(OptionsParser.getCompilations(),
+                   orderSourcesForRename(SourcePaths));
     applyArgumentAdjusters(Tool, ResourceDir);
 
     std::unique_ptr<FrontendActionFactory> factory;

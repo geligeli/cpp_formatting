@@ -100,6 +100,21 @@ auto RenameAllGlobalVariables(VariableRenameCallback CB,
     -> std::unique_ptr<clang::tooling::FrontendActionFactory>;
 
 // ---------------------------------------------------------------------------
+// Source ordering helper
+// ---------------------------------------------------------------------------
+
+/// Returns \p SourcePaths reordered so that header files (.h/.hh/.hpp/.hxx)
+/// come after all non-header files, preserving relative order within each
+/// group.
+///
+/// This ordering is required for correct in-place multi-file renaming: each
+/// implementation file must be processed while the header still carries its
+/// original names so that uses can be collected and rewritten; the header is
+/// renamed last so its declaration sites are updated after all use sites.
+auto orderSourcesForRename(const std::vector<std::string>& SourcePaths)
+    -> std::vector<std::string>;
+
+// ---------------------------------------------------------------------------
 // Test helper
 // ---------------------------------------------------------------------------
 

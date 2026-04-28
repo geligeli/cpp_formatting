@@ -106,7 +106,7 @@ auto main(int argc, const char** argv) -> int {
   };
 
   ClangTool Tool(OptionsParser.getCompilations(),
-                 OptionsParser.getSourcePathList());
+                 orderSourcesForRename(OptionsParser.getSourcePathList()));
 
   Tool.appendArgumentsAdjuster(
       [](const std::vector<std::string>& Args, StringRef) {
