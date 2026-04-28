@@ -223,6 +223,91 @@ bazel run //cpp_formatting:cpp_format -- \
 
 ---
 
+## Using `cpp_format` as a pre-commit hook
+
+### 1. Install the binary
+
+Download the latest `cpp_format-linux-x86_64` from the [Releases](../../releases) page and place it somewhere on your `PATH`:
+
+```sh
+curl -L -o ~/.local/bin/cpp_format \
+  https://github.com/<owner>/<repo>/releases/latest/download/cpp_format-linux-x86_64
+chmod +x ~/.local/bin/cpp_format
+```
+
+### 2. Generate a compilation database
+
+`cpp_format` uses Clang to parse your source files and therefore needs to know the compiler flags for each file. The easiest way to provide them is via a `compile_commands.json` in your project root, which `cpp_format` auto-detects.
+
+- **CMake:** `cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ...`
+- **Bazel (Hedron plugin):** `bazel run @hedron_compile_commands//:refresh_all`
+- **Bear:** `bear -- make` (or your build command)
+
+If you do not have a `compile_commands.json` you can pass compiler flags directly — see the wrapper script approach below.
+
+### 3. Add a config file
+
+Commit a `cpp_format.yaml` at the root of your repository:
+
+```yaml
+# cpp_format.yaml
+trailing_return_types: true
+
+normalize_variables:
+  - scope: member
+    style: snake_case
+  - scope: global
+    style: snake_case
+```
+
+### 4. Add the hook to `.pre-commit-config.yaml`
+
+**With `compile_commands.json` (recommended):**
+
+```yaml
+repos:
+  - repo: local
+    hooks:
+      - id: cpp-format
+        name: cpp_format
+        entry: cpp_format --config=cpp_format.yaml --in-place
+        language: system
+        files: \.(h|cpp)$
+```
+
+pre-commit appends the list of staged files as positional arguments; `cpp_format` picks up `compile_commands.json` automatically to resolve include paths and compiler flags.
+
+**Without `compile_commands.json` — wrapper script:**
+
+If you cannot generate a `compile_commands.json`, create a small wrapper script (e.g. `tools/cpp_format_hook.sh`) that appends the required compiler flags:
+
+```sh
+#!/usr/bin/env bash
+# tools/cpp_format_hook.sh
+exec cpp_format --config=cpp_format.yaml --in-place "$@" -- -std=c++17 -Iinclude
+```
+
+Then reference the script in your hook:
+
+```yaml
+repos:
+  - repo: local
+    hooks:
+      - id: cpp-format
+        name: cpp_format
+        entry: tools/cpp_format_hook.sh
+        language: script
+        files: \.(h|cpp)$
+```
+
+### Running pre-commit manually
+
+```sh
+pre-commit run cpp-format --all-files
+```
+
+---
+
 ## Running all tests
 
 ```sh
