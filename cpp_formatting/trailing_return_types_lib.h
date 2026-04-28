@@ -7,21 +7,13 @@
 #include "clang/ASTMatchers/ASTMatchFinder.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Rewrite/Core/Rewriter.h"
+#include "cpp_formatting/output_mode.h"
 #include "llvm/ADT/StringRef.h"
 
 namespace clang {
 class ASTConsumer;
 class CompilerInstance;
 }  // namespace clang
-
-// ---------------------------------------------------------------------------
-// Output mode for TrailingReturnTypesAction
-// ---------------------------------------------------------------------------
-
-enum class OutputMode {
-  DryRun,   ///< Print rewritten source to stdout (default).
-  InPlace,  ///< Overwrite the input file on disk.
-};
 
 // ---------------------------------------------------------------------------
 // TrailingReturnCallback

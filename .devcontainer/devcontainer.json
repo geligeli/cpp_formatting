@@ -10,7 +10,7 @@
                 "BazelBuild.vscode-bazel",
                 "llvm-vs-code-extensions.vscode-clangd",
                 "ms-vscode.cpptools",
-                "Anthropic.claude-code"
+                "anthropic.claude-code"
             ]
         }
     },

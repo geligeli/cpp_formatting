@@ -8,7 +8,17 @@
       "Bash(bazel run:*)",
       "Bash(clang -print-resource-dir)",
       "Read(//usr/lib/llvm-21/lib/clang/21/include/**)",
-      "Read(//usr/lib/**)"
+      "Read(//usr/lib/**)",
+      "Read(//root/.cache/**)",
+      "Read(//root/**)",
+      "Read(//usr/local/bin/**)",
+      "Read(//home/geli/**)",
+      "Read(//home/geli/.local/**)",
+      "Read(//mnt/**)",
+      "Read(//home/ubuntu/.cache/bazel/_bazel_ubuntu/eab0d61a99b6696edb3d2aff87b585e8/execroot/_main/bazel-out/k8-fastbuild/testlogs/cpp_formatting/rename_variables_test/**)",
+      "Read(//home/ubuntu/.cache/bazel/_bazel_ubuntu/eab0d61a99b6696edb3d2aff87b585e8/execroot/_main/bazel-out/k8-fastbuild/testlogs/cpp_formatting/naming_convention_test/**)",
+      "Bash(chmod +x /workspace/cpp_formatting/normalize_variables_integration_test.sh)",
+      "Read(//home/ubuntu/.cache/bazel/_bazel_ubuntu/eab0d61a99b6696edb3d2aff87b585e8/execroot/_main/bazel-out/k8-fastbuild/testlogs/cpp_formatting/normalize_variables_integration_test/**)"
     ]
   }
 }

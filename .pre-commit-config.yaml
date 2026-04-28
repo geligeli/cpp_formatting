@@ -1,6 +1,13 @@
 repos:
   - repo: local
     hooks:
+      - id: clang-tidy-header-guards
+        name: Clang-Tidy (Header Guards)
+        # Bypasses the compilation database with '--' and applies the fix
+        entry: clang-tidy -checks='-*,readability-header-guards' --fix --
+        language: system
+        # Restrict this purely to header files
+        files: \.(h|hpp|hh|hxx|cuh)$
       - id: clang-format
         name: Clang Format
         entry: clang-format -i -style=file
