@@ -10,14 +10,14 @@
 // ---------------------------------------------------------------------------
 
 enum class NamingStyle {
-  SnakeCase,          // variable, snake_case
-  LeadingUnderscore,  // _variable, _snake_case
-  TrailingUnderscore, // variable_, snake_case_
-  MemberPrefix,       // m_variable, m_snake_case
-  CamelCase,          // camelCase
-  UpperCamelCase,     // UpperCamelCase
-  UpperSnakeCase,     // UPPER_SNAKE_CASE
-  KConstant,          // kSomeConstant
+  SnakeCase,           // variable, snake_case
+  LeadingUnderscore,   // _variable, _snake_case
+  TrailingUnderscore,  // variable_, snake_case_
+  MemberPrefix,        // m_variable, m_snake_case
+  CamelCase,           // camelCase
+  UpperCamelCase,      // UpperCamelCase
+  UpperSnakeCase,      // UPPER_SNAKE_CASE
+  KConstant,           // kSomeConstant
 };
 
 // ---------------------------------------------------------------------------
@@ -30,7 +30,8 @@ enum class NamingStyle {
 std::vector<std::string> splitIntoWords(std::string_view name);
 
 // Join lowercase word tokens into the requested naming style.
-std::string formatName(const std::vector<std::string>& words, NamingStyle style);
+std::string formatName(const std::vector<std::string>& words,
+                       NamingStyle style);
 
 // Convenience: split then reformat.
 std::string renameToStyle(std::string_view name, NamingStyle style);
@@ -43,7 +44,8 @@ std::string renameToStyle(std::string_view name, NamingStyle style);
 // Returns false if unrecognised.
 bool parseNamingStyle(std::string_view keyword, NamingStyle& out);
 
-// Return the canonical keyword string for a style (inverse of parseNamingStyle).
+// Return the canonical keyword string for a style (inverse of
+// parseNamingStyle).
 std::string_view namingStyleKeyword(NamingStyle style);
 
 #endif  // CPP_FORMATTING_NAMING_CONVENTION_H_

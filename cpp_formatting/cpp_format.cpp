@@ -256,7 +256,8 @@ auto main(int argc, const char** argv) -> int {
   }
 
   // Final pass: trailing_return_types (runs after variable renames so it sees
-  // already-renamed identifiers, though in practice these passes are independent).
+  // already-renamed identifiers, though in practice these passes are
+  // independent).
   if (cfg.trailing_return_types) {
     ClangTool Tool(OptionsParser.getCompilations(), SourcePaths);
     applyArgumentAdjusters(Tool, ResourceDir);

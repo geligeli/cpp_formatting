@@ -28,19 +28,19 @@ static VariableRenameCallback renameOne(std::string from, std::string to) {
 static auto rewriteMember(const char* code, VariableRenameCallback cb)
     -> std::string {
   return rewriteVariableNames(code, std::move(cb), VariableScope::Member,
-                               {"-std=c++20", "-xc++"});
+                              {"-std=c++20", "-xc++"});
 }
 
 static auto rewriteLocal(const char* code, VariableRenameCallback cb)
     -> std::string {
   return rewriteVariableNames(code, std::move(cb), VariableScope::Local,
-                               {"-std=c++20", "-xc++"});
+                              {"-std=c++20", "-xc++"});
 }
 
 static auto rewriteGlobal(const char* code, VariableRenameCallback cb)
     -> std::string {
   return rewriteVariableNames(code, std::move(cb), VariableScope::Global,
-                               {"-std=c++20", "-xc++"});
+                              {"-std=c++20", "-xc++"});
 }
 
 // ---------------------------------------------------------------------------
@@ -48,24 +48,22 @@ static auto rewriteGlobal(const char* code, VariableRenameCallback cb)
 // ---------------------------------------------------------------------------
 
 TEST(RenameMemberVariables, DeclarationAndImplicitThis) {
-  EXPECT_EQ(
-      rewriteMember("struct S { int value_; int get() const { return value_; } };",
-                    renameOne("value_", "count_")),
-      "struct S { int count_; int get() const { return count_; } };");
+  EXPECT_EQ(rewriteMember(
+                "struct S { int value_; int get() const { return value_; } };",
+                renameOne("value_", "count_")),
+            "struct S { int count_; int get() const { return count_; } };");
 }
 
 TEST(RenameMemberVariables, DotAccess) {
-  EXPECT_EQ(
-      rewriteMember("struct S { int x_; }; int f(S s) { return s.x_; }",
-                    renameOne("x_", "y_")),
-      "struct S { int y_; }; int f(S s) { return s.y_; }");
+  EXPECT_EQ(rewriteMember("struct S { int x_; }; int f(S s) { return s.x_; }",
+                          renameOne("x_", "y_")),
+            "struct S { int y_; }; int f(S s) { return s.y_; }");
 }
 
 TEST(RenameMemberVariables, ArrowAccess) {
-  EXPECT_EQ(
-      rewriteMember("struct S { int x_; }; int f(S* s) { return s->x_; }",
-                    renameOne("x_", "y_")),
-      "struct S { int y_; }; int f(S* s) { return s->y_; }");
+  EXPECT_EQ(rewriteMember("struct S { int x_; }; int f(S* s) { return s->x_; }",
+                          renameOne("x_", "y_")),
+            "struct S { int y_; }; int f(S* s) { return s->y_; }");
 }
 
 TEST(RenameMemberVariables, MultipleMembers) {
@@ -75,8 +73,9 @@ TEST(RenameMemberVariables, MultipleMembers) {
 
 TEST(RenameMemberVariables, SelectiveRename) {
   // Only "a_" is renamed; "b_" is unchanged.
-  EXPECT_EQ(rewriteMember("struct S { int a_; int b_; };", renameOne("a_", "z_")),
-            "struct S { int z_; int b_; };");
+  EXPECT_EQ(
+      rewriteMember("struct S { int a_; int b_; };", renameOne("a_", "z_")),
+      "struct S { int z_; int b_; };");
 }
 
 TEST(RenameMemberVariables, CallbackReturnsFalse) {
@@ -87,19 +86,15 @@ TEST(RenameMemberVariables, CallbackReturnsFalse) {
 }
 
 TEST(RenameMemberVariables, AssignmentInMethod) {
-  EXPECT_EQ(
-      rewriteMember(
-          "struct S { int x_; void set(int v) { x_ = v; } };",
-          renameOne("x_", "val_")),
-      "struct S { int val_; void set(int v) { val_ = v; } };");
+  EXPECT_EQ(rewriteMember("struct S { int x_; void set(int v) { x_ = v; } };",
+                          renameOne("x_", "val_")),
+            "struct S { int val_; void set(int v) { val_ = v; } };");
 }
 
 TEST(RenameMemberVariables, StaticDataMember) {
-  EXPECT_EQ(
-      rewriteMember(
-          "struct S { static int count_; }; int S::count_ = 0;",
-          renameOne("count_", "total_")),
-      "struct S { static int total_; }; int S::total_ = 0;");
+  EXPECT_EQ(rewriteMember("struct S { static int count_; }; int S::count_ = 0;",
+                          renameOne("count_", "total_")),
+            "struct S { static int total_; }; int S::total_ = 0;");
 }
 
 // ---------------------------------------------------------------------------
@@ -107,13 +102,14 @@ TEST(RenameMemberVariables, StaticDataMember) {
 // ---------------------------------------------------------------------------
 
 TEST(RenameLocalVariables, BasicLocal) {
-  EXPECT_EQ(rewriteLocal("int f() { int x = 1; return x; }", renameOne("x", "y")),
-            "int f() { int y = 1; return y; }");
+  EXPECT_EQ(
+      rewriteLocal("int f() { int x = 1; return x; }", renameOne("x", "y")),
+      "int f() { int y = 1; return y; }");
 }
 
 TEST(RenameLocalVariables, MultipleLocals) {
   EXPECT_EQ(rewriteLocal("int f() { int a = 1; int b = 2; return a + b; }",
-                          addSuffix("_")),
+                         addSuffix("_")),
             "int f() { int a_ = 1; int b_ = 2; return a_ + b_; }");
 }
 
@@ -135,10 +131,9 @@ TEST(RenameLocalVariables, DoesNotRenameMember) {
 
 TEST(RenameLocalVariables, LocalShadowsGlobal) {
   // Only the local "x" is renamed; the global "x" is untouched.
-  EXPECT_EQ(
-      rewriteLocal("int x = 0; int f() { int x = 1; return x; }",
-                   renameOne("x", "y")),
-      "int x = 0; int f() { int y = 1; return y; }");
+  EXPECT_EQ(rewriteLocal("int x = 0; int f() { int x = 1; return x; }",
+                         renameOne("x", "y")),
+            "int x = 0; int f() { int y = 1; return y; }");
 }
 
 // ---------------------------------------------------------------------------
@@ -147,7 +142,7 @@ TEST(RenameLocalVariables, LocalShadowsGlobal) {
 
 TEST(RenameGlobalVariables, BasicGlobal) {
   EXPECT_EQ(rewriteGlobal("int counter = 0; int get() { return counter; }",
-                           renameOne("counter", "total")),
+                          renameOne("counter", "total")),
             "int total = 0; int get() { return total; }");
 }
 
@@ -186,11 +181,9 @@ TEST(RenameGlobalVariables, NamespaceScope) {
 TEST(RenameMemberVariables, TemplateMemberRenamedInInstantiation) {
   // The MemberExpr in non-template code references the instantiated FieldDecl;
   // the tool must walk up the instantiation chain to find the rename entry.
-  EXPECT_EQ(
-      rewriteMember(
-          "template<typename T> struct Box { T val_; };\n"
-          "int f() { Box<int> b; return b.val_; }",
-          renameOne("val_", "value_")),
-      "template<typename T> struct Box { T value_; };\n"
-      "int f() { Box<int> b; return b.value_; }");
+  EXPECT_EQ(rewriteMember("template<typename T> struct Box { T val_; };\n"
+                          "int f() { Box<int> b; return b.val_; }",
+                          renameOne("val_", "value_")),
+            "template<typename T> struct Box { T value_; };\n"
+            "int f() { Box<int> b; return b.value_; }");
 }

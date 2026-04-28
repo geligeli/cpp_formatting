@@ -9,7 +9,7 @@ void setup(Rect& r, int w, int h) {
   ++Rect::m_count;
 
   // Pointer-to-member formation: DeclRefExpr referring to a FieldDecl.
-  int Rect::*pw = &Rect::m_width;
+  int Rect::* pw = &Rect::m_width;
   r.*pw = w;
 
   // Lambda body: member access inside a closure must be renamed.

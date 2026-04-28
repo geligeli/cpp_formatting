@@ -339,7 +339,7 @@ TEST(WiredOperatorIssue, WithChrono) {
 }
 
 TEST(TrailingReturnTypes, DefaultedComparisonOperator) {
- // clang-format off
+  // clang-format off
   EXPECT_EQ(rewrite(
                 R"cpp(
 #include <compare>
@@ -353,5 +353,5 @@ struct F {
   auto operator<=>(const F&) const = default;
 };
 )cpp");
- // clang-format on
+  // clang-format on
 }

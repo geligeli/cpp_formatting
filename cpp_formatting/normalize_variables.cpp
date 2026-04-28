@@ -15,13 +15,13 @@ static cl::OptionCategory NormalizeVarsCategory("normalize-variables options");
 
 static cl::opt<std::string> StyleOpt(
     "style",
-    cl::desc("Target naming style. One of: snake_case, _leading, trailing_, "
-             "m_prefix, camelCase, UpperCamelCase, UPPER_SNAKE_CASE, kConstant"),
+    cl::desc(
+        "Target naming style. One of: snake_case, _leading, trailing_, "
+        "m_prefix, camelCase, UpperCamelCase, UPPER_SNAKE_CASE, kConstant"),
     cl::Required, cl::cat(NormalizeVarsCategory));
 
 static cl::opt<std::string> ScopeOpt(
-    "scope",
-    cl::desc("Variable scope to rename: member, local, or global"),
+    "scope", cl::desc("Variable scope to rename: member, local, or global"),
     cl::init("member"), cl::cat(NormalizeVarsCategory));
 
 static cl::opt<bool> InPlace("in-place",
@@ -92,8 +92,7 @@ auto main(int argc, const char** argv) -> int {
     return 1;
   }
 
-  const OutputMode mode =
-      InPlace ? OutputMode::InPlace : OutputMode::DryRun;
+  const OutputMode mode = InPlace ? OutputMode::InPlace : OutputMode::DryRun;
 
   // Resolve source paths to real paths so shouldCollect() can match them
   // against the file entries recorded in Clang's SourceManager when an
@@ -101,7 +100,7 @@ auto main(int argc, const char** argv) -> int {
   FileSet collectFrom = buildFileSet(OptionsParser.getSourcePathList());
 
   VariableRenameCallback cb = [style](std::string_view name,
-                                     std::string& newName) -> bool {
+                                      std::string& newName) -> bool {
     newName = renameToStyle(name, style);
     return newName != name;
   };
@@ -133,16 +132,16 @@ auto main(int argc, const char** argv) -> int {
   std::unique_ptr<FrontendActionFactory> factory;
   switch (scope) {
     case VariableScope::Member:
-      factory = RenameAllMemberVariables(std::move(cb), mode,
-                                         std::move(collectFrom));
+      factory =
+          RenameAllMemberVariables(std::move(cb), mode, std::move(collectFrom));
       break;
     case VariableScope::Local:
-      factory = RenameAllLocalVariables(std::move(cb), mode,
-                                        std::move(collectFrom));
+      factory =
+          RenameAllLocalVariables(std::move(cb), mode, std::move(collectFrom));
       break;
     case VariableScope::Global:
-      factory = RenameAllGlobalVariables(std::move(cb), mode,
-                                         std::move(collectFrom));
+      factory =
+          RenameAllGlobalVariables(std::move(cb), mode, std::move(collectFrom));
       break;
   }
   return Tool.run(factory.get());

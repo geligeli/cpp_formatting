@@ -7,8 +7,7 @@
 // ---------------------------------------------------------------------------
 
 TEST(SplitIntoWords, PlainVariable) {
-  EXPECT_EQ(splitIntoWords("variable"),
-            (std::vector<std::string>{"variable"}));
+  EXPECT_EQ(splitIntoWords("variable"), (std::vector<std::string>{"variable"}));
 }
 
 TEST(SplitIntoWords, LeadingUnderscore) {
@@ -231,10 +230,10 @@ TEST(RenameToStyle, RoundTrips) {
 
 TEST(NamingStyleKeyword, ParseRoundTrip) {
   constexpr NamingStyle kAllStyles[] = {
-      NamingStyle::SnakeCase,      NamingStyle::LeadingUnderscore,
+      NamingStyle::SnakeCase,          NamingStyle::LeadingUnderscore,
       NamingStyle::TrailingUnderscore, NamingStyle::MemberPrefix,
-      NamingStyle::CamelCase,      NamingStyle::UpperCamelCase,
-      NamingStyle::UpperSnakeCase, NamingStyle::KConstant,
+      NamingStyle::CamelCase,          NamingStyle::UpperCamelCase,
+      NamingStyle::UpperSnakeCase,     NamingStyle::KConstant,
   };
   for (NamingStyle s : kAllStyles) {
     NamingStyle parsed{};

@@ -68,8 +68,8 @@ static const VarDecl* primaryTemplateStaticMember(const VarDecl* VD) {
 // ---------------------------------------------------------------------------
 
 // Returns true if declarations at Loc should be entered into the rename map.
-// When CollectFrom is empty we replicate the original behaviour (main file only).
-// When non-empty we accept any file whose real path is in the set.
+// When CollectFrom is empty we replicate the original behaviour (main file
+// only). When non-empty we accept any file whose real path is in the set.
 static bool shouldCollect(SourceLocation Loc, SourceManager& SM,
                           const FileSet& CollectFrom) {
   if (CollectFrom.empty()) return SM.isWrittenInMainFile(Loc);
@@ -87,12 +87,17 @@ static bool shouldCollect(SourceLocation Loc, SourceManager& SM,
 
 using RenameMap = std::unordered_map<const Decl*, std::string>;
 
-class CollectRenamesVisitor : public RecursiveASTVisitor<CollectRenamesVisitor> {
+class CollectRenamesVisitor
+    : public RecursiveASTVisitor<CollectRenamesVisitor> {
  public:
   CollectRenamesVisitor(SourceManager& SM, const VariableRenameCallback& CB,
                         VariableScope Scope, RenameMap& Renames,
                         const FileSet& CollectFrom)
-      : SM(SM), CB(CB), Scope(Scope), Renames(Renames), CollectFrom(CollectFrom) {}
+      : SM(SM),
+        CB(CB),
+        Scope(Scope),
+        Renames(Renames),
+        CollectFrom(CollectFrom) {}
 
   bool VisitFieldDecl(FieldDecl* D) {
     collect(D);
@@ -205,7 +210,8 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
     if (!Key) return true;
     auto It = Renames.find(Key);
     if (It != Renames.end())
-      renameAt(RW, E->getMemberLoc(), E->getMemberDecl()->getName(), It->second);
+      renameAt(RW, E->getMemberLoc(), E->getMemberDecl()->getName(),
+               It->second);
     return true;
   }
 
@@ -223,12 +229,15 @@ class RenameVariablesConsumer : public ASTConsumer {
  public:
   RenameVariablesConsumer(Rewriter& RW, VariableRenameCallback CB,
                           VariableScope Scope, FileSet CollectFrom)
-      : RW(RW), CB(std::move(CB)), Scope(Scope), CollectFrom(std::move(CollectFrom)) {}
+      : RW(RW),
+        CB(std::move(CB)),
+        Scope(Scope),
+        CollectFrom(std::move(CollectFrom)) {}
 
   void HandleTranslationUnit(ASTContext& Ctx) override {
     RenameMap Renames;
     CollectRenamesVisitor Collector(Ctx.getSourceManager(), CB, Scope, Renames,
-                                   CollectFrom);
+                                    CollectFrom);
     Collector.TraverseDecl(Ctx.getTranslationUnitDecl());
     if (Renames.empty()) return;
     ApplyRenamesVisitor Applier(RW, Ctx.getSourceManager(), Renames);
@@ -254,11 +263,14 @@ struct RenameActionFactory : FrontendActionFactory {
 
   RenameActionFactory(VariableRenameCallback CB, VariableScope Scope,
                       OutputMode Mode, FileSet CollectFrom)
-      : CB(std::move(CB)), Scope(Scope), Mode(Mode),
+      : CB(std::move(CB)),
+        Scope(Scope),
+        Mode(Mode),
         CollectFrom(std::move(CollectFrom)) {}
 
   auto create() -> std::unique_ptr<FrontendAction> override {
-    return std::make_unique<RenameVariablesAction>(CB, Scope, Mode, CollectFrom);
+    return std::make_unique<RenameVariablesAction>(CB, Scope, Mode,
+                                                   CollectFrom);
   }
 };
 
@@ -281,9 +293,10 @@ class CaptureAction : public ASTFrontendAction {
   auto CreateASTConsumer(CompilerInstance& CI, StringRef)
       -> std::unique_ptr<ASTConsumer> override {
     TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
-    // Empty FileSet → collect from main file only (original unit-test behaviour).
+    // Empty FileSet → collect from main file only (original unit-test
+    // behaviour).
     return std::make_unique<RenameVariablesConsumer>(TheRewriter, CB, Scope,
-                                                    FileSet{});
+                                                     FileSet{});
   }
 
  private:
@@ -303,7 +316,9 @@ RenameVariablesAction::RenameVariablesAction(VariableRenameCallback CB,
                                              VariableScope Scope,
                                              OutputMode Mode,
                                              FileSet CollectFrom)
-    : CB(std::move(CB)), Scope(Scope), Mode(Mode),
+    : CB(std::move(CB)),
+      Scope(Scope),
+      Mode(Mode),
       CollectFrom(std::move(CollectFrom)) {}
 
 void RenameVariablesAction::EndSourceFileAction() {
@@ -320,7 +335,7 @@ auto RenameVariablesAction::CreateASTConsumer(CompilerInstance& CI, StringRef)
     -> std::unique_ptr<ASTConsumer> {
   TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
   return std::make_unique<RenameVariablesConsumer>(TheRewriter, CB, Scope,
-                                                  CollectFrom);
+                                                   CollectFrom);
 }
 
 // ---------------------------------------------------------------------------
@@ -328,21 +343,21 @@ auto RenameVariablesAction::CreateASTConsumer(CompilerInstance& CI, StringRef)
 // ---------------------------------------------------------------------------
 
 auto RenameAllMemberVariables(VariableRenameCallback CB, OutputMode Mode,
-                               FileSet CollectFrom)
+                              FileSet CollectFrom)
     -> std::unique_ptr<clang::tooling::FrontendActionFactory> {
   return std::make_unique<RenameActionFactory>(
       std::move(CB), VariableScope::Member, Mode, std::move(CollectFrom));
 }
 
 auto RenameAllLocalVariables(VariableRenameCallback CB, OutputMode Mode,
-                              FileSet CollectFrom)
+                             FileSet CollectFrom)
     -> std::unique_ptr<clang::tooling::FrontendActionFactory> {
   return std::make_unique<RenameActionFactory>(
       std::move(CB), VariableScope::Local, Mode, std::move(CollectFrom));
 }
 
 auto RenameAllGlobalVariables(VariableRenameCallback CB, OutputMode Mode,
-                               FileSet CollectFrom)
+                              FileSet CollectFrom)
     -> std::unique_ptr<clang::tooling::FrontendActionFactory> {
   return std::make_unique<RenameActionFactory>(
       std::move(CB), VariableScope::Global, Mode, std::move(CollectFrom));

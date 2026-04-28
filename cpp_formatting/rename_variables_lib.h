@@ -25,8 +25,9 @@ class CompilerInstance;
 // Absolute real paths of source files that the tool "owns".  When non-empty,
 // variable declarations are collected from any file whose real path is in this
 // set, not just the main file being compiled.  This lets the tool rename uses
-// in a .cpp even when the declaration lives in a header that is also in the set.
-// An empty FileSet falls back to the original behaviour (main-file-only collection).
+// in a .cpp even when the declaration lives in a header that is also in the
+// set. An empty FileSet falls back to the original behaviour (main-file-only
+// collection).
 using FileSet = std::unordered_set<std::string>;
 
 // ---------------------------------------------------------------------------
@@ -36,7 +37,8 @@ using FileSet = std::unordered_set<std::string>;
 /// Called once per canonical variable declaration.
 /// Populate \p new_name and return \c true to rename; return \c false to leave
 /// the variable unchanged.
-using VariableRenameCallback = std::function<bool(std::string_view, std::string&)>;
+using VariableRenameCallback =
+    std::function<bool(std::string_view, std::string&)>;
 
 // ---------------------------------------------------------------------------
 // Variable scope
@@ -80,21 +82,21 @@ class RenameVariablesAction : public clang::ASTFrontendAction {
 /// Returns a FrontendActionFactory suitable for \c ClangTool::run() that
 /// renames non-static member variables and static data members.
 auto RenameAllMemberVariables(VariableRenameCallback CB,
-                               OutputMode Mode = OutputMode::DryRun,
-                               FileSet CollectFrom = {})
+                              OutputMode Mode = OutputMode::DryRun,
+                              FileSet CollectFrom = {})
     -> std::unique_ptr<clang::tooling::FrontendActionFactory>;
 
 /// Returns a FrontendActionFactory that renames local variables and parameters.
 auto RenameAllLocalVariables(VariableRenameCallback CB,
-                              OutputMode Mode = OutputMode::DryRun,
-                              FileSet CollectFrom = {})
+                             OutputMode Mode = OutputMode::DryRun,
+                             FileSet CollectFrom = {})
     -> std::unique_ptr<clang::tooling::FrontendActionFactory>;
 
 /// Returns a FrontendActionFactory that renames file- and namespace-scope
 /// (global) variables.
 auto RenameAllGlobalVariables(VariableRenameCallback CB,
-                               OutputMode Mode = OutputMode::DryRun,
-                               FileSet CollectFrom = {})
+                              OutputMode Mode = OutputMode::DryRun,
+                              FileSet CollectFrom = {})
     -> std::unique_ptr<clang::tooling::FrontendActionFactory>;
 
 // ---------------------------------------------------------------------------
