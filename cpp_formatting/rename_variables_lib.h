@@ -2,13 +2,13 @@
 #define CPP_FORMATTING_RENAME_VARIABLES_LIB_H_
 
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_set>
 #include <vector>
 
-#include "clang/Rewrite/Core/Rewriter.h"
 #include "clang/Tooling/Tooling.h"
 #include "cpp_formatting/output_mode.h"
 #include "llvm/ADT/StringRef.h"
@@ -45,59 +45,116 @@ using VariableRenameCallback =
 // ---------------------------------------------------------------------------
 
 enum class VariableScope {
+  // Broad scopes
   Member,  ///< Non-static member variables (FieldDecl) and static data members.
   Local,   ///< Local variables and function parameters.
   Global,  ///< File- and namespace-scope variables (non-member, non-local).
+
+  // Fine-grained member scopes
+  StaticMember,  ///< Static data members only (VarDecl::isStaticDataMember).
+  ConstMember,   ///< Static data members that are const or constexpr.
+
+  // Fine-grained global scopes
+  StaticGlobal,  ///< File/namespace-scope vars declared with the static
+                 ///< keyword.
+  ConstGlobal,   ///< File/namespace-scope vars that are const or constexpr.
 };
 
 // ---------------------------------------------------------------------------
-// RenameVariablesAction
+// Pending rewrites — buffered in-place writes
 // ---------------------------------------------------------------------------
 
-/// Frontend action that renames variables within the given \p Scope.
-/// The callback is invoked once per canonical declaration; all declaration and
-/// use sites (DeclRefExpr, MemberExpr) in the main file are rewritten.
-class RenameVariablesAction : public clang::ASTFrontendAction {
+// Maps real absolute file paths to their fully rewritten content.  Populated
+// by RenameActionFactory during ClangTool::run(); written to disk atomically
+// by RenameActionFactory::flush() after the run completes.
+//
+// Buffering is what makes multi-file in-place renaming correct: every TU
+// compiles against the original on-disk source, so no TU ever sees partially
+// renamed headers from a previous TU.
+using PendingRewrites = std::map<std::string, std::string>;
+
+// ---------------------------------------------------------------------------
+// RenameActionFactory
+// ---------------------------------------------------------------------------
+
+/// Factory for ClangTool::run() that renames variables and buffers all
+/// in-place writes until flush() is called.
+///
+/// Usage:
+///   auto F = RenameAllMemberVariables(cb, OutputMode::InPlace, files);
+///   int rc = Tool.run(F.get());
+///   F->flush();   // write all changed files to disk atomically
+///   return rc;
+class RenameActionFactory : public clang::tooling::FrontendActionFactory {
  public:
-  RenameVariablesAction(VariableRenameCallback CB, VariableScope Scope,
-                        OutputMode Mode, FileSet CollectFrom = {});
+  RenameActionFactory(VariableRenameCallback CB, VariableScope Scope,
+                      OutputMode Mode, FileSet CollectFrom);
 
-  void EndSourceFileAction() override;
+  auto create() -> std::unique_ptr<clang::FrontendAction> override;
 
-  auto CreateASTConsumer(clang::CompilerInstance& CI, llvm::StringRef File)
-      -> std::unique_ptr<clang::ASTConsumer> override;
+  /// Write all buffered in-place rewrites to disk.  Must be called once after
+  /// ClangTool::run() completes.  No-op in DryRun mode.
+  void flush();
 
  private:
   VariableRenameCallback CB;
   VariableScope Scope;
   OutputMode Mode;
   FileSet CollectFrom;
-  clang::Rewriter TheRewriter;
+  PendingRewrites Pending;
 };
 
 // ---------------------------------------------------------------------------
 // Convenience factories
 // ---------------------------------------------------------------------------
 
-/// Returns a FrontendActionFactory suitable for \c ClangTool::run() that
-/// renames non-static member variables and static data members.
+/// Returns a RenameActionFactory that renames non-static member variables and
+/// static data members.
 auto RenameAllMemberVariables(VariableRenameCallback CB,
                               OutputMode Mode = OutputMode::DryRun,
                               FileSet CollectFrom = {})
-    -> std::unique_ptr<clang::tooling::FrontendActionFactory>;
+    -> std::unique_ptr<RenameActionFactory>;
 
-/// Returns a FrontendActionFactory that renames local variables and parameters.
+/// Returns a RenameActionFactory that renames local variables and parameters.
 auto RenameAllLocalVariables(VariableRenameCallback CB,
                              OutputMode Mode = OutputMode::DryRun,
                              FileSet CollectFrom = {})
-    -> std::unique_ptr<clang::tooling::FrontendActionFactory>;
+    -> std::unique_ptr<RenameActionFactory>;
 
-/// Returns a FrontendActionFactory that renames file- and namespace-scope
+/// Returns a RenameActionFactory that renames file- and namespace-scope
 /// (global) variables.
 auto RenameAllGlobalVariables(VariableRenameCallback CB,
                               OutputMode Mode = OutputMode::DryRun,
                               FileSet CollectFrom = {})
-    -> std::unique_ptr<clang::tooling::FrontendActionFactory>;
+    -> std::unique_ptr<RenameActionFactory>;
+
+/// Returns a RenameActionFactory that renames static data members only
+/// (excludes non-static field members).
+auto RenameAllStaticMemberVariables(VariableRenameCallback CB,
+                                    OutputMode Mode = OutputMode::DryRun,
+                                    FileSet CollectFrom = {})
+    -> std::unique_ptr<RenameActionFactory>;
+
+/// Returns a RenameActionFactory that renames static data members that are
+/// declared const or constexpr.
+auto RenameAllConstMemberVariables(VariableRenameCallback CB,
+                                   OutputMode Mode = OutputMode::DryRun,
+                                   FileSet CollectFrom = {})
+    -> std::unique_ptr<RenameActionFactory>;
+
+/// Returns a RenameActionFactory that renames file- and namespace-scope
+/// variables declared with the static keyword (internal linkage).
+auto RenameAllStaticGlobalVariables(VariableRenameCallback CB,
+                                    OutputMode Mode = OutputMode::DryRun,
+                                    FileSet CollectFrom = {})
+    -> std::unique_ptr<RenameActionFactory>;
+
+/// Returns a RenameActionFactory that renames file- and namespace-scope
+/// variables that are const or constexpr.
+auto RenameAllConstGlobalVariables(VariableRenameCallback CB,
+                                   OutputMode Mode = OutputMode::DryRun,
+                                   FileSet CollectFrom = {})
+    -> std::unique_ptr<RenameActionFactory>;
 
 // ---------------------------------------------------------------------------
 // Source ordering helper
@@ -107,10 +164,8 @@ auto RenameAllGlobalVariables(VariableRenameCallback CB,
 /// come after all non-header files, preserving relative order within each
 /// group.
 ///
-/// This ordering is required for correct in-place multi-file renaming: each
-/// implementation file must be processed while the header still carries its
-/// original names so that uses can be collected and rewritten; the header is
-/// renamed last so its declaration sites are updated after all use sites.
+/// Combined with PendingRewrites buffering this ensures that every TU sees
+/// the original on-disk source regardless of how many headers are in the list.
 auto orderSourcesForRename(const std::vector<std::string>& SourcePaths)
     -> std::vector<std::string>;
 

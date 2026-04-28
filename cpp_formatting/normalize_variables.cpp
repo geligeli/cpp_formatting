@@ -21,7 +21,9 @@ static cl::opt<std::string> StyleOpt(
     cl::Required, cl::cat(NormalizeVarsCategory));
 
 static cl::opt<std::string> ScopeOpt(
-    "scope", cl::desc("Variable scope to rename: member, local, or global"),
+    "scope",
+    cl::desc("Variable scope to rename: member, local, global, "
+             "static_member, const_member, static_global, const_global"),
     cl::init("member"), cl::cat(NormalizeVarsCategory));
 
 static cl::opt<bool> InPlace("in-place",
@@ -86,9 +88,19 @@ auto main(int argc, const char** argv) -> int {
     scope = VariableScope::Local;
   } else if (ScopeOpt == "global") {
     scope = VariableScope::Global;
+  } else if (ScopeOpt == "static_member") {
+    scope = VariableScope::StaticMember;
+  } else if (ScopeOpt == "const_member") {
+    scope = VariableScope::ConstMember;
+  } else if (ScopeOpt == "static_global") {
+    scope = VariableScope::StaticGlobal;
+  } else if (ScopeOpt == "const_global") {
+    scope = VariableScope::ConstGlobal;
   } else {
-    llvm::errs() << "Unknown scope '" << ScopeOpt
-                 << "'. Valid scopes: member, local, global\n";
+    llvm::errs()
+        << "Unknown scope '" << ScopeOpt
+        << "'. Valid scopes: member, local, global, "
+           "static_member, const_member, static_global, const_global\n";
     return 1;
   }
 
@@ -129,7 +141,7 @@ auto main(int argc, const char** argv) -> int {
         });
   }
 
-  std::unique_ptr<FrontendActionFactory> factory;
+  std::unique_ptr<RenameActionFactory> factory;
   switch (scope) {
     case VariableScope::Member:
       factory =
@@ -143,6 +155,24 @@ auto main(int argc, const char** argv) -> int {
       factory =
           RenameAllGlobalVariables(std::move(cb), mode, std::move(collectFrom));
       break;
+    case VariableScope::StaticMember:
+      factory = RenameAllStaticMemberVariables(std::move(cb), mode,
+                                               std::move(collectFrom));
+      break;
+    case VariableScope::ConstMember:
+      factory = RenameAllConstMemberVariables(std::move(cb), mode,
+                                              std::move(collectFrom));
+      break;
+    case VariableScope::StaticGlobal:
+      factory = RenameAllStaticGlobalVariables(std::move(cb), mode,
+                                               std::move(collectFrom));
+      break;
+    case VariableScope::ConstGlobal:
+      factory = RenameAllConstGlobalVariables(std::move(cb), mode,
+                                              std::move(collectFrom));
+      break;
   }
-  return Tool.run(factory.get());
+  int rc = Tool.run(factory.get());
+  factory->flush();
+  return rc;
 }

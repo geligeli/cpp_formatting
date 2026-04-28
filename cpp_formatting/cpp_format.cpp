@@ -221,9 +221,19 @@ auto main(int argc, const char** argv) -> int {
       scope = VariableScope::Local;
     } else if (rule.scope == "global") {
       scope = VariableScope::Global;
+    } else if (rule.scope == "static_member") {
+      scope = VariableScope::StaticMember;
+    } else if (rule.scope == "const_member") {
+      scope = VariableScope::ConstMember;
+    } else if (rule.scope == "static_global") {
+      scope = VariableScope::StaticGlobal;
+    } else if (rule.scope == "const_global") {
+      scope = VariableScope::ConstGlobal;
     } else {
       llvm::errs() << "Unknown scope '" << rule.scope
-                   << "'. Valid scopes: member, local, global\n";
+                   << "'. Valid scopes: member, local, global, "
+                      "static_member, const_member, static_global, "
+                      "const_global\n";
       return 1;
     }
 
@@ -238,7 +248,7 @@ auto main(int argc, const char** argv) -> int {
                    orderSourcesForRename(SourcePaths));
     applyArgumentAdjusters(Tool, ResourceDir);
 
-    std::unique_ptr<FrontendActionFactory> factory;
+    std::unique_ptr<RenameActionFactory> factory;
     switch (scope) {
       case VariableScope::Member:
         factory = RenameAllMemberVariables(std::move(cb), mode,
@@ -252,8 +262,25 @@ auto main(int argc, const char** argv) -> int {
         factory = RenameAllGlobalVariables(std::move(cb), mode,
                                            std::move(collectFrom));
         break;
+      case VariableScope::StaticMember:
+        factory = RenameAllStaticMemberVariables(std::move(cb), mode,
+                                                 std::move(collectFrom));
+        break;
+      case VariableScope::ConstMember:
+        factory = RenameAllConstMemberVariables(std::move(cb), mode,
+                                                std::move(collectFrom));
+        break;
+      case VariableScope::StaticGlobal:
+        factory = RenameAllStaticGlobalVariables(std::move(cb), mode,
+                                                 std::move(collectFrom));
+        break;
+      case VariableScope::ConstGlobal:
+        factory = RenameAllConstGlobalVariables(std::move(cb), mode,
+                                                std::move(collectFrom));
+        break;
     }
     if (int rc = Tool.run(factory.get())) return rc;
+    factory->flush();
   }
 
   // Final pass: trailing_return_types (runs after variable renames so it sees

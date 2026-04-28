@@ -43,6 +43,30 @@ static auto rewriteGlobal(const char* code, VariableRenameCallback cb)
                               {"-std=c++20", "-xc++"});
 }
 
+static auto rewriteStaticMember(const char* code, VariableRenameCallback cb)
+    -> std::string {
+  return rewriteVariableNames(code, std::move(cb), VariableScope::StaticMember,
+                              {"-std=c++20", "-xc++"});
+}
+
+static auto rewriteConstMember(const char* code, VariableRenameCallback cb)
+    -> std::string {
+  return rewriteVariableNames(code, std::move(cb), VariableScope::ConstMember,
+                              {"-std=c++20", "-xc++"});
+}
+
+static auto rewriteStaticGlobal(const char* code, VariableRenameCallback cb)
+    -> std::string {
+  return rewriteVariableNames(code, std::move(cb), VariableScope::StaticGlobal,
+                              {"-std=c++20", "-xc++"});
+}
+
+static auto rewriteConstGlobal(const char* code, VariableRenameCallback cb)
+    -> std::string {
+  return rewriteVariableNames(code, std::move(cb), VariableScope::ConstGlobal,
+                              {"-std=c++20", "-xc++"});
+}
+
 // ---------------------------------------------------------------------------
 // Member variables
 // ---------------------------------------------------------------------------
@@ -172,6 +196,130 @@ TEST(RenameGlobalVariables, NamespaceScope) {
       rewriteGlobal("namespace ns { int val = 0; } int f() { return ns::val; }",
                     renameOne("val", "value")),
       "namespace ns { int value = 0; } int f() { return ns::value; }");
+}
+
+// ---------------------------------------------------------------------------
+// Static data members (StaticMember scope)
+// ---------------------------------------------------------------------------
+
+TEST(RenameStaticMemberVariables, RenamesStaticDataMember) {
+  EXPECT_EQ(
+      rewriteStaticMember("struct S { static int count_; }; int S::count_ = 0;",
+                          renameOne("count_", "total_")),
+      "struct S { static int total_; }; int S::total_ = 0;");
+}
+
+TEST(RenameStaticMemberVariables, DoesNotRenameNonStaticField) {
+  const char* code = "struct S { int x_; static int y_; };";
+  EXPECT_EQ(rewriteStaticMember(code, addSuffix("x")),
+            "struct S { int x_; static int y_x; };");
+}
+
+TEST(RenameStaticMemberVariables, RenamesStaticConstexprMember) {
+  EXPECT_EQ(rewriteStaticMember("struct S { static constexpr int kMax = 42; };",
+                                renameOne("kMax", "kLimit")),
+            "struct S { static constexpr int kLimit = 42; };");
+}
+
+// ---------------------------------------------------------------------------
+// Const/constexpr static members (ConstMember scope)
+// ---------------------------------------------------------------------------
+
+TEST(RenameConstMemberVariables, RenamesConstexprMember) {
+  EXPECT_EQ(
+      rewriteConstMember(
+          "struct S { static constexpr int kMax = 42; static int count_; };",
+          addSuffix("_r")),
+      "struct S { static constexpr int kMax_r = 42; static int count_; };");
+}
+
+TEST(RenameConstMemberVariables, RenamesConstMember) {
+  EXPECT_EQ(
+      rewriteConstMember(
+          "struct S { static const int kSize; }; const int S::kSize = 10;",
+          renameOne("kSize", "kCapacity")),
+      "struct S { static const int kCapacity; }; const int S::kCapacity = 10;");
+}
+
+TEST(RenameConstMemberVariables, DoesNotRenameNonConstStaticMember) {
+  const char* code =
+      "struct S { static int count_; static constexpr int kMax = 0; };";
+  // Only the constexpr member is renamed.
+  EXPECT_EQ(
+      rewriteConstMember(code, addSuffix("_r")),
+      "struct S { static int count_; static constexpr int kMax_r = 0; };");
+}
+
+TEST(RenameConstMemberVariables, DoesNotRenameNonStaticField) {
+  const char* code = "struct S { int x_; static constexpr int kMax = 0; };";
+  EXPECT_EQ(rewriteConstMember(code, addSuffix("_r")),
+            "struct S { int x_; static constexpr int kMax_r = 0; };");
+}
+
+// ---------------------------------------------------------------------------
+// Static-keyword globals (StaticGlobal scope)
+// ---------------------------------------------------------------------------
+
+TEST(RenameStaticGlobalVariables, RenamesStaticGlobal) {
+  EXPECT_EQ(rewriteStaticGlobal(
+                "static int sCounter = 0; int get() { return sCounter; }",
+                renameOne("sCounter", "counter")),
+            "static int counter = 0; int get() { return counter; }");
+}
+
+TEST(RenameStaticGlobalVariables, DoesNotRenameNonStaticGlobal) {
+  const char* code = "int plain = 0; static int hidden = 1;";
+  EXPECT_EQ(rewriteStaticGlobal(code, addSuffix("_s")),
+            "int plain = 0; static int hidden_s = 1;");
+}
+
+TEST(RenameStaticGlobalVariables, DoesNotRenameStaticDataMember) {
+  const char* code = "struct S { static int count_; }; int S::count_ = 0;";
+  EXPECT_EQ(rewriteStaticGlobal(code, addSuffix("_s")), code);
+}
+
+TEST(RenameStaticGlobalVariables, DoesNotRenameLocal) {
+  const char* code = "static int g = 0; int f() { int x = 1; return x + g; }";
+  EXPECT_EQ(rewriteStaticGlobal(code, addSuffix("_s")),
+            "static int g_s = 0; int f() { int x = 1; return x + g_s; }");
+}
+
+// ---------------------------------------------------------------------------
+// Const/constexpr globals (ConstGlobal scope)
+// ---------------------------------------------------------------------------
+
+TEST(RenameConstGlobalVariables, RenamesConstexprGlobal) {
+  EXPECT_EQ(
+      rewriteConstGlobal("constexpr int kMax = 100; int f() { return kMax; }",
+                         renameOne("kMax", "kLimit")),
+      "constexpr int kLimit = 100; int f() { return kLimit; }");
+}
+
+TEST(RenameConstGlobalVariables, RenamesConstGlobal) {
+  EXPECT_EQ(
+      rewriteConstGlobal("const int kSize = 10; int f() { return kSize; }",
+                         renameOne("kSize", "kCapacity")),
+      "const int kCapacity = 10; int f() { return kCapacity; }");
+}
+
+TEST(RenameConstGlobalVariables, DoesNotRenameNonConstGlobal) {
+  const char* code = "int mutable_ = 0; constexpr int kConst = 1;";
+  EXPECT_EQ(rewriteConstGlobal(code, addSuffix("_r")),
+            "int mutable_ = 0; constexpr int kConst_r = 1;");
+}
+
+TEST(RenameConstGlobalVariables, DoesNotRenameLocal) {
+  const char* code = "constexpr int kMax = 5; int f() { int x = 1; return x; }";
+  EXPECT_EQ(rewriteConstGlobal(code, addSuffix("_r")),
+            "constexpr int kMax_r = 5; int f() { int x = 1; return x; }");
+}
+
+TEST(RenameConstGlobalVariables, DoesNotRenameConstMember) {
+  const char* code =
+      "struct S { static constexpr int kMax = 0; }; constexpr int kGlobal = 1;";
+  EXPECT_EQ(rewriteConstGlobal(code, addSuffix("_r")),
+            "struct S { static constexpr int kMax = 0; }; constexpr int "
+            "kGlobal_r = 1;");
 }
 
 // ---------------------------------------------------------------------------

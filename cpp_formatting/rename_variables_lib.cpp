@@ -1,5 +1,6 @@
 #include "cpp_formatting/rename_variables_lib.h"
 
+#include <fstream>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -7,6 +8,7 @@
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Basic/FileEntry.h"
 #include "clang/Frontend/CompilerInstance.h"
+#include "clang/Rewrite/Core/Rewriter.h"
 #include "clang/Tooling/Tooling.h"
 
 using namespace clang;
@@ -33,6 +35,27 @@ bool matchesScope(const NamedDecl* D, VariableScope Scope) {
       const auto* VD = dyn_cast<VarDecl>(D);
       return VD && !VD->isLocalVarDeclOrParm() && !VD->isStaticDataMember();
     }
+    case VariableScope::StaticMember: {
+      const auto* VD = dyn_cast<VarDecl>(D);
+      return VD && VD->isStaticDataMember();
+    }
+    case VariableScope::ConstMember: {
+      const auto* VD = dyn_cast<VarDecl>(D);
+      return VD && VD->isStaticDataMember() &&
+             (VD->isConstexpr() || VD->getType().isConstQualified());
+    }
+    case VariableScope::StaticGlobal: {
+      const auto* VD = dyn_cast<VarDecl>(D);
+      if (!VD || VD->isLocalVarDeclOrParm() || VD->isStaticDataMember())
+        return false;
+      return VD->getStorageClass() == SC_Static;
+    }
+    case VariableScope::ConstGlobal: {
+      const auto* VD = dyn_cast<VarDecl>(D);
+      if (!VD || VD->isLocalVarDeclOrParm() || VD->isStaticDataMember())
+        return false;
+      return VD->isConstexpr() || VD->getType().isConstQualified();
+    }
   }
   return false;
 }
@@ -41,8 +64,6 @@ bool matchesScope(const NamedDecl* D, VariableScope Scope) {
 // Template instantiation helpers
 // ---------------------------------------------------------------------------
 
-// Map an instantiated FieldDecl back to the primary-template FieldDecl by
-// walking up the class specialization chain and matching by field index.
 static const FieldDecl* primaryTemplateMember(const FieldDecl* FD) {
   const auto* RD = dyn_cast_or_null<CXXRecordDecl>(FD->getParent());
   if (!RD) return FD;
@@ -57,19 +78,15 @@ static const FieldDecl* primaryTemplateMember(const FieldDecl* FD) {
   return FD;
 }
 
-// Walk up the instantiation chain to the primary-template static data member.
 static const VarDecl* primaryTemplateStaticMember(const VarDecl* VD) {
   while (const VarDecl* P = VD->getInstantiatedFromStaticDataMember()) VD = P;
   return VD;
 }
 
 // ---------------------------------------------------------------------------
-// File-set predicate: should we collect declarations from this location?
+// File-set predicate
 // ---------------------------------------------------------------------------
 
-// Returns true if declarations at Loc should be entered into the rename map.
-// When CollectFrom is empty we replicate the original behaviour (main file
-// only). When non-empty we accept any file whose real path is in the set.
 static bool shouldCollect(SourceLocation Loc, SourceManager& SM,
                           const FileSet& CollectFrom) {
   if (CollectFrom.empty()) return SM.isWrittenInMainFile(Loc);
@@ -112,12 +129,8 @@ class CollectRenamesVisitor
   void collect(NamedDecl* D) {
     if (D->isImplicit() || !matchesScope(D, Scope)) return;
     if (!shouldCollect(D->getLocation(), SM, CollectFrom)) return;
-
-    // Use canonical decl as the key so a variable with multiple declarations
-    // (e.g. extern + definition) is processed only once.
     const Decl* Key = D->getCanonicalDecl();
     if (!Visited.insert(Key).second) return;
-
     std::string NewName;
     if (CB(D->getName(), NewName) && NewName != D->getName().str())
       Renames[Key] = std::move(NewName);
@@ -146,7 +159,6 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
   ApplyRenamesVisitor(Rewriter& RW, SourceManager& SM, const RenameMap& Renames)
       : RW(RW), SM(SM), Renames(Renames) {}
 
-  // FieldDecl declaration site.
   bool VisitFieldDecl(FieldDecl* D) {
     if (!SM.isWrittenInMainFile(D->getLocation())) return true;
     auto It = Renames.find(D->getCanonicalDecl());
@@ -155,13 +167,8 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
     return true;
   }
 
-  // VarDecl declaration site (local, global, static data member).
   bool VisitVarDecl(VarDecl* D) {
     if (!SM.isWrittenInMainFile(D->getLocation())) return true;
-    // For static data members walk up the instantiation chain to the primary
-    // template, then take the canonical decl so that the out-of-class
-    // definition (a separate VarDecl) maps to the same key as the in-class
-    // declaration stored in the rename map.
     const Decl* Key = D->isStaticDataMember()
                           ? primaryTemplateStaticMember(D)->getCanonicalDecl()
                           : D->getCanonicalDecl();
@@ -171,25 +178,19 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
     return true;
   }
 
-  // References to VarDecl (local/global variables, static data members) and
-  // FieldDecl (pointer-to-member formation: &S::field).
   bool VisitDeclRefExpr(DeclRefExpr* E) {
     if (!SM.isWrittenInMainFile(E->getLocation())) return true;
-
     const Decl* Key = nullptr;
     StringRef OldName;
-
     if (const auto* VD = dyn_cast<VarDecl>(E->getDecl())) {
       Key = VD->isStaticDataMember()
                 ? primaryTemplateStaticMember(VD)->getCanonicalDecl()
                 : VD->getCanonicalDecl();
       OldName = VD->getName();
     } else if (const auto* FD = dyn_cast<FieldDecl>(E->getDecl())) {
-      // Pointer-to-member formation: &S::m_field
       Key = primaryTemplateMember(FD);
       OldName = FD->getName();
     }
-
     if (!Key) return true;
     auto It = Renames.find(Key);
     if (It != Renames.end())
@@ -197,13 +198,10 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
     return true;
   }
 
-  // Non-static member accesses: obj.field, obj->field, and static member
-  // accesses via an instance (obj.StaticMember).
   bool VisitMemberExpr(MemberExpr* E) {
     if (!SM.isWrittenInMainFile(E->getMemberLoc())) return true;
     const Decl* Key = nullptr;
     if (const auto* FD = dyn_cast<FieldDecl>(E->getMemberDecl()))
-      // Walk up for template-class members accessed in non-template code.
       Key = primaryTemplateMember(FD);
     else if (const auto* VD = dyn_cast<VarDecl>(E->getMemberDecl()))
       Key = primaryTemplateStaticMember(VD)->getCanonicalDecl();
@@ -252,30 +250,70 @@ class RenameVariablesConsumer : public ASTConsumer {
 };
 
 // ---------------------------------------------------------------------------
-// Factory for ClangTool::run()
+// RenameVariablesAction  (internal — not in the public header)
+//
+// In InPlace mode writes are NOT flushed to disk immediately; instead the
+// modified content is stored in *Pending so that RenameActionFactory::flush()
+// can write every file atomically after ClangTool::run() completes.  This
+// ensures that every TU compiles against the original on-disk source,
+// regardless of how many files share headers.
 // ---------------------------------------------------------------------------
 
-struct RenameActionFactory : FrontendActionFactory {
-  VariableRenameCallback CB;
-  VariableScope Scope;
-  OutputMode Mode;
-  FileSet CollectFrom;
-
-  RenameActionFactory(VariableRenameCallback CB, VariableScope Scope,
-                      OutputMode Mode, FileSet CollectFrom)
+class RenameVariablesAction : public ASTFrontendAction {
+ public:
+  RenameVariablesAction(VariableRenameCallback CB, VariableScope Scope,
+                        OutputMode Mode, const FileSet& CollectFrom,
+                        PendingRewrites* Pending)
       : CB(std::move(CB)),
         Scope(Scope),
         Mode(Mode),
-        CollectFrom(std::move(CollectFrom)) {}
+        CollectFrom(CollectFrom),
+        Pending(Pending) {}
 
-  auto create() -> std::unique_ptr<FrontendAction> override {
-    return std::make_unique<RenameVariablesAction>(CB, Scope, Mode,
-                                                   CollectFrom);
+  void EndSourceFileAction() override {
+    SourceManager& SM = TheRewriter.getSourceMgr();
+    FileID MainFID = SM.getMainFileID();
+
+    if (Mode == OutputMode::DryRun) {
+      llvm::errs() << "** Rewritten Output (Dry Run): **\n";
+      TheRewriter.getEditBuffer(MainFID).write(llvm::outs());
+      return;
+    }
+
+    // InPlace: only buffer files that actually have edits.
+    for (auto It = TheRewriter.buffer_begin(); It != TheRewriter.buffer_end();
+         ++It) {
+      if (It->first != MainFID) continue;
+      const FileEntry* FE = SM.getFileEntryForID(MainFID);
+      if (!FE) break;
+      std::string Path = FE->tryGetRealPathName().str();
+      if (Path.empty()) break;
+      std::string Content;
+      llvm::raw_string_ostream OS(Content);
+      It->second.write(OS);
+      (*Pending)[std::move(Path)] = std::move(Content);
+      break;
+    }
   }
+
+  auto CreateASTConsumer(CompilerInstance& CI, StringRef)
+      -> std::unique_ptr<ASTConsumer> override {
+    TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
+    return std::make_unique<RenameVariablesConsumer>(TheRewriter, CB, Scope,
+                                                     CollectFrom);
+  }
+
+ private:
+  VariableRenameCallback CB;
+  VariableScope Scope;
+  OutputMode Mode;
+  const FileSet& CollectFrom;
+  PendingRewrites* Pending;
+  Rewriter TheRewriter;
 };
 
 // ---------------------------------------------------------------------------
-// CaptureAction — used by the test helper (always uses main-file collection)
+// CaptureAction — used by the test helper (single in-memory TU, no disk I/O)
 // ---------------------------------------------------------------------------
 
 class CaptureAction : public ASTFrontendAction {
@@ -293,8 +331,6 @@ class CaptureAction : public ASTFrontendAction {
   auto CreateASTConsumer(CompilerInstance& CI, StringRef)
       -> std::unique_ptr<ASTConsumer> override {
     TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
-    // Empty FileSet → collect from main file only (original unit-test
-    // behaviour).
     return std::make_unique<RenameVariablesConsumer>(TheRewriter, CB, Scope,
                                                      FileSet{});
   }
@@ -309,33 +345,29 @@ class CaptureAction : public ASTFrontendAction {
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// RenameVariablesAction implementation
+// RenameActionFactory (public)
 // ---------------------------------------------------------------------------
 
-RenameVariablesAction::RenameVariablesAction(VariableRenameCallback CB,
-                                             VariableScope Scope,
-                                             OutputMode Mode,
-                                             FileSet CollectFrom)
+RenameActionFactory::RenameActionFactory(VariableRenameCallback CB,
+                                         VariableScope Scope, OutputMode Mode,
+                                         FileSet CollectFrom)
     : CB(std::move(CB)),
       Scope(Scope),
       Mode(Mode),
       CollectFrom(std::move(CollectFrom)) {}
 
-void RenameVariablesAction::EndSourceFileAction() {
-  SourceManager& SM = TheRewriter.getSourceMgr();
-  if (Mode == OutputMode::InPlace) {
-    TheRewriter.overwriteChangedFiles();
-  } else {
-    llvm::errs() << "** Rewritten Output (Dry Run): **\n";
-    TheRewriter.getEditBuffer(SM.getMainFileID()).write(llvm::outs());
-  }
+auto RenameActionFactory::create() -> std::unique_ptr<clang::FrontendAction> {
+  return std::make_unique<RenameVariablesAction>(CB, Scope, Mode, CollectFrom,
+                                                 &Pending);
 }
 
-auto RenameVariablesAction::CreateASTConsumer(CompilerInstance& CI, StringRef)
-    -> std::unique_ptr<ASTConsumer> {
-  TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
-  return std::make_unique<RenameVariablesConsumer>(TheRewriter, CB, Scope,
-                                                   CollectFrom);
+void RenameActionFactory::flush() {
+  if (Mode != OutputMode::InPlace) return;
+  for (const auto& [Path, Content] : Pending) {
+    std::ofstream Out(Path, std::ios::trunc | std::ios::binary);
+    Out << Content;
+  }
+  Pending.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -344,23 +376,51 @@ auto RenameVariablesAction::CreateASTConsumer(CompilerInstance& CI, StringRef)
 
 auto RenameAllMemberVariables(VariableRenameCallback CB, OutputMode Mode,
                               FileSet CollectFrom)
-    -> std::unique_ptr<clang::tooling::FrontendActionFactory> {
+    -> std::unique_ptr<RenameActionFactory> {
   return std::make_unique<RenameActionFactory>(
       std::move(CB), VariableScope::Member, Mode, std::move(CollectFrom));
 }
 
 auto RenameAllLocalVariables(VariableRenameCallback CB, OutputMode Mode,
                              FileSet CollectFrom)
-    -> std::unique_ptr<clang::tooling::FrontendActionFactory> {
+    -> std::unique_ptr<RenameActionFactory> {
   return std::make_unique<RenameActionFactory>(
       std::move(CB), VariableScope::Local, Mode, std::move(CollectFrom));
 }
 
 auto RenameAllGlobalVariables(VariableRenameCallback CB, OutputMode Mode,
                               FileSet CollectFrom)
-    -> std::unique_ptr<clang::tooling::FrontendActionFactory> {
+    -> std::unique_ptr<RenameActionFactory> {
   return std::make_unique<RenameActionFactory>(
       std::move(CB), VariableScope::Global, Mode, std::move(CollectFrom));
+}
+
+auto RenameAllStaticMemberVariables(VariableRenameCallback CB, OutputMode Mode,
+                                    FileSet CollectFrom)
+    -> std::unique_ptr<RenameActionFactory> {
+  return std::make_unique<RenameActionFactory>(
+      std::move(CB), VariableScope::StaticMember, Mode, std::move(CollectFrom));
+}
+
+auto RenameAllConstMemberVariables(VariableRenameCallback CB, OutputMode Mode,
+                                   FileSet CollectFrom)
+    -> std::unique_ptr<RenameActionFactory> {
+  return std::make_unique<RenameActionFactory>(
+      std::move(CB), VariableScope::ConstMember, Mode, std::move(CollectFrom));
+}
+
+auto RenameAllStaticGlobalVariables(VariableRenameCallback CB, OutputMode Mode,
+                                    FileSet CollectFrom)
+    -> std::unique_ptr<RenameActionFactory> {
+  return std::make_unique<RenameActionFactory>(
+      std::move(CB), VariableScope::StaticGlobal, Mode, std::move(CollectFrom));
+}
+
+auto RenameAllConstGlobalVariables(VariableRenameCallback CB, OutputMode Mode,
+                                   FileSet CollectFrom)
+    -> std::unique_ptr<RenameActionFactory> {
+  return std::make_unique<RenameActionFactory>(
+      std::move(CB), VariableScope::ConstGlobal, Mode, std::move(CollectFrom));
 }
 
 // ---------------------------------------------------------------------------

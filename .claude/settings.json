@@ -18,7 +18,8 @@
       "Read(//home/ubuntu/.cache/bazel/_bazel_ubuntu/eab0d61a99b6696edb3d2aff87b585e8/execroot/_main/bazel-out/k8-fastbuild/testlogs/cpp_formatting/rename_variables_test/**)",
       "Read(//home/ubuntu/.cache/bazel/_bazel_ubuntu/eab0d61a99b6696edb3d2aff87b585e8/execroot/_main/bazel-out/k8-fastbuild/testlogs/cpp_formatting/naming_convention_test/**)",
       "Bash(chmod +x /workspace/cpp_formatting/normalize_variables_integration_test.sh)",
-      "Read(//home/ubuntu/.cache/bazel/_bazel_ubuntu/eab0d61a99b6696edb3d2aff87b585e8/execroot/_main/bazel-out/k8-fastbuild/testlogs/cpp_formatting/normalize_variables_integration_test/**)"
+      "Read(//home/ubuntu/.cache/bazel/_bazel_ubuntu/eab0d61a99b6696edb3d2aff87b585e8/execroot/_main/bazel-out/k8-fastbuild/testlogs/cpp_formatting/normalize_variables_integration_test/**)",
+      "Bash(python3 -c ' *)"
     ]
   }
 }
