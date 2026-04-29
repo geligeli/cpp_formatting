@@ -2,6 +2,7 @@ load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
 
 cc_library(
     name = "output_mode",
@@ -29,6 +30,7 @@ cc_binary(
     srcs = ["trailing_return_types.cpp"],
     linkstatic = True,
     deps = [
+        ":embedded_clang_resource",
         ":trailing_return_types_lib",
         "@llvm-project//clang:ast_matchers",
         "@llvm-project//clang:frontend",
@@ -113,6 +115,7 @@ cc_binary(
     srcs = ["normalize_variables.cpp"],
     linkstatic = True,
     deps = [
+        ":embedded_clang_resource",
         ":naming_convention",
         ":rename_variables_lib",
         "@llvm-project//clang:frontend",
@@ -161,6 +164,7 @@ cc_binary(
     srcs = ["cpp_format.cpp"],
     linkstatic = True,
     deps = [
+        ":embedded_clang_resource",
         ":naming_convention",
         ":rename_variables_lib",
         ":trailing_return_types_lib",
@@ -181,4 +185,39 @@ cc_test(
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
+)
+
+pkg_tar(
+    name = "clang_include_headers",
+    srcs = ["@@llvm-project+//clang:builtin_headers_gen"],
+    strip_prefix = "/external/llvm-project+/clang/staging",
+    extension = "tar.gz",
+)
+
+# Convert clang_include_headers.tar.gz into a C++ source file embedding the
+# bytes as a const array.  Built into binaries so they can extract the headers
+# at runtime without depending on a system-installed clang.
+genrule(
+    name = "clang_include_headers_embed_cc",
+    srcs = [":clang_include_headers"],
+    outs = ["clang_include_headers_embed.cc"],
+    cmd = """
+(
+echo '#include <cstddef>'
+echo ''
+echo 'extern "C" const unsigned char kClangIncludeHeadersTarGz[] = {'
+xxd -i < $(location :clang_include_headers)
+echo '};'
+echo 'extern "C" const size_t kClangIncludeHeadersTarGzSize = sizeof(kClangIncludeHeadersTarGz);'
+) > $@
+""",
+)
+
+cc_library(
+    name = "embedded_clang_resource",
+    srcs = [
+        "embedded_clang_resource.cpp",
+        ":clang_include_headers_embed_cc",
+    ],
+    hdrs = ["embedded_clang_resource.h"],
 )

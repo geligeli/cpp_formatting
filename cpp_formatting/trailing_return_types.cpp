@@ -1,7 +1,6 @@
-#include <cstdio>
-
 #include "clang/Tooling/CommonOptionsParser.h"
 #include "clang/Tooling/Tooling.h"
+#include "cpp_formatting/embedded_clang_resource.h"
 #include "cpp_formatting/trailing_return_types_lib.h"
 #include "llvm/Support/CommandLine.h"
 
@@ -17,20 +16,6 @@ static cl::alias InPlaceAlias("i", cl::desc("Alias for -in-place"),
                               cl::aliasopt(InPlace));
 
 namespace {
-
-/// Run `clang -print-resource-dir` and return the trimmed path, or an empty
-/// string if the command is unavailable or fails.
-auto detectClangResourceDir() -> std::string {
-  FILE* F = popen("clang -print-resource-dir 2>/dev/null", "r");
-  if (!F) return {};
-  char Buf[512];
-  std::string Result;
-  while (fgets(Buf, sizeof(Buf), F)) Result += Buf;
-  pclose(F);
-  while (!Result.empty() && (Result.back() == '\n' || Result.back() == '\r'))
-    Result.pop_back();
-  return Result;
-}
 
 struct ActionFactory : FrontendActionFactory {
   OutputMode Mode;
@@ -68,7 +53,7 @@ auto main(int argc, const char** argv) -> int {
   // find built-in headers (stddef.h etc.) without requiring the user to pass
   // --extra-arg=-resource-dir=... manually.  Skip if the compilation database
   // or the user already provides -resource-dir.
-  std::string ResourceDir = detectClangResourceDir();
+  std::string ResourceDir = ensureClangResourceDir();
   if (!ResourceDir.empty()) {
     Tool.appendArgumentsAdjuster(
         [ResourceDir](const std::vector<std::string>& Args, StringRef) {

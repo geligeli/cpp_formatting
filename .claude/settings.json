@@ -19,7 +19,20 @@
       "Read(//home/ubuntu/.cache/bazel/_bazel_ubuntu/eab0d61a99b6696edb3d2aff87b585e8/execroot/_main/bazel-out/k8-fastbuild/testlogs/cpp_formatting/naming_convention_test/**)",
       "Bash(chmod +x /workspace/cpp_formatting/normalize_variables_integration_test.sh)",
       "Read(//home/ubuntu/.cache/bazel/_bazel_ubuntu/eab0d61a99b6696edb3d2aff87b585e8/execroot/_main/bazel-out/k8-fastbuild/testlogs/cpp_formatting/normalize_variables_integration_test/**)",
-      "Bash(python3 -c ' *)"
+      "Bash(python3 -c ' *)",
+      "Bash(grep -v \"^$\")",
+      "Read(//tmp/multitest/**)",
+      "Bash(grep -v \"^INFO\\\\|^Computing\\\\|^Loading\\\\|^Analyzing\\\\|^Target\\\\|^$\")",
+      "Read(//home/ubuntu/.cache/bazel/_bazel_ubuntu/eab0d61a99b6696edb3d2aff87b585e8/execroot/_main/bazel-out/k8-fastbuild/bin/cpp_formatting/**)",
+      "Bash(tar -tzf /workspace/bazel-bin/cpp_formatting/clang_include_headers.tar.gz)",
+      "Bash(xxd --version)",
+      "Bash(awk '{print $5}')",
+      "Read(//home/ubuntu/.cache/**)",
+      "Bash(bazel-bin/cpp_formatting/normalize_variables --style=snake_case --scope=member /tmp/embedtest.cpp -- -std=c++17)"
+    ],
+    "additionalDirectories": [
+      "/tmp",
+      "/home/ubuntu/.cache"
     ]
   }
 }

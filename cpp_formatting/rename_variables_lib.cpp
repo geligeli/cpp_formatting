@@ -220,25 +220,134 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
 };
 
 // ---------------------------------------------------------------------------
+// Debug tracer — visits every reference to a renamed variable and logs it.
+// Used by OutputMode::Debug so users can see, per TU, exactly which sites the
+// tool detected and which would actually be rewritten (main-file + non-macro).
+// ---------------------------------------------------------------------------
+
+class DebugTraceVisitor : public RecursiveASTVisitor<DebugTraceVisitor> {
+ public:
+  DebugTraceVisitor(SourceManager& SM, const RenameMap& Renames,
+                    llvm::raw_ostream& Out)
+      : SM(SM), Renames(Renames), Out(Out) {}
+
+  bool VisitFieldDecl(FieldDecl* D) {
+    auto It = Renames.find(D->getCanonicalDecl());
+    if (It != Renames.end())
+      log("FieldDecl ", D->getLocation(), D->getName(), It->second);
+    return true;
+  }
+  bool VisitVarDecl(VarDecl* D) {
+    const Decl* Key = D->isStaticDataMember()
+                          ? primaryTemplateStaticMember(D)->getCanonicalDecl()
+                          : D->getCanonicalDecl();
+    auto It = Renames.find(Key);
+    if (It != Renames.end())
+      log("VarDecl   ", D->getLocation(), D->getName(), It->second);
+    return true;
+  }
+  bool VisitDeclRefExpr(DeclRefExpr* E) {
+    const Decl* Key = nullptr;
+    StringRef OldName;
+    if (const auto* VD = dyn_cast<VarDecl>(E->getDecl())) {
+      Key = VD->isStaticDataMember()
+                ? primaryTemplateStaticMember(VD)->getCanonicalDecl()
+                : VD->getCanonicalDecl();
+      OldName = VD->getName();
+    } else if (const auto* FD = dyn_cast<FieldDecl>(E->getDecl())) {
+      Key = primaryTemplateMember(FD);
+      OldName = FD->getName();
+    }
+    if (!Key) return true;
+    auto It = Renames.find(Key);
+    if (It != Renames.end())
+      log("DeclRef   ", E->getLocation(), OldName, It->second);
+    return true;
+  }
+  bool VisitMemberExpr(MemberExpr* E) {
+    const Decl* Key = nullptr;
+    StringRef OldName;
+    if (const auto* FD = dyn_cast<FieldDecl>(E->getMemberDecl())) {
+      Key = primaryTemplateMember(FD);
+      OldName = FD->getName();
+    } else if (const auto* VD = dyn_cast<VarDecl>(E->getMemberDecl())) {
+      Key = primaryTemplateStaticMember(VD)->getCanonicalDecl();
+      OldName = VD->getName();
+    }
+    if (!Key) return true;
+    auto It = Renames.find(Key);
+    if (It != Renames.end())
+      log("MemberExpr", E->getMemberLoc(), OldName, It->second);
+    return true;
+  }
+
+ private:
+  void log(StringRef Kind, SourceLocation Loc, StringRef OldName,
+           const std::string& NewName) {
+    auto PLoc = SM.getPresumedLoc(Loc);
+    bool inMain = SM.isWrittenInMainFile(Loc);
+    bool isMacro = Loc.isMacroID();
+    const char* file = PLoc.isValid() ? PLoc.getFilename() : "<invalid>";
+    unsigned line = PLoc.isValid() ? PLoc.getLine() : 0;
+    unsigned col = PLoc.isValid() ? PLoc.getColumn() : 0;
+    Out << "    " << Kind << "  " << OldName << " -> " << NewName << "  at "
+        << file << ":" << line << ":" << col
+        << "  [main=" << (inMain ? "Y" : "N")
+        << " macro=" << (isMacro ? "Y" : "N") << "]";
+    if (inMain && !isMacro) Out << "  WILL_RENAME";
+    Out << "\n";
+  }
+
+  SourceManager& SM;
+  const RenameMap& Renames;
+  llvm::raw_ostream& Out;
+};
+
+// ---------------------------------------------------------------------------
 // ASTConsumer
 // ---------------------------------------------------------------------------
 
 class RenameVariablesConsumer : public ASTConsumer {
  public:
   RenameVariablesConsumer(Rewriter& RW, VariableRenameCallback CB,
-                          VariableScope Scope, FileSet CollectFrom)
+                          VariableScope Scope, FileSet CollectFrom,
+                          OutputMode Mode = OutputMode::DryRun)
       : RW(RW),
         CB(std::move(CB)),
         Scope(Scope),
-        CollectFrom(std::move(CollectFrom)) {}
+        CollectFrom(std::move(CollectFrom)),
+        Mode(Mode) {}
 
   void HandleTranslationUnit(ASTContext& Ctx) override {
+    SourceManager& SM = Ctx.getSourceManager();
     RenameMap Renames;
-    CollectRenamesVisitor Collector(Ctx.getSourceManager(), CB, Scope, Renames,
-                                    CollectFrom);
+    CollectRenamesVisitor Collector(SM, CB, Scope, Renames, CollectFrom);
     Collector.TraverseDecl(Ctx.getTranslationUnitDecl());
+
+    if (Mode == OutputMode::Debug) {
+      const FileEntry* FE = SM.getFileEntryForID(SM.getMainFileID());
+      llvm::errs()
+          << "============================================================\n";
+      llvm::errs() << "TU: " << (FE ? FE->getName() : "<unknown>") << "\n";
+      llvm::errs() << "Identified " << Renames.size() << " rename(s):\n";
+      for (const auto& [DeclKey, NewName] : Renames) {
+        const auto* ND = cast<NamedDecl>(DeclKey);
+        auto PLoc = SM.getPresumedLoc(ND->getLocation());
+        llvm::errs() << "  \"" << ND->getName() << "\" -> \"" << NewName
+                     << "\"  (decl at "
+                     << (PLoc.isValid() ? PLoc.getFilename() : "<invalid>")
+                     << ":" << (PLoc.isValid() ? PLoc.getLine() : 0) << ")\n";
+      }
+      if (!Renames.empty()) {
+        llvm::errs() << "Reference sites in this TU's AST:\n";
+        DebugTraceVisitor Tracer(SM, Renames, llvm::errs());
+        Tracer.TraverseDecl(Ctx.getTranslationUnitDecl());
+      }
+      return;  // no rewrites in Debug mode
+    }
+
     if (Renames.empty()) return;
-    ApplyRenamesVisitor Applier(RW, Ctx.getSourceManager(), Renames);
+    ApplyRenamesVisitor Applier(RW, SM, Renames);
     Applier.TraverseDecl(Ctx.getTranslationUnitDecl());
   }
 
@@ -247,6 +356,7 @@ class RenameVariablesConsumer : public ASTConsumer {
   VariableRenameCallback CB;
   VariableScope Scope;
   FileSet CollectFrom;
+  OutputMode Mode;
 };
 
 // ---------------------------------------------------------------------------
@@ -274,13 +384,8 @@ class RenameVariablesAction : public ASTFrontendAction {
     SourceManager& SM = TheRewriter.getSourceMgr();
     FileID MainFID = SM.getMainFileID();
 
-    if (Mode == OutputMode::DryRun) {
-      llvm::errs() << "** Rewritten Output (Dry Run): **\n";
-      TheRewriter.getEditBuffer(MainFID).write(llvm::outs());
-      return;
-    }
-
-    // InPlace: only buffer files that actually have edits.
+    // Buffer the main file's content only if it actually has edits.
+    // Applies to both DryRun and InPlace: DryRun outputs via flush().
     for (auto It = TheRewriter.buffer_begin(); It != TheRewriter.buffer_end();
          ++It) {
       if (It->first != MainFID) continue;
@@ -300,7 +405,7 @@ class RenameVariablesAction : public ASTFrontendAction {
       -> std::unique_ptr<ASTConsumer> override {
     TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
     return std::make_unique<RenameVariablesConsumer>(TheRewriter, CB, Scope,
-                                                     CollectFrom);
+                                                     CollectFrom, Mode);
   }
 
  private:
@@ -362,7 +467,19 @@ auto RenameActionFactory::create() -> std::unique_ptr<clang::FrontendAction> {
 }
 
 void RenameActionFactory::flush() {
-  if (Mode != OutputMode::InPlace) return;
+  if (Mode == OutputMode::Debug) {
+    Pending.clear();
+    return;
+  }
+  if (Mode == OutputMode::DryRun) {
+    bool multiFile = Pending.size() > 1;
+    for (const auto& [Path, Content] : Pending) {
+      if (multiFile) llvm::outs() << "=== " << Path << " ===\n";
+      llvm::outs() << Content;
+    }
+    Pending.clear();
+    return;
+  }
   for (const auto& [Path, Content] : Pending) {
     std::ofstream Out(Path, std::ios::trunc | std::ios::binary);
     Out << Content;

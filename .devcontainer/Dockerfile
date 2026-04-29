@@ -2,7 +2,7 @@ FROM ubuntu:26.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update -y
-RUN apt install curl unzip git sudo g++ python3-pip clang-format clangd clang lld -y
+RUN apt install curl unzip git sudo g++ python3-pip clang-format clangd clang lld xxd -y
 RUN pip install pre-commit --break-system-packages --no-cache-dir
 RUN curl -L https://github.com/bazelbuild/bazel/releases/download/8.6.0/bazel-8.6.0-linux-x86_64 -o /usr/local/bin/bazel
 RUN chmod +x /usr/local/bin/bazel

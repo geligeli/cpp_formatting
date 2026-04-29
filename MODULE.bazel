@@ -5,6 +5,7 @@ bazel_dep(name = "rules_cc", version = "0.2.17")
 bazel_dep(name = "llvm-project", version = "17.0.3.bcr.4")
 bazel_dep(name = "googletest", version = "1.14.0.bcr.1")
 bazel_dep(name = "rules_shell", version = "0.4.1")
+bazel_dep(name = "rules_pkg", version = "1.2.0")
 
 # 2. Apply the patch using an override
 single_version_override(

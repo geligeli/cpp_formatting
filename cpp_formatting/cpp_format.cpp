@@ -1,9 +1,9 @@
-#include <cstdio>
 #include <string>
 #include <vector>
 
 #include "clang/Tooling/CommonOptionsParser.h"
 #include "clang/Tooling/Tooling.h"
+#include "cpp_formatting/embedded_clang_resource.h"
 #include "cpp_formatting/naming_convention.h"
 #include "cpp_formatting/rename_variables_lib.h"
 #include "cpp_formatting/trailing_return_types_lib.h"
@@ -92,18 +92,6 @@ static cl::alias InPlaceAlias("i", cl::desc("Alias for --in-place"),
 // ---------------------------------------------------------------------------
 
 namespace {
-
-auto detectClangResourceDir() -> std::string {
-  FILE* F = popen("clang -print-resource-dir 2>/dev/null", "r");
-  if (!F) return {};
-  char Buf[512];
-  std::string Result;
-  while (fgets(Buf, sizeof(Buf), F)) Result += Buf;
-  pclose(F);
-  while (!Result.empty() && (Result.back() == '\n' || Result.back() == '\r'))
-    Result.pop_back();
-  return Result;
-}
 
 FileSet buildFileSet(const std::vector<std::string>& SourcePaths) {
   FileSet FS;
@@ -201,7 +189,7 @@ auto main(int argc, const char** argv) -> int {
   }
 
   const OutputMode mode = InPlace ? OutputMode::InPlace : OutputMode::DryRun;
-  const std::string ResourceDir = detectClangResourceDir();
+  const std::string ResourceDir = ensureClangResourceDir();
 
   // Pass 1+: normalize_variables rules applied in order.
   for (const auto& rule : cfg.normalize_variables) {

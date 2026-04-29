@@ -1,7 +1,6 @@
-#include <cstdio>
-
 #include "clang/Tooling/CommonOptionsParser.h"
 #include "clang/Tooling/Tooling.h"
+#include "cpp_formatting/embedded_clang_resource.h"
 #include "cpp_formatting/naming_convention.h"
 #include "cpp_formatting/rename_variables_lib.h"
 #include "llvm/Support/CommandLine.h"
@@ -32,19 +31,14 @@ static cl::opt<bool> InPlace("in-place",
 static cl::alias InPlaceAlias("i", cl::desc("Alias for -in-place"),
                               cl::aliasopt(InPlace));
 
-namespace {
+static cl::opt<bool> DebugTrace(
+    "debug-trace",
+    cl::desc(
+        "Print, per TU, every rename target and every reference site "
+        "found in the AST. Makes no modifications. Output goes to stderr."),
+    cl::cat(NormalizeVarsCategory));
 
-auto detectClangResourceDir() -> std::string {
-  FILE* F = popen("clang -print-resource-dir 2>/dev/null", "r");
-  if (!F) return {};
-  char Buf[512];
-  std::string Result;
-  while (fgets(Buf, sizeof(Buf), F)) Result += Buf;
-  pclose(F);
-  while (!Result.empty() && (Result.back() == '\n' || Result.back() == '\r'))
-    Result.pop_back();
-  return Result;
-}
+namespace {
 
 // Build the FileSet from the list of source paths.  We resolve each path to
 // its real (canonical, absolute) form so it can be matched against the paths
@@ -104,7 +98,9 @@ auto main(int argc, const char** argv) -> int {
     return 1;
   }
 
-  const OutputMode mode = InPlace ? OutputMode::InPlace : OutputMode::DryRun;
+  const OutputMode mode = DebugTrace ? OutputMode::Debug
+                          : InPlace  ? OutputMode::InPlace
+                                     : OutputMode::DryRun;
 
   // Resolve source paths to real paths so shouldCollect() can match them
   // against the file entries recorded in Clang's SourceManager when an
@@ -128,7 +124,7 @@ auto main(int argc, const char** argv) -> int {
         return Out;
       });
 
-  const std::string ResourceDir = detectClangResourceDir();
+  const std::string ResourceDir = ensureClangResourceDir();
   if (!ResourceDir.empty()) {
     Tool.appendArgumentsAdjuster(
         [ResourceDir](const std::vector<std::string>& Args, StringRef) {
