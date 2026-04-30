@@ -14,6 +14,8 @@ A collection of Clang-based source-to-source rewrite tools for C++ codebases.
 - A C++17-capable host compiler (for building the tools)
 - Internet access on the first build (Bazel downloads LLVM 17, GoogleTest, etc.)
 
+The Clang built-in headers (`stddef.h`, `__stddef_max_align_t.h`, etc.) are embedded into every binary and extracted on-demand to `$XDG_CACHE_HOME/cpp_formatting/`, so no system Clang installation is required at runtime.
+
 ## Building
 
 ```sh
@@ -64,7 +66,7 @@ bazel run //cpp_formatting:trailing_return_types -- -i path/to/file.cpp -- -std=
 bazel run //cpp_formatting:trailing_return_types -- -i file1.cpp file2.cpp -- -std=c++17
 ```
 
-The `--` separates the tool's own flags from the Clang compilation flags. At minimum `-std=c++17` is required. For files using standard-library headers the tool auto-detects the Clang resource directory.
+The `--` separates the tool's own flags from the Clang compilation flags. At minimum `-std=c++17` is required. The tool ships its own Clang built-in headers, so files using standard-library headers (`<cstddef>`, etc.) work out of the box without a system Clang.
 
 ### What gets rewritten
 
@@ -146,10 +148,25 @@ bazel run //cpp_formatting:normalize_variables -- \
 | Flag | Description |
 |---|---|
 | `--style=<style>` | Target naming style (required) |
-| `--scope=<scope>` | `member`, `local`, or `global` (default: `member`) |
+| `--scope=<scope>` | Scope to rename (default: `member`). See "Supported scopes" below. |
 | `--in-place` / `-i` | Overwrite files on disk (default: dry-run to stdout) |
+| `--debug-trace` | Print, per TU, every rename target and reference site found in the AST. Makes no modifications. |
 
-**Cross-file renaming:** list all files that share declarations. The `.cpp` must come before the `.h` so that uses are renamed while the header is still in its original form; the header is then renamed in its own pass.
+**Supported scopes:**
+
+| Scope | Targets |
+|---|---|
+| `member` | non-static member variables (`FieldDecl`) and static data members |
+| `local` | local variables and function parameters |
+| `global` | file- and namespace-scope variables (non-member, non-local) |
+| `static_member` | static data members only |
+| `const_member` | static data members that are `const` or `constexpr` |
+| `static_global` | file- and namespace-scope variables declared `static` |
+| `const_global` | file- and namespace-scope variables that are `const` or `constexpr` |
+
+**Cross-file renaming:** list all files that share declarations — order does not matter. The tool auto-promotes header files to the end of the source list so each `.cpp` is parsed against the original on-disk header content; edits are buffered and committed atomically once every TU has been processed.
+
+**Debugging missed renames:** if you suspect the tool isn't renaming everything you expected, run with `--debug-trace`. It prints the full rename map and every reference site found in each TU, with `main=Y/N`, `macro=Y/N`, and a `WILL_RENAME` marker on sites that would actually be rewritten. A site that never appears with `WILL_RENAME` in any TU is missing from the source list passed to the tool.
 
 ### Tests
 
@@ -176,10 +193,15 @@ Create a YAML file describing which passes to run:
 trailing_return_types: true
 
 # Rename variables — multiple rules are applied in order.
+# Supported scopes: member, local, global,
+#                   static_member, const_member,
+#                   static_global, const_global
 normalize_variables:
   - scope: member   # non-static and static data members
     style: snake_case
-  - scope: global   # file- and namespace-scope variables
+  - scope: const_global  # only const/constexpr namespace-scope vars
+    style: kConstant
+  - scope: global   # remaining file- and namespace-scope variables
     style: snake_case
   # - scope: local  # local variables and parameters (disabled)
   #   style: camelCase
@@ -215,7 +237,7 @@ bazel run //cpp_formatting:cpp_format -- \
 |---|---|
 | `--config=<file>` | YAML configuration file (takes precedence over per-pass flags) |
 | `--trailing-return-types` | Enable the trailing-return-type pass |
-| `--normalize-variables-scope=<scope>` | `member`, `local`, or `global` |
+| `--normalize-variables-scope=<scope>` | One of `member`, `local`, `global`, `static_member`, `const_member`, `static_global`, `const_global` |
 | `--normalize-variables-style=<style>` | Target naming style |
 | `--in-place` / `-i` | Overwrite files on disk (default: dry-run) |
 
@@ -332,17 +354,22 @@ cpp_formatting/
 
   # normalize_variables
   normalize_variables.cpp                 # main(): CLI parsing, FileSet builder
-  rename_variables_lib.h                  # public API: FileSet, callback, action, factories
-  rename_variables_lib.cpp                # two-pass AST visitor implementation
+  rename_variables_lib.h                  # public API: FileSet, callback, RenameActionFactory, factories
+  rename_variables_lib.cpp                # two-pass AST visitor implementation + DebugTraceVisitor
   naming_convention.h                     # NamingStyle enum + word-split/format API
   naming_convention.cpp                   # split + format implementation
   naming_convention_test.cpp              # gtest unit tests
   rename_variables_test.cpp               # gtest unit tests
   normalize_variables_integration_test.sh # shell integration tests
 
+  # Embedded clang resource directory
+  embedded_clang_resource.h               # ensureClangResourceDir()
+  embedded_clang_resource.cpp             # extract embedded headers tar.gz to a per-content-hash cache dir
+
   # Shared
-  output_mode.h                           # OutputMode enum (DryRun / InPlace)
-  BUILD                                   # all Bazel targets
+  output_mode.h                           # OutputMode enum (DryRun / InPlace / Debug)
+  BUILD                                   # all Bazel targets, plus the clang_include_headers
+                                          #   pkg_tar and the genrule that embeds it via xxd -i
 
   testdata/                               # input/expected pairs for integration tests
 
@@ -356,10 +383,11 @@ Managed via Bzlmod ([MODULE.bazel](MODULE.bazel)):
 
 | Dependency | Version |
 |---|---|
-| `llvm-project` (Clang libraries + LLVM YAML) | 17.0.3 |
+| `llvm-project` (Clang libraries + LLVM YAML + builtin headers) | 17.0.3 |
 | `googletest` | 1.14.0.bcr.1 |
 | `rules_cc` | 0.2.17 |
 | `rules_shell` | 0.4.1 |
+| `rules_pkg` | (bundles the clang builtin headers into the binary) |
 
 ## License
 
