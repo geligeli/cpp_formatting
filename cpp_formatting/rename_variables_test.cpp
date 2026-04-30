@@ -335,3 +335,12 @@ TEST(RenameMemberVariables, TemplateMemberRenamedInInstantiation) {
             "template<typename T> struct Box { T value_; };\n"
             "int f() { Box<int> b; return b.value_; }");
 }
+
+TEST(RenameMemberVariables, RenamesMemberInConstructorInitializer) {
+  EXPECT_EQ(
+      rewriteMember(
+          "struct S { S() : val1_(0), val2_(2) {} int val1_; int val2_; };\n",
+          renameOne("val1_", "renamed_")),
+      "struct S { S() : renamed_(0), val2_(2) {} int renamed_; int val2_; "
+      "};\n");
+}

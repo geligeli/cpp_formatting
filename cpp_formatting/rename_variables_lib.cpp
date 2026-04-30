@@ -213,6 +213,23 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
     return true;
   }
 
+  // Constructor mem-initializers (e.g. `S() : val_(0)`).  These are not visited
+  // via VisitMemberExpr because CXXCtorInitializer is not a Stmt/Decl.
+  bool TraverseConstructorInitializer(CXXCtorInitializer* Init) {
+    if (Init && Init->isAnyMemberInitializer()) {
+      SourceLocation Loc = Init->getMemberLocation();
+      if (SM.isWrittenInMainFile(Loc)) {
+        const FieldDecl* FD = Init->getAnyMember();
+        if (FD) {
+          auto It = Renames.find(primaryTemplateMember(FD));
+          if (It != Renames.end()) renameAt(RW, Loc, FD->getName(), It->second);
+        }
+      }
+    }
+    return RecursiveASTVisitor<
+        ApplyRenamesVisitor>::TraverseConstructorInitializer(Init);
+  }
+
  private:
   Rewriter& RW;
   SourceManager& SM;
@@ -279,6 +296,19 @@ class DebugTraceVisitor : public RecursiveASTVisitor<DebugTraceVisitor> {
     if (It != Renames.end())
       log("MemberExpr", E->getMemberLoc(), OldName, It->second);
     return true;
+  }
+
+  bool TraverseConstructorInitializer(CXXCtorInitializer* Init) {
+    if (Init && Init->isAnyMemberInitializer()) {
+      if (const FieldDecl* FD = Init->getAnyMember()) {
+        auto It = Renames.find(primaryTemplateMember(FD));
+        if (It != Renames.end())
+          log("CtorInit  ", Init->getMemberLocation(), FD->getName(),
+              It->second);
+      }
+    }
+    return RecursiveASTVisitor<
+        DebugTraceVisitor>::TraverseConstructorInitializer(Init);
   }
 
  private:
