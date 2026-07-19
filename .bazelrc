@@ -1,3 +1,4 @@
+build --spawn_strategy=local
 build --cxxopt=-fno-rtti
 
 build:minify -c opt
