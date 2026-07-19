@@ -1,6 +1,12 @@
 build --spawn_strategy=local
 build --cxxopt=-fno-rtti
 
+# MSVC's traditional preprocessor cannot handle the empty macro arguments in
+# LLVM's generated Options.inc (error C2365 'OPT_': redefinition); use the
+# conforming preprocessor on Windows.
+build:windows --cxxopt=/Zc:preprocessor
+build:windows --cxxopt=/wd5105
+
 build:minify -c opt
 build:minify --copt=-ffunction-sections
 build:minify --copt=-fdata-sections
