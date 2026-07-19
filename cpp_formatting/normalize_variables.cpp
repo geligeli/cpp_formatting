@@ -1,6 +1,7 @@
 #include "clang/Tooling/CommonOptionsParser.h"
 #include "clang/Tooling/Tooling.h"
 #include "cpp_formatting/embedded_clang_resource.h"
+#include "cpp_formatting/lint_lib.h"
 #include "cpp_formatting/naming_convention.h"
 #include "cpp_formatting/rename_variables_lib.h"
 #include "llvm/Support/CommandLine.h"
@@ -38,6 +39,18 @@ static cl::opt<bool> DebugTrace(
         "Print, per TU, every rename target and every reference site "
         "found in the AST. Makes no modifications. Output goes to stderr."),
     cl::cat(NormalizeVarsCategory));
+
+static cl::opt<bool> LintOpt(
+    "lint",
+    cl::desc("Analyze only: report violations without modifying any files. "
+             "Exits 1 when violations are found."),
+    cl::cat(NormalizeVarsCategory));
+
+static cl::opt<std::string> FormatOpt(
+    "format",
+    cl::desc("Output format for --lint: text (default), sarif, or diff. "
+             "A non-default value implies --lint."),
+    cl::init("text"), cl::cat(NormalizeVarsCategory));
 
 namespace {
 
@@ -101,7 +114,19 @@ auto main(int argc, const char** argv) -> int {
     return 1;
   }
 
+  const bool Lint = LintOpt || FormatOpt != "text";
+  if (Lint && InPlace) {
+    llvm::errs() << "--lint/--format cannot be combined with --in-place\n";
+    return 1;
+  }
+  if (FormatOpt != "text" && FormatOpt != "sarif" && FormatOpt != "diff") {
+    llvm::errs() << "Unknown format '" << FormatOpt
+                 << "'. Valid formats: text, sarif, diff\n";
+    return 1;
+  }
+
   const OutputMode mode = DebugTrace ? OutputMode::Debug
+                          : Lint     ? OutputMode::Lint
                           : InPlace  ? OutputMode::InPlace
                                      : OutputMode::DryRun;
 
@@ -175,7 +200,17 @@ auto main(int argc, const char** argv) -> int {
           RenameAllMemberFunctions(std::move(cb), mode, std::move(collectFrom));
       break;
   }
+  LintReport Report;
+  if (Lint)
+    factory->setLintReport(&Report, "normalize_variables/" +
+                                        ScopeOpt.getValue() + "/" +
+                                        StyleOpt.getValue());
   int rc = Tool.run(factory.get());
+  if (Lint) {
+    if (rc != 0) return rc;
+    return emitLintResults(Report, factory->rewrites(), FormatOpt,
+                           "normalize_variables");
+  }
   factory->flush();
   return rc;
 }

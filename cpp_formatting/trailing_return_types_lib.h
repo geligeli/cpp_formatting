@@ -7,6 +7,8 @@
 #include "clang/ASTMatchers/ASTMatchFinder.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Rewrite/Core/Rewriter.h"
+#include "clang/Tooling/Tooling.h"
+#include "cpp_formatting/lint_lib.h"
 #include "cpp_formatting/output_mode.h"
 #include "llvm/ADT/StringRef.h"
 
@@ -28,8 +30,17 @@ class TrailingReturnCallback
   void run(
       const clang::ast_matchers::MatchFinder::MatchResult& Result) override;
 
+  /// Attach a lint report.  When set, every rewrite also records a
+  /// diagnostic tagged with \p RuleId.  Not owned.
+  void setLintReport(LintReport* Report, std::string RuleId) {
+    this->Report = Report;
+    this->RuleId = std::move(RuleId);
+  }
+
  private:
   clang::Rewriter& Rewrite;
+  LintReport* Report = nullptr;  // null outside Lint mode
+  std::string RuleId;
 };
 
 // ---------------------------------------------------------------------------
@@ -50,7 +61,13 @@ void registerTrailingReturnMatchers(clang::ast_matchers::MatchFinder& Finder,
 /// source file to use trailing return types.
 class TrailingReturnTypesAction : public clang::ASTFrontendAction {
  public:
-  explicit TrailingReturnTypesAction(OutputMode Mode);
+  /// \p Pending and \p Report are used in Lint mode only: rewritten content
+  /// is buffered into \p Pending (instead of being printed or written to
+  /// disk) and every rewrite records a diagnostic in \p Report.
+  explicit TrailingReturnTypesAction(OutputMode Mode,
+                                     PendingRewrites* Pending = nullptr,
+                                     LintReport* Report = nullptr,
+                                     std::string RuleId = "");
 
   void EndSourceFileAction() override;
 
@@ -59,9 +76,40 @@ class TrailingReturnTypesAction : public clang::ASTFrontendAction {
 
  private:
   OutputMode Mode;
+  PendingRewrites* Pending;
   clang::Rewriter TheRewriter;
   TrailingReturnCallback Callback;  ///< must be declared after TheRewriter
   clang::ast_matchers::MatchFinder Finder;
+};
+
+// ---------------------------------------------------------------------------
+// TrailingReturnActionFactory
+// ---------------------------------------------------------------------------
+
+/// Factory for ClangTool::run().  Mirrors RenameActionFactory: buffers
+/// rewritten content per file and (in Lint mode) collects diagnostics.
+class TrailingReturnActionFactory
+    : public clang::tooling::FrontendActionFactory {
+ public:
+  explicit TrailingReturnActionFactory(OutputMode Mode) : Mode(Mode) {}
+
+  void setLintReport(LintReport* Report, std::string RuleId) {
+    this->Report = Report;
+    this->RuleId = std::move(RuleId);
+  }
+
+  auto create() -> std::unique_ptr<clang::FrontendAction> override {
+    return std::make_unique<TrailingReturnTypesAction>(Mode, &Pending, Report,
+                                                       RuleId);
+  }
+
+  auto rewrites() const -> const PendingRewrites& { return Pending; }
+
+ private:
+  OutputMode Mode;
+  PendingRewrites Pending;
+  LintReport* Report = nullptr;
+  std::string RuleId;
 };
 
 // ---------------------------------------------------------------------------

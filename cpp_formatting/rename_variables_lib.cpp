@@ -206,22 +206,36 @@ class CollectRenamesVisitor
 // Pass 2: apply renames at every declaration and use site
 // ---------------------------------------------------------------------------
 
-static void renameAt(Rewriter& RW, SourceLocation Loc, StringRef OldName,
-                     const std::string& NewName) {
-  if (Loc.isValid() && !Loc.isMacroID())
-    RW.ReplaceText(Loc, OldName.size(), NewName);
-}
-
 class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
  public:
-  ApplyRenamesVisitor(Rewriter& RW, SourceManager& SM, const RenameMap& Renames)
-      : RW(RW), SM(SM), Renames(Renames) {}
+  ApplyRenamesVisitor(Rewriter& RW, SourceManager& SM, const RenameMap& Renames,
+                      LintReport* Report, std::string RuleId)
+      : RW(RW),
+        SM(SM),
+        Renames(Renames),
+        Report(Report),
+        RuleId(std::move(RuleId)) {}
+
+  // Applies one rewrite and, in Lint mode, records the matching diagnostic.
+  // All call sites already filter to main-file, non-macro locations, so the
+  // recorded location always points at the rewritten token.
+  void renameAt(SourceLocation Loc, StringRef OldName,
+                const std::string& NewName) {
+    if (Loc.isInvalid() || Loc.isMacroID()) return;
+    RW.ReplaceText(Loc, OldName.size(), NewName);
+    if (Report) {
+      PresumedLoc PLoc = SM.getPresumedLoc(Loc);
+      Report->add({PLoc.isValid() ? PLoc.getFilename() : "", PLoc.getLine(),
+                   PLoc.getColumn(), RuleId,
+                   "'" + OldName.str() + "' should be '" + NewName + "'"});
+    }
+  }
 
   bool VisitFieldDecl(FieldDecl* D) {
     if (!SM.isWrittenInMainFile(D->getLocation())) return true;
     auto It = Renames.find(D->getCanonicalDecl());
     if (It != Renames.end())
-      renameAt(RW, D->getLocation(), D->getName(), It->second);
+      renameAt(D->getLocation(), D->getName(), It->second);
     return true;
   }
 
@@ -232,7 +246,7 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
                           : D->getCanonicalDecl();
     auto It = Renames.find(Key);
     if (It != Renames.end())
-      renameAt(RW, D->getLocation(), D->getName(), It->second);
+      renameAt(D->getLocation(), D->getName(), It->second);
     return true;
   }
 
@@ -241,7 +255,7 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
     const Decl* Key = primaryTemplateMethod(D)->getCanonicalDecl();
     auto It = Renames.find(Key);
     if (It != Renames.end())
-      renameAt(RW, D->getLocation(), D->getName(), It->second);
+      renameAt(D->getLocation(), D->getName(), It->second);
     return true;
   }
 
@@ -268,8 +282,7 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
     }
     if (!Key) return true;
     auto It = Renames.find(Key);
-    if (It != Renames.end())
-      renameAt(RW, E->getLocation(), OldName, It->second);
+    if (It != Renames.end()) renameAt(E->getLocation(), OldName, It->second);
     return true;
   }
 
@@ -286,8 +299,7 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
     if (!Key) return true;
     auto It = Renames.find(Key);
     if (It != Renames.end())
-      renameAt(RW, E->getMemberLoc(), E->getMemberDecl()->getName(),
-               It->second);
+      renameAt(E->getMemberLoc(), E->getMemberDecl()->getName(), It->second);
     return true;
   }
 
@@ -300,7 +312,7 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
         const FieldDecl* FD = Init->getAnyMember();
         if (FD) {
           auto It = Renames.find(primaryTemplateMember(FD));
-          if (It != Renames.end()) renameAt(RW, Loc, FD->getName(), It->second);
+          if (It != Renames.end()) renameAt(Loc, FD->getName(), It->second);
         }
       }
     }
@@ -318,7 +330,7 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
       const FieldDecl* FD = D.getFieldDecl();
       if (!FD) continue;
       auto It = Renames.find(primaryTemplateMember(FD));
-      if (It != Renames.end()) renameAt(RW, Loc, FD->getName(), It->second);
+      if (It != Renames.end()) renameAt(Loc, FD->getName(), It->second);
     }
     return true;
   }
@@ -327,6 +339,8 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
   Rewriter& RW;
   SourceManager& SM;
   const RenameMap& Renames;
+  LintReport* Report;  // null outside Lint mode
+  std::string RuleId;
 };
 
 // ---------------------------------------------------------------------------
@@ -460,12 +474,15 @@ class RenameVariablesConsumer : public ASTConsumer {
  public:
   RenameVariablesConsumer(Rewriter& RW, VariableRenameCallback CB,
                           VariableScope Scope, FileSet CollectFrom,
-                          OutputMode Mode = OutputMode::DryRun)
+                          OutputMode Mode = OutputMode::DryRun,
+                          LintReport* Report = nullptr, std::string RuleId = "")
       : RW(RW),
         CB(std::move(CB)),
         Scope(Scope),
         CollectFrom(std::move(CollectFrom)),
-        Mode(Mode) {}
+        Mode(Mode),
+        Report(Report),
+        RuleId(std::move(RuleId)) {}
 
   void HandleTranslationUnit(ASTContext& Ctx) override {
     SourceManager& SM = Ctx.getSourceManager();
@@ -498,7 +515,7 @@ class RenameVariablesConsumer : public ASTConsumer {
     }
 
     if (Renames.empty()) return;
-    ApplyRenamesVisitor Applier(RW, SM, Renames);
+    ApplyRenamesVisitor Applier(RW, SM, Renames, Report, RuleId);
     Applier.TraverseDecl(Ctx.getTranslationUnitDecl());
   }
 
@@ -508,6 +525,8 @@ class RenameVariablesConsumer : public ASTConsumer {
   VariableScope Scope;
   FileSet CollectFrom;
   OutputMode Mode;
+  LintReport* Report;  // null outside Lint mode
+  std::string RuleId;
 };
 
 // ---------------------------------------------------------------------------
@@ -524,12 +543,15 @@ class RenameVariablesAction : public ASTFrontendAction {
  public:
   RenameVariablesAction(VariableRenameCallback CB, VariableScope Scope,
                         OutputMode Mode, const FileSet& CollectFrom,
-                        PendingRewrites* Pending)
+                        PendingRewrites* Pending, LintReport* Report,
+                        std::string RuleId)
       : CB(std::move(CB)),
         Scope(Scope),
         Mode(Mode),
         CollectFrom(CollectFrom),
-        Pending(Pending) {}
+        Pending(Pending),
+        Report(Report),
+        RuleId(std::move(RuleId)) {}
 
   void EndSourceFileAction() override {
     SourceManager& SM = TheRewriter.getSourceMgr();
@@ -555,8 +577,8 @@ class RenameVariablesAction : public ASTFrontendAction {
   auto CreateASTConsumer(CompilerInstance& CI, StringRef)
       -> std::unique_ptr<ASTConsumer> override {
     TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
-    return std::make_unique<RenameVariablesConsumer>(TheRewriter, CB, Scope,
-                                                     CollectFrom, Mode);
+    return std::make_unique<RenameVariablesConsumer>(
+        TheRewriter, CB, Scope, CollectFrom, Mode, Report, RuleId);
   }
 
  private:
@@ -565,6 +587,8 @@ class RenameVariablesAction : public ASTFrontendAction {
   OutputMode Mode;
   const FileSet& CollectFrom;
   PendingRewrites* Pending;
+  LintReport* Report;
+  std::string RuleId;
   Rewriter TheRewriter;
 };
 
@@ -614,11 +638,11 @@ RenameActionFactory::RenameActionFactory(VariableRenameCallback CB,
 
 auto RenameActionFactory::create() -> std::unique_ptr<clang::FrontendAction> {
   return std::make_unique<RenameVariablesAction>(CB, Scope, Mode, CollectFrom,
-                                                 &Pending);
+                                                 &Pending, Report, RuleId);
 }
 
 void RenameActionFactory::flush() {
-  if (Mode == OutputMode::Debug) {
+  if (Mode == OutputMode::Debug || Mode == OutputMode::Lint) {
     Pending.clear();
     return;
   }

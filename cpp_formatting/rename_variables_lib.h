@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "clang/Tooling/Tooling.h"
+#include "cpp_formatting/lint_lib.h"
 #include "cpp_formatting/output_mode.h"
 #include "llvm/ADT/StringRef.h"
 
@@ -69,14 +70,14 @@ enum class VariableScope {
 // Pending rewrites — buffered in-place writes
 // ---------------------------------------------------------------------------
 
-// Maps real absolute file paths to their fully rewritten content.  Populated
-// by RenameActionFactory during ClangTool::run(); written to disk atomically
-// by RenameActionFactory::flush() after the run completes.
+// `PendingRewrites` (path -> fully rewritten content) is defined in
+// lint_lib.h.  It is populated by RenameActionFactory during ClangTool::run()
+// and written to disk atomically by RenameActionFactory::flush() after the
+// run completes.
 //
 // Buffering is what makes multi-file in-place renaming correct: every TU
 // compiles against the original on-disk source, so no TU ever sees partially
 // renamed headers from a previous TU.
-using PendingRewrites = std::map<std::string, std::string>;
 
 // ---------------------------------------------------------------------------
 // RenameActionFactory
@@ -97,6 +98,18 @@ class RenameActionFactory : public clang::tooling::FrontendActionFactory {
 
   auto create() -> std::unique_ptr<clang::FrontendAction> override;
 
+  /// Attach a lint report.  When set (Lint mode), every rewrite also records
+  /// a diagnostic tagged with \p RuleId.  Not owned.
+  void setLintReport(LintReport* Report, std::string RuleId) {
+    this->Report = Report;
+    this->RuleId = std::move(RuleId);
+  }
+
+  /// The rewrites buffered during ClangTool::run().  Read after run() and
+  /// before flush(); in Lint mode this is how the main obtains the rewritten
+  /// content for diff output.
+  auto rewrites() const -> const PendingRewrites& { return Pending; }
+
   /// Write all buffered in-place rewrites to disk.  Must be called once after
   /// ClangTool::run() completes.  No-op in DryRun mode.
   void flush();
@@ -107,6 +120,8 @@ class RenameActionFactory : public clang::tooling::FrontendActionFactory {
   OutputMode Mode;
   FileSet CollectFrom;
   PendingRewrites Pending;
+  LintReport* Report = nullptr;
+  std::string RuleId;
 };
 
 // ---------------------------------------------------------------------------

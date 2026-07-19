@@ -9,12 +9,35 @@ cc_library(
     hdrs = ["output_mode.h"],
 )
 
+cc_library(
+    name = "lint_lib",
+    srcs = ["lint_lib.cpp"],
+    hdrs = ["lint_lib.h"],
+    deps = [
+        "@llvm-project//llvm:Support",
+    ],
+)
+
+cc_test(
+    name = "lint_lib_test",
+    srcs = ["lint_lib_test.cpp"],
+    copts = [
+        "-DGTEST_HAS_RTTI=0",
+    ],
+    deps = [
+        ":lint_lib",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
 # Shared library: the rewrite callback + the test-friendly rewriteToTrailingReturnTypes() helper.
 cc_library(
     name = "trailing_return_types_lib",
     srcs = ["trailing_return_types_lib.cpp"],
     hdrs = ["trailing_return_types_lib.h"],
     deps = [
+        ":lint_lib",
         ":output_mode",
         "@llvm-project//clang:ast_matchers",
         "@llvm-project//clang:frontend",
@@ -31,6 +54,7 @@ cc_binary(
     linkstatic = True,
     deps = [
         ":embedded_clang_resource",
+        ":lint_lib",
         ":trailing_return_types_lib",
         "@llvm-project//clang:ast_matchers",
         "@llvm-project//clang:frontend",
@@ -101,6 +125,7 @@ cc_library(
     srcs = ["rename_variables_lib.cpp"],
     hdrs = ["rename_variables_lib.h"],
     deps = [
+        ":lint_lib",
         ":output_mode",
         "@llvm-project//clang:ast",
         "@llvm-project//clang:frontend",
@@ -116,6 +141,7 @@ cc_binary(
     linkstatic = True,
     deps = [
         ":embedded_clang_resource",
+        ":lint_lib",
         ":naming_convention",
         ":rename_variables_lib",
         "@llvm-project//clang:frontend",
@@ -167,12 +193,36 @@ sh_test(
     ],
 )
 
+sh_test(
+    name = "lint_integration_test",
+    srcs = ["lint_integration_test.sh"],
+    args = [
+        "$(location //cpp_formatting:normalize_variables)",
+        "$(location //cpp_formatting:trailing_return_types)",
+        "$(location //cpp_formatting:cpp_format)",
+        "$(location testdata/normalize_shadow_input.cpp)",
+        "$(location testdata/normalize_shadow_expected.cpp)",
+        "$(location testdata/input.cpp)",
+        "$(location testdata/expected.cpp)",
+    ],
+    data = [
+        "testdata/expected.cpp",
+        "testdata/input.cpp",
+        "testdata/normalize_shadow_expected.cpp",
+        "testdata/normalize_shadow_input.cpp",
+        "//cpp_formatting:cpp_format",
+        "//cpp_formatting:normalize_variables",
+        "//cpp_formatting:trailing_return_types",
+    ],
+)
+
 cc_binary(
     name = "cpp_format",
     srcs = ["cpp_format.cpp"],
     linkstatic = True,
     deps = [
         ":embedded_clang_resource",
+        ":lint_lib",
         ":naming_convention",
         ":rename_variables_lib",
         ":trailing_return_types_lib",

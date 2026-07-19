@@ -150,6 +150,8 @@ bazel run //cpp_formatting:normalize_variables -- \
 | `--style=<style>` | Target naming style (required) |
 | `--scope=<scope>` | Scope to rename (default: `member`). See "Supported scopes" below. |
 | `--in-place` / `-i` | Overwrite files on disk (default: dry-run to stdout) |
+| `--lint` | Analyze only — report violations, modify nothing, exit 1 if any are found (see [Lint mode (CI/CD)](#lint-mode-cicd)) |
+| `--format=<fmt>` | Output format for `--lint`: `text` (default), `sarif`, or `diff` |
 | `--debug-trace` | Print, per TU, every rename target and reference site found in the AST. Makes no modifications. |
 
 **Supported scopes:**
@@ -241,8 +243,53 @@ bazel run //cpp_formatting:cpp_format -- \
 | `--normalize-variables-scope=<scope>` | One of `member`, `local`, `global`, `static_member`, `const_member`, `static_global`, `const_global`, `method` |
 | `--normalize-variables-style=<style>` | Target naming style |
 | `--in-place` / `-i` | Overwrite files on disk (default: dry-run) |
+| `--lint` | Analyze only — report violations, modify nothing, exit 1 if any are found |
+| `--format=<fmt>` | Output format for `--lint`: `text` (default), `sarif`, or `diff` |
 
 **Pass ordering:** `normalize_variables` rules are applied first (in the order listed in the config), then `trailing_return_types`. For in-place mode each pass reads the output of the previous one from disk.
+
+---
+
+## Lint mode (CI/CD)
+
+All three binaries support a lint mode that reports what *would* change without modifying any files:
+
+| Flag | Description |
+|---|---|
+| `--lint` | Analyze only — modify nothing, exit 1 when violations are found (exit 0 when clean) |
+| `--format=<fmt>` | Output format: `text` (default), `sarif`, or `diff`. A non-default value implies `--lint` |
+
+`--lint`/`--format` cannot be combined with `--in-place`. Diagnostics are collected at the exact sites the rewriter would change, so lint results always match what `--in-place` would do.
+
+**Text (default):** one `file:line:col: warning: message [rule-id]` line per violation, e.g.
+
+```sh
+$ normalize_variables --lint --style=snake_case --scope=member src/rect.cpp -- -std=c++17
+src/rect.cpp:2:7: warning: 'm_width' should be 'width' [normalize_variables/member/snake_case]
+```
+
+**SARIF** — [SARIF 2.1.0](https://sarifweb.azurewebsites.net/) JSON for code scanning integration. Paths are relativized to the working directory so uploaders can match them to repository files:
+
+```sh
+cpp_format --config=cpp_format.yaml --lint --format=sarif \
+  $(git ls-files '*.cpp' '*.h') > results.sarif || true
+
+# GitHub Actions: upload with github/codeql-action/upload-sarif
+- uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: results.sarif
+```
+
+**Diff** — a git-apply-able unified patch proposing the fixes (for `cpp_format` with multiple passes, the patch is the cumulative result of all passes):
+
+```sh
+# Print the proposed patch (CI artifact, PR comment, ...):
+cpp_format --config=cpp_format.yaml --lint --format=diff src/rect.cpp -- -std=c++17
+
+# Or apply it locally:
+cpp_format --config=cpp_format.yaml --lint --format=diff \
+  $(git ls-files '*.cpp' '*.h') | git apply || true
+```
 
 ---
 
@@ -367,8 +414,14 @@ cpp_formatting/
   embedded_clang_resource.h               # ensureClangResourceDir()
   embedded_clang_resource.cpp             # extract embedded headers tar.gz to a per-content-hash cache dir
 
+  # Lint mode (CI/CD)
+  lint_lib.h                              # LintDiagnostic, LintReport (text/SARIF), emitUnifiedDiff
+  lint_lib.cpp                            # implementation (JSON via llvm/Support/JSON.h)
+  lint_lib_test.cpp                       # gtest unit tests
+  lint_integration_test.sh                # shell integration tests for --lint/--format
+
   # Shared
-  output_mode.h                           # OutputMode enum (DryRun / InPlace / Debug)
+  output_mode.h                           # OutputMode enum (DryRun / InPlace / Debug / Lint)
   BUILD                                   # all Bazel targets, plus the clang_include_headers
                                           #   pkg_tar and the genrule that embeds it via xxd -i
 

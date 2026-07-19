@@ -4,6 +4,7 @@
 #include "clang/Tooling/CommonOptionsParser.h"
 #include "clang/Tooling/Tooling.h"
 #include "cpp_formatting/embedded_clang_resource.h"
+#include "cpp_formatting/lint_lib.h"
 #include "cpp_formatting/naming_convention.h"
 #include "cpp_formatting/rename_variables_lib.h"
 #include "cpp_formatting/trailing_return_types_lib.h"
@@ -88,6 +89,18 @@ static cl::opt<bool> InPlace("in-place",
 static cl::alias InPlaceAlias("i", cl::desc("Alias for --in-place"),
                               cl::aliasopt(InPlace));
 
+static cl::opt<bool> LintOpt(
+    "lint",
+    cl::desc("Analyze only: report violations without modifying any files. "
+             "Exits 1 when violations are found."),
+    cl::cat(CppFormatCategory));
+
+static cl::opt<std::string> FormatOpt(
+    "format",
+    cl::desc("Output format for --lint: text (default), sarif, or diff. "
+             "A non-default value implies --lint."),
+    cl::init("text"), cl::cat(CppFormatCategory));
+
 // ---------------------------------------------------------------------------
 // Helpers shared across passes
 // ---------------------------------------------------------------------------
@@ -126,14 +139,6 @@ void applyArgumentAdjusters(ClangTool& Tool, const std::string& ResourceDir) {
         });
   }
 }
-
-struct TrailingReturnFactory : FrontendActionFactory {
-  OutputMode Mode;
-  explicit TrailingReturnFactory(OutputMode M) : Mode(M) {}
-  auto create() -> std::unique_ptr<clang::FrontendAction> override {
-    return std::make_unique<TrailingReturnTypesAction>(Mode);
-  }
-};
 
 }  // namespace
 
@@ -189,8 +194,27 @@ auto main(int argc, const char** argv) -> int {
     }
   }
 
-  const OutputMode mode = InPlace ? OutputMode::InPlace : OutputMode::DryRun;
+  const bool Lint = LintOpt || FormatOpt != "text";
+  if (Lint && InPlace) {
+    llvm::errs() << "--lint/--format cannot be combined with --in-place\n";
+    return 1;
+  }
+  if (FormatOpt != "text" && FormatOpt != "sarif" && FormatOpt != "diff") {
+    llvm::errs() << "Unknown format '" << FormatOpt
+                 << "'. Valid formats: text, sarif, diff\n";
+    return 1;
+  }
+
+  const OutputMode mode = Lint      ? OutputMode::Lint
+                          : InPlace ? OutputMode::InPlace
+                                    : OutputMode::DryRun;
   const std::string ResourceDir = ensureClangResourceDir();
+
+  LintReport Report;
+  // Rewritten content accumulated across passes (Lint mode only).  Before
+  // each pass the accumulated files are overlaid onto the ClangTool so pass
+  // N sees pass N-1's output, matching sequential in-place semantics.
+  PendingRewrites Accum;
 
   // Pass 1+: normalize_variables rules applied in order.
   for (const auto& rule : cfg.normalize_variables) {
@@ -238,6 +262,9 @@ auto main(int argc, const char** argv) -> int {
     ClangTool Tool(OptionsParser.getCompilations(),
                    orderSourcesForRename(SourcePaths));
     applyArgumentAdjusters(Tool, ResourceDir);
+    if (Lint)
+      for (const auto& [Path, Content] : Accum)
+        Tool.mapVirtualFile(Path, Content);
 
     std::unique_ptr<RenameActionFactory> factory;
     switch (scope) {
@@ -274,8 +301,16 @@ auto main(int argc, const char** argv) -> int {
                                            std::move(collectFrom));
         break;
     }
+    if (Lint)
+      factory->setLintReport(
+          &Report, "normalize_variables/" + rule.scope + "/" + rule.style);
     if (int rc = Tool.run(factory.get())) return rc;
-    factory->flush();
+    if (Lint) {
+      for (const auto& [Path, Content] : factory->rewrites())
+        Accum[Path] = Content;
+    } else {
+      factory->flush();
+    }
   }
 
   // Final pass: trailing_return_types (runs after variable renames so it sees
@@ -284,9 +319,17 @@ auto main(int argc, const char** argv) -> int {
   if (cfg.trailing_return_types) {
     ClangTool Tool(OptionsParser.getCompilations(), SourcePaths);
     applyArgumentAdjusters(Tool, ResourceDir);
-    TrailingReturnFactory Factory(mode);
+    if (Lint)
+      for (const auto& [Path, Content] : Accum)
+        Tool.mapVirtualFile(Path, Content);
+    TrailingReturnActionFactory Factory(mode);
+    if (Lint) Factory.setLintReport(&Report, "trailing_return_types");
     if (int rc = Tool.run(&Factory)) return rc;
+    if (Lint)
+      for (const auto& [Path, Content] : Factory.rewrites())
+        Accum[Path] = Content;
   }
 
+  if (Lint) return emitLintResults(Report, Accum, FormatOpt, "cpp_format");
   return 0;
 }

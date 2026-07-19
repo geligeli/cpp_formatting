@@ -1,6 +1,7 @@
 #include "clang/Tooling/CommonOptionsParser.h"
 #include "clang/Tooling/Tooling.h"
 #include "cpp_formatting/embedded_clang_resource.h"
+#include "cpp_formatting/lint_lib.h"
 #include "cpp_formatting/trailing_return_types_lib.h"
 #include "llvm/Support/CommandLine.h"
 
@@ -15,17 +16,17 @@ static cl::opt<bool> InPlace("in-place",
 static cl::alias InPlaceAlias("i", cl::desc("Alias for -in-place"),
                               cl::aliasopt(InPlace));
 
-namespace {
+static cl::opt<bool> LintOpt(
+    "lint",
+    cl::desc("Analyze only: report violations without modifying any files. "
+             "Exits 1 when violations are found."),
+    cl::cat(TrailingReturnTypesCategory));
 
-struct ActionFactory : FrontendActionFactory {
-  OutputMode Mode;
-  explicit ActionFactory(OutputMode M) : Mode(M) {}
-  auto create() -> std::unique_ptr<clang::FrontendAction> override {
-    return std::make_unique<TrailingReturnTypesAction>(Mode);
-  }
-};
-
-}  // namespace
+static cl::opt<std::string> FormatOpt(
+    "format",
+    cl::desc("Output format for --lint: text (default), sarif, or diff. "
+             "A non-default value implies --lint."),
+    cl::init("text"), cl::cat(TrailingReturnTypesCategory));
 
 auto main(int argc, const char** argv) -> int {
   auto ExpectedParser =
@@ -35,6 +36,18 @@ auto main(int argc, const char** argv) -> int {
     return 1;
   }
   CommonOptionsParser& OptionsParser = ExpectedParser.get();
+
+  const bool Lint = LintOpt || FormatOpt != "text";
+  if (Lint && InPlace) {
+    llvm::errs() << "--lint/--format cannot be combined with --in-place\n";
+    return 1;
+  }
+  if (FormatOpt != "text" && FormatOpt != "sarif" && FormatOpt != "diff") {
+    llvm::errs() << "Unknown format '" << FormatOpt
+                 << "'. Valid formats: text, sarif, diff\n";
+    return 1;
+  }
+
   ClangTool Tool(OptionsParser.getCompilations(),
                  OptionsParser.getSourcePathList());
   Tool.appendArgumentsAdjuster(
@@ -69,6 +82,17 @@ auto main(int argc, const char** argv) -> int {
         });
   }
 
-  ActionFactory Factory(InPlace ? OutputMode::InPlace : OutputMode::DryRun);
-  return Tool.run(&Factory);
+  const OutputMode Mode =
+      Lint ? OutputMode::Lint
+           : (InPlace ? OutputMode::InPlace : OutputMode::DryRun);
+  TrailingReturnActionFactory Factory(Mode);
+  LintReport Report;
+  if (Lint) Factory.setLintReport(&Report, "trailing_return_types");
+  int rc = Tool.run(&Factory);
+  if (Lint) {
+    if (rc != 0) return rc;
+    return emitLintResults(Report, Factory.rewrites(), FormatOpt,
+                           "trailing_return_types");
+  }
+  return rc;
 }

@@ -1,6 +1,7 @@
 #include "cpp_formatting/trailing_return_types_lib.h"
 
 #include "clang/ASTMatchers/ASTMatchers.h"
+#include "clang/Basic/FileEntry.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Lex/Lexer.h"
 #include "clang/Tooling/Tooling.h"
@@ -143,6 +144,13 @@ void TrailingReturnCallback::run(const MatchFinder::MatchResult& Result) {
   // FunctionTypeLoc).
   SourceLocation InsertLoc = FTL.getLocalRangeEnd();
   Rewrite.InsertTextAfterToken(InsertLoc, " -> " + OriginalTypeStr.str());
+
+  if (Report) {
+    PresumedLoc PLoc = SM.getPresumedLoc(Func->getLocation());
+    Report->add({PLoc.isValid() ? PLoc.getFilename() : "", PLoc.getLine(),
+                 PLoc.getColumn(), RuleId,
+                 "function should use trailing return type"});
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -162,14 +170,36 @@ void registerTrailingReturnMatchers(MatchFinder& Finder,
 // TrailingReturnTypesAction implementation
 // ---------------------------------------------------------------------------
 
-TrailingReturnTypesAction::TrailingReturnTypesAction(OutputMode Mode)
-    : Mode(Mode), Callback(TheRewriter) {}
+TrailingReturnTypesAction::TrailingReturnTypesAction(OutputMode Mode,
+                                                     PendingRewrites* Pending,
+                                                     LintReport* Report,
+                                                     std::string RuleId)
+    : Mode(Mode), Pending(Pending), Callback(TheRewriter) {
+  Callback.setLintReport(Report, std::move(RuleId));
+}
 
 void TrailingReturnTypesAction::EndSourceFileAction() {
   SourceManager& SM = TheRewriter.getSourceMgr();
   if (Mode == OutputMode::InPlace) {
     TheRewriter.overwriteChangedFiles();
     llvm::outs() << "Modifications written to disk.\n";
+  } else if (Mode == OutputMode::Lint) {
+    // Buffer the main file's content only if it actually has edits; the main
+    // consumes it (e.g. to emit a unified diff) after ClangTool::run().
+    FileID MainFID = SM.getMainFileID();
+    for (auto It = TheRewriter.buffer_begin(); It != TheRewriter.buffer_end();
+         ++It) {
+      if (It->first != MainFID) continue;
+      const FileEntry* FE = SM.getFileEntryForID(MainFID);
+      if (!FE) break;
+      std::string Path = FE->tryGetRealPathName().str();
+      if (Path.empty()) break;
+      std::string Content;
+      llvm::raw_string_ostream OS(Content);
+      It->second.write(OS);
+      (*Pending)[std::move(Path)] = std::move(Content);
+      break;
+    }
   } else {
     llvm::errs() << "** Rewritten Output (Dry Run): **\n";
     TheRewriter.getEditBuffer(SM.getMainFileID()).write(llvm::outs());

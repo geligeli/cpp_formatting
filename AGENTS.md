@@ -30,6 +30,8 @@ bazel test //cpp_formatting:trailing_return_types_integration_test
 bazel test //cpp_formatting:naming_convention_test
 bazel test //cpp_formatting:rename_variables_test
 bazel test //cpp_formatting:normalize_variables_integration_test
+bazel test //cpp_formatting:lint_lib_test
+bazel test //cpp_formatting:lint_integration_test
 ```
 
 **Run a binary (dry-run):**
@@ -43,6 +45,12 @@ bazel run //cpp_formatting:cpp_format -- --config=cpp_format.yaml --in-place fil
 ```
 bazel run //cpp_formatting:trailing_return_types -- -i path/to/file.cpp -- -std=c++17
 bazel run //cpp_formatting:normalize_variables -- --style=snake_case --scope=member --in-place path/to/file.cpp -- -std=c++17
+```
+
+**Lint mode (CI/CD):** all three binaries accept `--lint` (modify nothing, exit 1 when violations are found, 0 when clean) and `--format=<text|sarif|diff>` (default `text`; a non-default value implies `--lint`). `sarif` emits a SARIF 2.1.0 log; `diff` emits a git-apply-able unified patch. Output goes to stdout; `--lint`/`--format` cannot be combined with `--in-place`.
+```
+bazel run //cpp_formatting:normalize_variables -- --style=snake_case --scope=member --lint path/to/file.cpp -- -std=c++17
+bazel run //cpp_formatting:cpp_format -- --config=cpp_format.yaml --format=sarif file.cpp -- -std=c++17
 ```
 
 **Debug rename detection (`normalize_variables --debug-trace`):** prints per TU the rename map and every reference site found in the AST, with `main=Y/N`, `macro=Y/N`, and a `WILL_RENAME` marker on sites that would actually be rewritten. Useful for diagnosing why a particular use was missed (e.g. it lives in a file that wasn't passed in the source list).
@@ -64,11 +72,12 @@ All source files live under [cpp_formatting/](cpp_formatting/).
 
 #### `trailing_return_types` — rewrite functions to trailing return syntax
 
-- [cpp_formatting/trailing_return_types.cpp](cpp_formatting/trailing_return_types.cpp) — `main()`: CLI option parsing and a tiny `ActionFactory`.
+- [cpp_formatting/trailing_return_types.cpp](cpp_formatting/trailing_return_types.cpp) — `main()`: CLI option parsing (including `--lint`/`--format`), drives `TrailingReturnActionFactory`.
 - [cpp_formatting/trailing_return_types_lib.h](cpp_formatting/trailing_return_types_lib.h) — Public API:
-  - `TrailingReturnCallback` — AST match callback that performs the rewrite
+  - `TrailingReturnCallback` — AST match callback that performs the rewrite (records lint diagnostics via `setLintReport()`)
   - `registerTrailingReturnMatchers()` — single authoritative place for the matcher predicate
-  - `TrailingReturnTypesAction` — frontend action (dry-run or in-place via `OutputMode`)
+  - `TrailingReturnTypesAction` — frontend action (dry-run, in-place, or lint via `OutputMode`)
+  - `TrailingReturnActionFactory` — factory for `ClangTool::run()`; buffers per-file rewrites and lint diagnostics
   - `rewriteToTrailingReturnTypes()` — test helper that rewrites an in-memory string
 - [cpp_formatting/trailing_return_types_lib.cpp](cpp_formatting/trailing_return_types_lib.cpp) — Implementation plus the private `CaptureAction` used by the test helper.
 
@@ -79,8 +88,7 @@ All source files live under [cpp_formatting/](cpp_formatting/).
   - `FileSet` — set of real absolute paths whose declarations the tool collects (enables cross-file renaming)
   - `VariableRenameCallback` — callback invoked once per canonical declaration
   - `VariableScope` — broad: `Member` | `Local` | `Global`; fine-grained: `StaticMember` | `ConstMember` | `StaticGlobal` | `ConstGlobal`; functions: `Method`
-  - `PendingRewrites` — map of file path → fully rewritten content; populated during `ClangTool::run()`, drained by `flush()`
-  - `RenameActionFactory` — `FrontendActionFactory` subclass that buffers every TU's edits in `PendingRewrites`; call `flush()` after `Tool.run()` returns to commit them (atomic disk writes for `InPlace`, formatted stdout for `DryRun`, no-op for `Debug`)
+  - `RenameActionFactory` — `FrontendActionFactory` subclass that buffers every TU's edits in `PendingRewrites`; call `flush()` after `Tool.run()` returns to commit them (atomic disk writes for `InPlace`, formatted stdout for `DryRun`, no-op for `Debug`/`Lint`). `setLintReport()` attaches a `LintReport` for lint diagnostics; `rewrites()` exposes the buffered content (used by lint `diff` output).
   - Factory functions: `RenameAllMemberVariables`, `RenameAllLocalVariables`, `RenameAllGlobalVariables`, `RenameAllStaticMemberVariables`, `RenameAllConstMemberVariables`, `RenameAllStaticGlobalVariables`, `RenameAllConstGlobalVariables`, `RenameAllMemberFunctions`
   - `orderSourcesForRename()` — promotes header files to the end of the source list so every `.cpp` TU is parsed against the original on-disk header content
   - `rewriteVariableNames()` — test helper (single in-memory TU, returns the rewritten string)
@@ -90,7 +98,12 @@ All source files live under [cpp_formatting/](cpp_formatting/).
 
 #### `cpp_format` — combined tool with YAML config
 
-- [cpp_formatting/cpp_format.cpp](cpp_formatting/cpp_format.cpp) — `main()`: parses CLI options or a YAML config file, then runs `normalize_variables` passes followed by `trailing_return_types`. Shares `rename_variables_lib` and `trailing_return_types_lib`.
+- [cpp_formatting/cpp_format.cpp](cpp_formatting/cpp_format.cpp) — `main()`: parses CLI options or a YAML config file, then runs `normalize_variables` passes followed by `trailing_return_types`. Shares `rename_variables_lib` and `trailing_return_types_lib`. In lint mode all passes report into one shared `LintReport`, and each pass's buffered rewrites are overlaid onto the next pass's `ClangTool` via `mapVirtualFile()` so lint results match sequential in-place runs.
+
+#### Lint support (CI/CD)
+
+- [cpp_formatting/lint_lib.h](cpp_formatting/lint_lib.h) — `PendingRewrites` (path → rewritten content, shared by both rewrite libs), `LintDiagnostic`, `LintReport` (`emitText`/`emitSARIF`), `emitUnifiedDiff()` (Myers line diff, git-apply-able), `relativizeToCwd()`, `emitLintResults()` (shared by the three mains: emits the chosen format and returns the exit code).
+- [cpp_formatting/lint_lib.cpp](cpp_formatting/lint_lib.cpp) — Implementation. JSON via `llvm/Support/JSON.h` (no new dependency). Lint diagnostics are recorded at the same choke points that perform rewrites (`ApplyRenamesVisitor::renameAt`, `TrailingReturnCallback::run`), so lint results exactly match what in-place mode would change.
 
 #### Embedded Clang resource directory
 
@@ -115,6 +128,14 @@ All three binaries link the Clang built-in headers (`stddef.h`, `__stddef_max_al
   2. Shadowed variable — global renamed, same-named local parameter unchanged.
   3. Source ordering — header passed in the middle of the source list; tool auto-promotes it to the end so every `.cpp` is parsed against the original header.
   4. Member function rename — virtual override hierarchy, out-of-line static definition, cross-file call sites; destructor, data members, and free functions unchanged.
+- [cpp_formatting/lint_lib_test.cpp](cpp_formatting/lint_lib_test.cpp) — gtest unit tests for `lint_lib`: unified diff (hunks, context merging, missing trailing newline, empty inputs) and SARIF emission (parsed back with `llvm::json`).
+- [cpp_formatting/lint_integration_test.sh](cpp_formatting/lint_integration_test.sh) — Shell integration tests for `--lint`/`--format` across all three binaries:
+  1. Text lint — diagnostics on stdout, exit 1, file byte-identical.
+  2. SARIF lint — valid 2.1.0 log with rule id and cwd-relative URI.
+  3. Diff lint — emitted patch applies with `git apply` and matches the `--in-place` result.
+  4. Clean file — exit 0, no diagnostics.
+  5. `trailing_return_types` lint — text and diff round-trip.
+  6. `cpp_format` lint — multi-pass run aggregates both rule ids into one SARIF report.
 
 ### Build files
 

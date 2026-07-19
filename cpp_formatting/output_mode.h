@@ -7,6 +7,8 @@ enum class OutputMode {
   Debug,    ///< Print, per TU, every rename target and every reference site
             ///< found in the AST (with file:line:col and main-file flag).
             ///< Makes no modifications to source files.
+  Lint,     ///< Buffer rewrites like DryRun and record one lint diagnostic
+            ///< per rewrite; never writes to disk or prints source.
 };
 
 #endif  // CPP_FORMATTING_OUTPUT_MODE_H_
