@@ -305,6 +305,21 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
         ApplyRenamesVisitor>::TraverseConstructorInitializer(Init);
   }
 
+  // Designated initializers (e.g. `S s{.val_ = 0}`).  The field name lives in
+  // the designator of a DesignatedInitExpr, not in a MemberExpr.
+  bool VisitDesignatedInitExpr(DesignatedInitExpr* E) {
+    for (const DesignatedInitExpr::Designator& D : E->designators()) {
+      if (!D.isFieldDesignator()) continue;
+      SourceLocation Loc = D.getFieldLoc();
+      if (!SM.isWrittenInMainFile(Loc)) continue;
+      const FieldDecl* FD = D.getFieldDecl();
+      if (!FD) continue;
+      auto It = Renames.find(primaryTemplateMember(FD));
+      if (It != Renames.end()) renameAt(RW, Loc, FD->getName(), It->second);
+    }
+    return true;
+  }
+
  private:
   Rewriter& RW;
   SourceManager& SM;
@@ -396,6 +411,18 @@ class DebugTraceVisitor : public RecursiveASTVisitor<DebugTraceVisitor> {
     }
     return RecursiveASTVisitor<
         DebugTraceVisitor>::TraverseConstructorInitializer(Init);
+  }
+
+  bool VisitDesignatedInitExpr(DesignatedInitExpr* E) {
+    for (const DesignatedInitExpr::Designator& D : E->designators()) {
+      if (!D.isFieldDesignator()) continue;
+      const FieldDecl* FD = D.getFieldDecl();
+      if (!FD) continue;
+      auto It = Renames.find(primaryTemplateMember(FD));
+      if (It != Renames.end())
+        log("DesignInit", D.getFieldLoc(), FD->getName(), It->second);
+    }
+    return true;
   }
 
  private:

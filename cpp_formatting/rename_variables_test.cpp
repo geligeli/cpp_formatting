@@ -345,6 +345,14 @@ TEST(RenameMemberVariables, RenamesMemberInConstructorInitializer) {
       "};\n");
 }
 
+TEST(RenameMemberVariables, RenamesMemberInDesignatedInitializer) {
+  EXPECT_EQ(rewriteMember("struct S { int value_; int other_; };\n"
+                          "S s{.value_ = 1, .other_ = 2};\n",
+                          renameOne("value_", "renamed_")),
+            "struct S { int renamed_; int other_; };\n"
+            "S s{.renamed_ = 1, .other_ = 2};\n");
+}
+
 // ---------------------------------------------------------------------------
 // C++23 explicit object parameters ("deducing this", P0847)
 //
