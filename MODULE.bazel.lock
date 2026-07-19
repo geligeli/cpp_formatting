@@ -158,7 +158,7 @@
   "moduleExtensions": {
     "//third_party/llvm:extensions.bzl%llvm": {
       "general": {
-        "bzlTransitiveDigest": "sj86KUb6n6PRo6+Te95wVvpxBKSWobk2asaLi1WiTKw=",
+        "bzlTransitiveDigest": "y4BuD+QsKRMj30A2nMoMRQx419xDaN+4ORHvEPRrgr4=",
         "usagesDigest": "CrcKKa5oBdOTLY3ZeaVBiY2x3U16aVNPJGOoRUUcsgs=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
@@ -201,7 +201,8 @@
             "repoRuleId": "@@//third_party/llvm:configure.bzl%llvm_configure",
             "attributes": {
               "targets": [
-                "X86"
+                "X86",
+                "AArch64"
               ]
             }
           }
