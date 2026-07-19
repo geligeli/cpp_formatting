@@ -21,8 +21,9 @@ static cl::opt<std::string> StyleOpt(
 
 static cl::opt<std::string> ScopeOpt(
     "scope",
-    cl::desc("Variable scope to rename: member, local, global, "
-             "static_member, const_member, static_global, const_global"),
+    cl::desc("Scope to rename: member, local, global, "
+             "static_member, const_member, static_global, const_global, "
+             "method"),
     cl::init("member"), cl::cat(NormalizeVarsCategory));
 
 static cl::opt<bool> InPlace("in-place",
@@ -90,11 +91,13 @@ auto main(int argc, const char** argv) -> int {
     scope = VariableScope::StaticGlobal;
   } else if (ScopeOpt == "const_global") {
     scope = VariableScope::ConstGlobal;
+  } else if (ScopeOpt == "method") {
+    scope = VariableScope::Method;
   } else {
-    llvm::errs()
-        << "Unknown scope '" << ScopeOpt
-        << "'. Valid scopes: member, local, global, "
-           "static_member, const_member, static_global, const_global\n";
+    llvm::errs() << "Unknown scope '" << ScopeOpt
+                 << "'. Valid scopes: member, local, global, "
+                    "static_member, const_member, static_global, const_global, "
+                    "method\n";
     return 1;
   }
 
@@ -166,6 +169,10 @@ auto main(int argc, const char** argv) -> int {
     case VariableScope::ConstGlobal:
       factory = RenameAllConstGlobalVariables(std::move(cb), mode,
                                               std::move(collectFrom));
+      break;
+    case VariableScope::Method:
+      factory =
+          RenameAllMemberFunctions(std::move(cb), mode, std::move(collectFrom));
       break;
   }
   int rc = Tool.run(factory.get());

@@ -72,16 +72,16 @@ All source files live under [cpp_formatting/](cpp_formatting/).
   - `rewriteToTrailingReturnTypes()` — test helper that rewrites an in-memory string
 - [cpp_formatting/trailing_return_types_lib.cpp](cpp_formatting/trailing_return_types_lib.cpp) — Implementation plus the private `CaptureAction` used by the test helper.
 
-#### `normalize_variables` — rename variables to a consistent naming convention
+#### `normalize_variables` — rename variables and member functions to a consistent naming convention
 
 - [cpp_formatting/normalize_variables.cpp](cpp_formatting/normalize_variables.cpp) — `main()`: CLI option parsing, builds a `FileSet` from source paths, drives `rename_variables_lib`.
 - [cpp_formatting/rename_variables_lib.h](cpp_formatting/rename_variables_lib.h) — Public API:
   - `FileSet` — set of real absolute paths whose declarations the tool collects (enables cross-file renaming)
   - `VariableRenameCallback` — callback invoked once per canonical declaration
-  - `VariableScope` — broad: `Member` | `Local` | `Global`; fine-grained: `StaticMember` | `ConstMember` | `StaticGlobal` | `ConstGlobal`
+  - `VariableScope` — broad: `Member` | `Local` | `Global`; fine-grained: `StaticMember` | `ConstMember` | `StaticGlobal` | `ConstGlobal`; functions: `Method`
   - `PendingRewrites` — map of file path → fully rewritten content; populated during `ClangTool::run()`, drained by `flush()`
   - `RenameActionFactory` — `FrontendActionFactory` subclass that buffers every TU's edits in `PendingRewrites`; call `flush()` after `Tool.run()` returns to commit them (atomic disk writes for `InPlace`, formatted stdout for `DryRun`, no-op for `Debug`)
-  - Factory functions: `RenameAllMemberVariables`, `RenameAllLocalVariables`, `RenameAllGlobalVariables`, `RenameAllStaticMemberVariables`, `RenameAllConstMemberVariables`, `RenameAllStaticGlobalVariables`, `RenameAllConstGlobalVariables`
+  - Factory functions: `RenameAllMemberVariables`, `RenameAllLocalVariables`, `RenameAllGlobalVariables`, `RenameAllStaticMemberVariables`, `RenameAllConstMemberVariables`, `RenameAllStaticGlobalVariables`, `RenameAllConstGlobalVariables`, `RenameAllMemberFunctions`
   - `orderSourcesForRename()` — promotes header files to the end of the source list so every `.cpp` TU is parsed against the original on-disk header content
   - `rewriteVariableNames()` — test helper (single in-memory TU, returns the rewritten string)
 - [cpp_formatting/rename_variables_lib.cpp](cpp_formatting/rename_variables_lib.cpp) — Implementation: two-pass `RecursiveASTVisitor` (collect declarations, then apply renames). A third visitor (`DebugTraceVisitor`) runs in `OutputMode::Debug` to print every reference site without modifying anything.
@@ -109,11 +109,12 @@ All three binaries link the Clang built-in headers (`stddef.h`, `__stddef_max_al
   3. In-place on two files in one invocation — both files are modified.
   4. In-place on a file with system `#include`s — validates the embedded Clang resource directory works (no system Clang required).
 - [cpp_formatting/naming_convention_test.cpp](cpp_formatting/naming_convention_test.cpp) — gtest unit tests for `naming_convention`: `splitIntoWords`, `formatName`, `renameToStyle`.
-- [cpp_formatting/rename_variables_test.cpp](cpp_formatting/rename_variables_test.cpp) — gtest unit tests for `rename_variables_lib` (member, local, global, static data members, const members, static globals, const globals, templates, cross-file, constructor initializers, C++23 explicit object parameters / "deducing this").
+- [cpp_formatting/rename_variables_test.cpp](cpp_formatting/rename_variables_test.cpp) — gtest unit tests for `rename_variables_lib` (member, local, global, static data members, const members, static globals, const globals, member functions, templates, cross-file, constructor initializers, C++23 explicit object parameters / "deducing this").
 - [cpp_formatting/normalize_variables_integration_test.sh](cpp_formatting/normalize_variables_integration_test.sh) — Shell integration tests for `normalize_variables`:
   1. Multi-file member rename — cross-file references, pointer-to-member, lambda, scope separation.
   2. Shadowed variable — global renamed, same-named local parameter unchanged.
   3. Source ordering — header passed in the middle of the source list; tool auto-promotes it to the end so every `.cpp` is parsed against the original header.
+  4. Member function rename — virtual override hierarchy, out-of-line static definition, cross-file call sites; destructor, data members, and free functions unchanged.
 
 ### Build files
 
@@ -148,7 +149,7 @@ normalize_variables:
   #   style: camelCase
 ```
 
-Supported scopes: `member`, `local`, `global`, `static_member`, `const_member`, `static_global`, `const_global`.
+Supported scopes: `member`, `local`, `global`, `static_member`, `const_member`, `static_global`, `const_global`, `method`.
 
 Supported styles: `snake_case`, `_leading`, `trailing_`, `m_prefix`, `camelCase`, `UpperCamelCase`, `UPPER_SNAKE_CASE`, `kConstant`.
 
@@ -182,7 +183,8 @@ Edits are buffered in `RenameActionFactory::Pending` (a path → content map) an
 - **`FunctionTypeLoc::getLocalRangeEnd()`** — For member functions with cv/ref/noexcept qualifiers, Clang sets this to the location of the last qualifier.
 - **Pointer-to-member** — `&S::field` produces a `DeclRefExpr` with `FieldDecl` (not `VarDecl`). `VisitDeclRefExpr` handles both cases.
 - **Constructor mem-initializers** — `S() : val_(0) {}` is a `CXXCtorInitializer`, not a `Stmt` or `Decl`, so it is not visited by the standard `Visit*` callbacks. `ApplyRenamesVisitor` overrides `TraverseConstructorInitializer` and rewrites at `getMemberLocation()`.
-- **Template instantiation** — `FieldDecl` instances in template specializations are mapped back to the primary-template field by index walk through `ClassTemplateSpecializationDecl`.
+- **Template instantiation** — `FieldDecl` instances in template specializations are mapped back to the primary-template field by index walk through `ClassTemplateSpecializationDecl`. For member functions, `primaryTemplateMethod()` walks `getInstantiatedFromMemberFunction()` instead.
+- **Member-function scope (`Method`)** — constructors, destructors, conversion functions, and overloaded operators are never renamed (`isRenamableMethod()`); their names are not plain identifiers. A virtual function is renamed together with its entire override hierarchy (`collectOverrideFamily()`); if any function in the hierarchy is declared outside the `FileSet`, the rename is skipped entirely so `override` checking can never be broken.
 - **Shadowed variables** — `matchesScope()` filters by scope: a parameter with the same name as a global is not collected when renaming globals.
 - **Per-file-content cache key** — the embedded Clang resource directory is extracted under a directory whose name includes the FNV-1a hash of the embedded `.tar.gz`. If the embedded headers change (e.g. after an LLVM upgrade) a fresh cache directory is created automatically.
 

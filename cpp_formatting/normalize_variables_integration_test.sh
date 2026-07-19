@@ -14,6 +14,10 @@
 #   $11  testdata/normalize_order_expected.h
 #   $12  testdata/normalize_order_impl_expected.cpp
 #   $13  testdata/normalize_order_test_expected.cpp
+#   $14  testdata/normalize_method_input.h
+#   $15  testdata/normalize_method_input.cpp
+#   $16  testdata/normalize_method_expected.h
+#   $17  testdata/normalize_method_expected.cpp
 
 set -euo pipefail
 
@@ -30,6 +34,10 @@ order_test_in="${10}"
 order_h_exp="${11}"
 order_impl_exp="${12}"
 order_test_exp="${13}"
+method_h_in="${14}"
+method_cpp_in="${15}"
+method_h_exp="${16}"
+method_cpp_exp="${17}"
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
@@ -105,3 +113,25 @@ diff -u "$order_impl_exp" "$tmpdir/normalize_order_impl_input.cpp" \
 diff -u "$order_test_exp" "$tmpdir/normalize_order_test_input.cpp" \
   || fail "order test: test file does not match expected"
 echo "PASS: source ordering (header mid-list, two cpp files both renamed correctly)"
+
+# ---------------------------------------------------------------------------
+# Test 4 — member function rename (camelCase → snake_case)
+#
+# --scope=method renames member functions across files: the pure-virtual base
+# declaration, the override, the out-of-line static definition, and all call
+# sites.  The destructor, data members, and free functions must be untouched.
+# ---------------------------------------------------------------------------
+cp "$method_h_in"   "$tmpdir/normalize_method_input.h"
+cp "$method_cpp_in" "$tmpdir/normalize_method_input.cpp"
+
+"$binary" \
+  --style=snake_case --scope=method --in-place \
+  "$tmpdir/normalize_method_input.cpp" \
+  "$tmpdir/normalize_method_input.h" \
+  -- -std=c++17 -xc++ -Wno-pragma-once-outside-header -I"$tmpdir"
+
+diff -u "$method_h_exp"   "$tmpdir/normalize_method_input.h"   \
+  || fail "method test: header does not match expected"
+diff -u "$method_cpp_exp" "$tmpdir/normalize_method_input.cpp" \
+  || fail "method test: impl file does not match expected"
+echo "PASS: member function rename (virtual hierarchy, static method, cross-file call sites)"

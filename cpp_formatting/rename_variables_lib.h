@@ -58,6 +58,11 @@ enum class VariableScope {
   StaticGlobal,  ///< File/namespace-scope vars declared with the static
                  ///< keyword.
   ConstGlobal,   ///< File/namespace-scope vars that are const or constexpr.
+
+  // Function scopes
+  Method,  ///< Member functions, static and non-static (CXXMethodDecl).
+           ///< Constructors, destructors, conversion functions, and overloaded
+           ///< operators are never renamed.
 };
 
 // ---------------------------------------------------------------------------
@@ -154,6 +159,17 @@ auto RenameAllStaticGlobalVariables(VariableRenameCallback CB,
 auto RenameAllConstGlobalVariables(VariableRenameCallback CB,
                                    OutputMode Mode = OutputMode::DryRun,
                                    FileSet CollectFrom = {})
+    -> std::unique_ptr<RenameActionFactory>;
+
+/// Returns a RenameActionFactory that renames member functions (static and
+/// non-static).  Constructors, destructors, conversion functions, and
+/// overloaded operators are never renamed.  A virtual function is renamed
+/// together with its entire override hierarchy; if any member of the
+/// hierarchy is declared outside \p CollectFrom, the rename is skipped so
+/// `override` checking is never broken.
+auto RenameAllMemberFunctions(VariableRenameCallback CB,
+                              OutputMode Mode = OutputMode::DryRun,
+                              FileSet CollectFrom = {})
     -> std::unique_ptr<RenameActionFactory>;
 
 // ---------------------------------------------------------------------------

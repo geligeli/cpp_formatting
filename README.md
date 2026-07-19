@@ -92,7 +92,7 @@ bazel test //cpp_formatting:trailing_return_types_integration_test
 
 ## `normalize_variables`
 
-Renames variables (member, local, or global) to a chosen naming convention using Clang's AST. Handles cross-file renaming: list the header alongside its `.cpp` and both files are updated consistently.
+Renames variables (member, local, or global) and member functions to a chosen naming convention using Clang's AST. Handles cross-file renaming: list the header alongside its `.cpp` and both files are updated consistently.
 
 ```cpp
 // Before (member variables with m_ prefix)
@@ -163,6 +163,7 @@ bazel run //cpp_formatting:normalize_variables -- \
 | `const_member` | static data members that are `const` or `constexpr` |
 | `static_global` | file- and namespace-scope variables declared `static` |
 | `const_global` | file- and namespace-scope variables that are `const` or `constexpr` |
+| `method` | member functions, static and non-static (never constructors, destructors, conversion functions, or overloaded operators; a virtual function is renamed together with its whole override hierarchy — if any override is declared outside the listed files, the rename is skipped) |
 
 **Cross-file renaming:** list all files that share declarations — order does not matter. The tool auto-promotes header files to the end of the source list so each `.cpp` is parsed against the original on-disk header content; edits are buffered and committed atomically once every TU has been processed.
 
@@ -195,7 +196,7 @@ trailing_return_types: true
 # Rename variables — multiple rules are applied in order.
 # Supported scopes: member, local, global,
 #                   static_member, const_member,
-#                   static_global, const_global
+#                   static_global, const_global, method
 normalize_variables:
   - scope: member   # non-static and static data members
     style: snake_case
@@ -237,7 +238,7 @@ bazel run //cpp_formatting:cpp_format -- \
 |---|---|
 | `--config=<file>` | YAML configuration file (takes precedence over per-pass flags) |
 | `--trailing-return-types` | Enable the trailing-return-type pass |
-| `--normalize-variables-scope=<scope>` | One of `member`, `local`, `global`, `static_member`, `const_member`, `static_global`, `const_global` |
+| `--normalize-variables-scope=<scope>` | One of `member`, `local`, `global`, `static_member`, `const_member`, `static_global`, `const_global`, `method` |
 | `--normalize-variables-style=<style>` | Target naming style |
 | `--in-place` / `-i` | Overwrite files on disk (default: dry-run) |
 

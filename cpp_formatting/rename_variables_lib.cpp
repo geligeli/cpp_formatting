@@ -4,6 +4,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Basic/FileEntry.h"
@@ -19,6 +20,16 @@ namespace {
 // ---------------------------------------------------------------------------
 // Scope classification
 // ---------------------------------------------------------------------------
+
+// Only ordinary named member functions can be renamed: constructors and
+// destructors take the class name, conversion functions and overloaded
+// operators have no identifier of their own that renameToStyle could rewrite
+// without breaking the syntax.
+static bool isRenamableMethod(const CXXMethodDecl* MD) {
+  if (isa<CXXConstructorDecl, CXXDestructorDecl, CXXConversionDecl>(MD))
+    return false;
+  return MD->getOverloadedOperator() == OO_None;
+}
 
 bool matchesScope(const NamedDecl* D, VariableScope Scope) {
   switch (Scope) {
@@ -56,6 +67,10 @@ bool matchesScope(const NamedDecl* D, VariableScope Scope) {
         return false;
       return VD->isConstexpr() || VD->getType().isConstQualified();
     }
+    case VariableScope::Method: {
+      const auto* MD = dyn_cast<CXXMethodDecl>(D);
+      return MD && isRenamableMethod(MD);
+    }
   }
   return false;
 }
@@ -81,6 +96,26 @@ static const FieldDecl* primaryTemplateMember(const FieldDecl* FD) {
 static const VarDecl* primaryTemplateStaticMember(const VarDecl* VD) {
   while (const VarDecl* P = VD->getInstantiatedFromStaticDataMember()) VD = P;
   return VD;
+}
+
+// Maps a method of a class-template specialization (or an instantiated member
+// function template) back to the method of the primary template.
+static const CXXMethodDecl* primaryTemplateMethod(const CXXMethodDecl* MD) {
+  while (const auto* P = dyn_cast_or_null<CXXMethodDecl>(
+             MD->getInstantiatedFromMemberFunction()))
+    MD = P;
+  return MD;
+}
+
+// Collects \p MD and, transitively, every virtual function it overrides.  The
+// whole family must be renamed together — renaming only some overrides would
+// break `override` checking.
+static void collectOverrideFamily(const CXXMethodDecl* MD,
+                                  std::vector<const CXXMethodDecl*>& Out) {
+  MD = primaryTemplateMethod(MD);
+  Out.push_back(MD);
+  for (const CXXMethodDecl* O : MD->overridden_methods())
+    collectOverrideFamily(O, Out);
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +159,10 @@ class CollectRenamesVisitor
     collect(D);
     return true;
   }
+  bool VisitCXXMethodDecl(CXXMethodDecl* D) {
+    collectMethod(D);
+    return true;
+  }
 
  private:
   void collect(NamedDecl* D) {
@@ -134,6 +173,25 @@ class CollectRenamesVisitor
     std::string NewName;
     if (CB(D->getName(), NewName) && NewName != D->getName().str())
       Renames[Key] = std::move(NewName);
+  }
+
+  void collectMethod(const CXXMethodDecl* D) {
+    D = primaryTemplateMethod(D);
+    if (D->isImplicit() || !matchesScope(D, Scope)) return;
+    if (!shouldCollect(D->getLocation(), SM, CollectFrom)) return;
+    const Decl* Key = D->getCanonicalDecl();
+    if (!Visited.insert(Key).second) return;
+    // All-or-nothing across the override hierarchy: if any overridden base
+    // function is declared outside the collected files, renaming here would
+    // leave the hierarchy inconsistent, so skip the rename entirely.
+    std::vector<const CXXMethodDecl*> Family;
+    collectOverrideFamily(D, Family);
+    for (const CXXMethodDecl* M : Family)
+      if (!shouldCollect(M->getLocation(), SM, CollectFrom)) return;
+    std::string NewName;
+    if (CB(D->getName(), NewName) && NewName != D->getName().str())
+      for (const CXXMethodDecl* M : Family)
+        Renames[M->getCanonicalDecl()] = NewName;
   }
 
   SourceManager& SM;
@@ -178,6 +236,15 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
     return true;
   }
 
+  bool VisitCXXMethodDecl(CXXMethodDecl* D) {
+    if (!SM.isWrittenInMainFile(D->getLocation())) return true;
+    const Decl* Key = primaryTemplateMethod(D)->getCanonicalDecl();
+    auto It = Renames.find(Key);
+    if (It != Renames.end())
+      renameAt(RW, D->getLocation(), D->getName(), It->second);
+    return true;
+  }
+
   bool VisitDeclRefExpr(DeclRefExpr* E) {
     if (!SM.isWrittenInMainFile(E->getLocation())) return true;
     const Decl* Key = nullptr;
@@ -190,6 +257,11 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
     } else if (const auto* FD = dyn_cast<FieldDecl>(E->getDecl())) {
       Key = primaryTemplateMember(FD);
       OldName = FD->getName();
+    } else if (const auto* MD = dyn_cast<CXXMethodDecl>(E->getDecl())) {
+      // Unqualified calls to static member functions and pointers to member
+      // functions (e.g. `S::count`, `&S::get`).
+      Key = primaryTemplateMethod(MD)->getCanonicalDecl();
+      OldName = MD->getName();
     }
     if (!Key) return true;
     auto It = Renames.find(Key);
@@ -205,6 +277,9 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
       Key = primaryTemplateMember(FD);
     else if (const auto* VD = dyn_cast<VarDecl>(E->getMemberDecl()))
       Key = primaryTemplateStaticMember(VD)->getCanonicalDecl();
+    else if (const auto* MD = dyn_cast<CXXMethodDecl>(E->getMemberDecl()))
+      // Member function calls: `obj.get()`, `ptr->get()`, implicit `this`.
+      Key = primaryTemplateMethod(MD)->getCanonicalDecl();
     if (!Key) return true;
     auto It = Renames.find(Key);
     if (It != Renames.end())
@@ -263,6 +338,12 @@ class DebugTraceVisitor : public RecursiveASTVisitor<DebugTraceVisitor> {
       log("VarDecl   ", D->getLocation(), D->getName(), It->second);
     return true;
   }
+  bool VisitCXXMethodDecl(CXXMethodDecl* D) {
+    auto It = Renames.find(primaryTemplateMethod(D)->getCanonicalDecl());
+    if (It != Renames.end())
+      log("MethodDecl", D->getLocation(), D->getName(), It->second);
+    return true;
+  }
   bool VisitDeclRefExpr(DeclRefExpr* E) {
     const Decl* Key = nullptr;
     StringRef OldName;
@@ -274,6 +355,9 @@ class DebugTraceVisitor : public RecursiveASTVisitor<DebugTraceVisitor> {
     } else if (const auto* FD = dyn_cast<FieldDecl>(E->getDecl())) {
       Key = primaryTemplateMember(FD);
       OldName = FD->getName();
+    } else if (const auto* MD = dyn_cast<CXXMethodDecl>(E->getDecl())) {
+      Key = primaryTemplateMethod(MD)->getCanonicalDecl();
+      OldName = MD->getName();
     }
     if (!Key) return true;
     auto It = Renames.find(Key);
@@ -290,6 +374,9 @@ class DebugTraceVisitor : public RecursiveASTVisitor<DebugTraceVisitor> {
     } else if (const auto* VD = dyn_cast<VarDecl>(E->getMemberDecl())) {
       Key = primaryTemplateStaticMember(VD)->getCanonicalDecl();
       OldName = VD->getName();
+    } else if (const auto* MD = dyn_cast<CXXMethodDecl>(E->getMemberDecl())) {
+      Key = primaryTemplateMethod(MD)->getCanonicalDecl();
+      OldName = MD->getName();
     }
     if (!Key) return true;
     auto It = Renames.find(Key);
@@ -570,6 +657,13 @@ auto RenameAllConstGlobalVariables(VariableRenameCallback CB, OutputMode Mode,
     -> std::unique_ptr<RenameActionFactory> {
   return std::make_unique<RenameActionFactory>(
       std::move(CB), VariableScope::ConstGlobal, Mode, std::move(CollectFrom));
+}
+
+auto RenameAllMemberFunctions(VariableRenameCallback CB, OutputMode Mode,
+                              FileSet CollectFrom)
+    -> std::unique_ptr<RenameActionFactory> {
+  return std::make_unique<RenameActionFactory>(
+      std::move(CB), VariableScope::Method, Mode, std::move(CollectFrom));
 }
 
 // ---------------------------------------------------------------------------

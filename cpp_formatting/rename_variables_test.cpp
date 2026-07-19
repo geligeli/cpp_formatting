@@ -391,3 +391,99 @@ TEST(RenameLocalVariables, RenamesExplicitObjectParameter) {
                            renameOne("self", "me")),
             "struct S { int v; int get(this const S& me) { return me.v; } };");
 }
+
+// ---------------------------------------------------------------------------
+// Member functions (Method scope)
+// ---------------------------------------------------------------------------
+
+static auto rewriteMethod(const char* code, VariableRenameCallback cb)
+    -> std::string {
+  return rewriteVariableNames(code, std::move(cb), VariableScope::Method,
+                              {"-std=c++20", "-xc++"});
+}
+
+TEST(RenameMemberFunctions, DeclarationAndImplicitThisCall) {
+  EXPECT_EQ(
+      rewriteMethod("struct S { int getValue() const { return 1; } int use() { "
+                    "return getValue(); } };",
+                    renameOne("getValue", "value")),
+      "struct S { int value() const { return 1; } int use() { return "
+      "value(); } };");
+}
+
+TEST(RenameMemberFunctions, DotAndArrowCall) {
+  EXPECT_EQ(rewriteMethod("struct S { int get(); };\n"
+                          "int f(S& s, S* p) { return s.get() + p->get(); }",
+                          renameOne("get", "value")),
+            "struct S { int value(); };\n"
+            "int f(S& s, S* p) { return s.value() + p->value(); }");
+}
+
+TEST(RenameMemberFunctions, OutOfLineDefinition) {
+  EXPECT_EQ(rewriteMethod(
+                "struct S { int getValue(); }; int S::getValue() { return 1; }",
+                renameOne("getValue", "value")),
+            "struct S { int value(); }; int S::value() { return 1; }");
+}
+
+TEST(RenameMemberFunctions, StaticMethod) {
+  EXPECT_EQ(rewriteMethod("struct S { static int count(); };\n"
+                          "int S::count() { return 0; }\n"
+                          "int f() { return S::count(); }",
+                          renameOne("count", "total")),
+            "struct S { static int total(); };\n"
+            "int S::total() { return 0; }\n"
+            "int f() { return S::total(); }");
+}
+
+TEST(RenameMemberFunctions, PointerToMemberFunction) {
+  EXPECT_EQ(rewriteMethod("struct S { int get(); };\n"
+                          "auto p = &S::get;",
+                          renameOne("get", "value")),
+            "struct S { int value(); };\n"
+            "auto p = &S::value;");
+}
+
+TEST(RenameMemberFunctions, OverloadedMethods) {
+  EXPECT_EQ(rewriteMethod("struct S { int get(); int get(int); };\n"
+                          "int f(S& s) { return s.get() + s.get(1); }",
+                          renameOne("get", "value")),
+            "struct S { int value(); int value(int); };\n"
+            "int f(S& s) { return s.value() + s.value(1); }");
+}
+
+TEST(RenameMemberFunctions, DoesNotRenameCtorDtorOrOperators) {
+  EXPECT_EQ(rewriteMethod("struct S { S(); ~S(); operator int() const; bool "
+                          "operator==(const S&) const; int get(); };",
+                          addSuffix("_x")),
+            "struct S { S(); ~S(); operator int() const; bool "
+            "operator==(const S&) const; int get_x(); };");
+}
+
+TEST(RenameMemberFunctions, DoesNotRenameFreeFunctions) {
+  EXPECT_EQ(rewriteMethod("int getValue() { return 1; }",
+                          renameOne("getValue", "value")),
+            "int getValue() { return 1; }");
+}
+
+TEST(RenameMemberFunctions, VirtualOverrideHierarchyRenamedTogether) {
+  // The base declaration, every override, and every call site — through base
+  // or derived — all carry the new name.
+  EXPECT_EQ(rewriteMethod("struct B { virtual int get() const; };\n"
+                          "struct D : B { int get() const override; };\n"
+                          "int f(B& b, D& d) { return b.get() + d.get(); }",
+                          renameOne("get", "value")),
+            "struct B { virtual int value() const; };\n"
+            "struct D : B { int value() const override; };\n"
+            "int f(B& b, D& d) { return b.value() + d.value(); }");
+}
+
+TEST(RenameMemberFunctions, TemplateMethodRenamedInInstantiation) {
+  // The MemberExpr in non-template code references the instantiated
+  // CXXMethodDecl; the tool must walk up the instantiation chain.
+  EXPECT_EQ(rewriteMethod("template<typename T> struct Box { T get(); };\n"
+                          "int f() { Box<int> b; return b.get(); }",
+                          renameOne("get", "value")),
+            "template<typename T> struct Box { T value(); };\n"
+            "int f() { Box<int> b; return b.value(); }");
+}

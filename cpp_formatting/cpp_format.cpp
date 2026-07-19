@@ -72,7 +72,8 @@ static cl::opt<bool> TrailingReturnOpt(
 
 static cl::opt<std::string> NormScopeOpt(
     "normalize-variables-scope",
-    cl::desc("Scope for variable normalization: member, local, or global"),
+    cl::desc("Scope for normalization: member, local, global, static_member, "
+             "const_member, static_global, const_global, or method"),
     cl::init(""), cl::cat(CppFormatCategory));
 
 static cl::opt<std::string> NormStyleOpt(
@@ -217,11 +218,13 @@ auto main(int argc, const char** argv) -> int {
       scope = VariableScope::StaticGlobal;
     } else if (rule.scope == "const_global") {
       scope = VariableScope::ConstGlobal;
+    } else if (rule.scope == "method") {
+      scope = VariableScope::Method;
     } else {
       llvm::errs() << "Unknown scope '" << rule.scope
                    << "'. Valid scopes: member, local, global, "
                       "static_member, const_member, static_global, "
-                      "const_global\n";
+                      "const_global, method\n";
       return 1;
     }
 
@@ -265,6 +268,10 @@ auto main(int argc, const char** argv) -> int {
       case VariableScope::ConstGlobal:
         factory = RenameAllConstGlobalVariables(std::move(cb), mode,
                                                 std::move(collectFrom));
+        break;
+      case VariableScope::Method:
+        factory = RenameAllMemberFunctions(std::move(cb), mode,
+                                           std::move(collectFrom));
         break;
     }
     if (int rc = Tool.run(factory.get())) return rc;
