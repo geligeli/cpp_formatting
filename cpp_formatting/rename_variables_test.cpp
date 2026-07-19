@@ -581,3 +581,118 @@ TEST(RenameMemberFunctions, CoroutineLambdaCallSite) {
       "Task W::execute() { co_return; }";
   EXPECT_EQ(rewriteMethod(code, renameOne("runTask", "execute")), expected);
 }
+
+// Awaitable task type shared by the coroutine tests below.
+static const char kAwaitableTask[] =
+    "#include <coroutine>\n"
+    "struct Task {\n"
+    "  struct promise_type {\n"
+    "    Task get_return_object() { return {}; }\n"
+    "    std::suspend_never initial_suspend() const noexcept { return {}; }\n"
+    "    std::suspend_never final_suspend() const noexcept { return {}; }\n"
+    "    void return_void() {}\n"
+    "    void unhandled_exception() {}\n"
+    "  };\n"
+    "  bool await_ready() const noexcept { return true; }\n"
+    "  void await_suspend(std::coroutine_handle<>) const noexcept {}\n"
+    "  int await_resume() const noexcept { return 0; }\n"
+    "};\n";
+
+TEST(RenameMemberFunctions, CoroutineMethodImplicitThisCoAwait) {
+  // Call sites through implicit and explicit `this` inside another coroutine
+  // member of the same class.
+  std::string code = std::string(kAwaitableTask) +
+                     "struct Worker {\n"
+                     "  Task runTask();\n"
+                     "  Task runAll() {\n"
+                     "    co_await runTask();\n"
+                     "    co_await this->runTask();\n"
+                     "  }\n"
+                     "};\n"
+                     "Task Worker::runTask() { co_return; }";
+  std::string expected = std::string(kAwaitableTask) +
+                         "struct Worker {\n"
+                         "  Task execute();\n"
+                         "  Task runAll() {\n"
+                         "    co_await execute();\n"
+                         "    co_await this->execute();\n"
+                         "  }\n"
+                         "};\n"
+                         "Task Worker::execute() { co_return; }";
+  EXPECT_EQ(rewriteMethod(code.c_str(), renameOne("runTask", "execute")),
+            expected);
+}
+
+TEST(RenameMemberFunctions, CoroutineMethodCoAwaitWithArguments) {
+  // co_await on a member call with arguments, from a free coroutine.
+  std::string code = std::string(kAwaitableTask) +
+                     "struct Worker { Task runTask(int count); };\n"
+                     "Task Worker::runTask(int count) { co_return; }\n"
+                     "Task g(Worker& w) {\n"
+                     "  int total = co_await w.runTask(1);\n"
+                     "  total += co_await w.runTask(2);\n"
+                     "  co_return;\n"
+                     "}";
+  std::string expected = std::string(kAwaitableTask) +
+                         "struct Worker { Task execute(int count); };\n"
+                         "Task Worker::execute(int count) { co_return; }\n"
+                         "Task g(Worker& w) {\n"
+                         "  int total = co_await w.execute(1);\n"
+                         "  total += co_await w.execute(2);\n"
+                         "  co_return;\n"
+                         "}";
+  EXPECT_EQ(rewriteMethod(code.c_str(), renameOne("runTask", "execute")),
+            expected);
+}
+
+TEST(RenameMemberFunctions, CoroutineMethodVirtualOverrideHierarchy) {
+  // Virtual coroutine member functions: the whole override hierarchy and all
+  // call sites (co_await or plain) are renamed together.
+  std::string code = std::string(kAwaitableTask) +
+                     "struct Base { virtual Task runTask(); };\n"
+                     "struct Derived : Base { Task runTask() override; };\n"
+                     "Task Base::runTask() { co_return; }\n"
+                     "Task Derived::runTask() { co_return; }\n"
+                     "Task f(Base& b) { co_await b.runTask(); }\n"
+                     "Task g(Base& b) { return b.runTask(); }";
+  std::string expected = std::string(kAwaitableTask) +
+                         "struct Base { virtual Task execute(); };\n"
+                         "struct Derived : Base { Task execute() override; };\n"
+                         "Task Base::execute() { co_return; }\n"
+                         "Task Derived::execute() { co_return; }\n"
+                         "Task f(Base& b) { co_await b.execute(); }\n"
+                         "Task g(Base& b) { return b.execute(); }";
+  EXPECT_EQ(rewriteMethod(code.c_str(), renameOne("runTask", "execute")),
+            expected);
+}
+
+TEST(RenameMemberFunctions, CoroutineMethodInClassTemplate) {
+  // The MemberExpr at the call site references the instantiated
+  // CXXMethodDecl; the tool must walk back to the primary template.
+  std::string code =
+      std::string(kAwaitableTask) +
+      "template <typename T> struct Box { Task getTask(); };\n"
+      "template <typename T> Task Box<T>::getTask() { co_return; "
+      "}\n"
+      "Task f() { Box<int> b; return b.getTask(); }";
+  std::string expected =
+      std::string(kAwaitableTask) +
+      "template <typename T> struct Box { Task fetch(); };\n"
+      "template <typename T> Task Box<T>::fetch() { co_return; }\n"
+      "Task f() { Box<int> b; return b.fetch(); }";
+  EXPECT_EQ(rewriteMethod(code.c_str(), renameOne("getTask", "fetch")),
+            expected);
+}
+
+TEST(RenameMemberFunctions, StaticCoroutineMethod) {
+  std::string code = std::string(kAwaitableTask) +
+                     "struct S { static Task makeTask(); };\n"
+                     "Task S::makeTask() { co_return; }\n"
+                     "Task g() { return S::makeTask(); }";
+  std::string expected = std::string(kAwaitableTask) +
+                         "struct S { static Task create(); };\n"
+                         "Task S::create() { co_return; }\n"
+                         "Task g() { return S::create(); }";
+  EXPECT_EQ(rewriteMethod(code.c_str(), renameOne("makeTask", "create")),
+            expected);
+}
