@@ -189,8 +189,8 @@ cc_test(
 
 pkg_tar(
     name = "clang_include_headers",
-    srcs = ["@@llvm-project+//clang:builtin_headers_gen"],
-    strip_prefix = "/external/llvm-project+/clang/staging",
+    srcs = ["@llvm-project//clang:builtin_headers_gen"],
+    strip_prefix = "/external/+llvm+llvm-project/clang/staging",
     extension = "tar.gz",
 )
 

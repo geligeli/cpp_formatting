@@ -5,10 +5,15 @@ on:
     branches: [main]
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+  build:
+    strategy:
+      matrix:
+        include:
+          - runs-on: ubuntu-latest
+            asset: cpp_format-linux-x86_64
+          - runs-on: ubuntu-24.04-arm
+            asset: cpp_format-linux-aarch64
+    runs-on: ${{ matrix.runs-on }}
 
     steps:
       - uses: actions/checkout@v4
@@ -17,31 +22,51 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .bazel_cache
-          key: bazel-repo-cache-release-${{ runner.os }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock') }}-${{ github.run_id }}
+          key: bazel-repo-cache-release-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock') }}-${{ github.run_id }}
           restore-keys: |
-            bazel-repo-cache-release-${{ runner.os }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock') }}-
-            bazel-repo-cache-release-${{ runner.os }}-
+            bazel-repo-cache-release-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock') }}-
+            bazel-repo-cache-release-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Cache Bazel Disk Cache
         uses: actions/cache@v4
         with:
           path: .disk_cache
-          key: bazel-disk-cache-release-${{ runner.os }}-${{ github.run_id }}
+          key: bazel-disk-cache-release-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
           restore-keys: |
-            bazel-disk-cache-release-${{ runner.os }}-
+            bazel-disk-cache-release-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Build binary in devcontainer
         uses: devcontainers/ci@v0.3
         with:
           runCmd: |
             bazel build --disk_cache=/workspace/.disk_cache --repository_cache=/workspace/.bazel_cache --config=minify //cpp_formatting:cpp_format
-            cp -L bazel-bin/cpp_formatting/cpp_format cpp_format-linux-x86_64
+            cp -L bazel-bin/cpp_formatting/cpp_format ${{ matrix.asset }}
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="$(date -u +%Y%m%d)-$(git rev-parse --short HEAD)"
-          gh release create "$TAG" cpp_format-linux-x86_64 \
+          gh release create "$TAG" cpp_format-linux-x86_64 cpp_format-linux-aarch64 \
             --title "$TAG" \
             --notes "Built from commit $(git rev-parse HEAD)"

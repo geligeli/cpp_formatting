@@ -344,3 +344,50 @@ TEST(RenameMemberVariables, RenamesMemberInConstructorInitializer) {
       "struct S { S() : renamed_(0), val2_(2) {} int renamed_; int val2_; "
       "};\n");
 }
+
+// ---------------------------------------------------------------------------
+// C++23 explicit object parameters ("deducing this", P0847)
+//
+// Access to a data member through the explicit object parameter (`self.value_`)
+// is an ordinary MemberExpr, so member renames must rewrite it.  The explicit
+// object parameter itself is a ParmVarDecl and participates in local renames.
+// These helpers pass `-std=c++23` because the syntax is C++23-only.
+// ---------------------------------------------------------------------------
+
+static auto rewriteMember23(const char* code, VariableRenameCallback cb)
+    -> std::string {
+  return rewriteVariableNames(code, std::move(cb), VariableScope::Member,
+                              {"-std=c++23", "-xc++"});
+}
+
+static auto rewriteLocal23(const char* code, VariableRenameCallback cb)
+    -> std::string {
+  return rewriteVariableNames(code, std::move(cb), VariableScope::Local,
+                              {"-std=c++23", "-xc++"});
+}
+
+TEST(RenameMemberVariables, MemberAccessThroughExplicitObjectParam) {
+  EXPECT_EQ(rewriteMember23("struct S { int value_; int get(this const S& "
+                            "self) { return self.value_; } };",
+                            renameOne("value_", "count_")),
+            "struct S { int count_; int get(this const S& self) { return "
+            "self.count_; } };");
+}
+
+TEST(RenameMemberVariables, MemberAccessThroughByValueSelf) {
+  EXPECT_EQ(rewriteMember23("struct S { int x_; void set(this S self, int v) { "
+                            "self.x_ = v; } };",
+                            renameOne("x_", "y_")),
+            "struct S { int y_; void set(this S self, int v) { self.y_ = v; } "
+            "};");
+}
+
+TEST(RenameLocalVariables, RenamesExplicitObjectParameter) {
+  // The explicit object parameter `self` is a ParmVarDecl (a local), so both
+  // its declaration and its use as the base of `self.v` are renamed; the
+  // member `v` is left untouched.
+  EXPECT_EQ(rewriteLocal23("struct S { int v; int get(this const S& self) { "
+                           "return self.v; } };",
+                           renameOne("self", "me")),
+            "struct S { int v; int get(this const S& me) { return me.v; } };");
+}

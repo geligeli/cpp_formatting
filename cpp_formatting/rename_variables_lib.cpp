@@ -355,7 +355,9 @@ class RenameVariablesConsumer : public ASTConsumer {
     Collector.TraverseDecl(Ctx.getTranslationUnitDecl());
 
     if (Mode == OutputMode::Debug) {
-      const FileEntry* FE = SM.getFileEntryForID(SM.getMainFileID());
+      // LLVM 18 removed FileEntry::getName(); a file may be reachable under
+      // several names, so the name now lives on FileEntryRef.
+      OptionalFileEntryRef FE = SM.getFileEntryRefForID(SM.getMainFileID());
       llvm::errs()
           << "============================================================\n";
       llvm::errs() << "TU: " << (FE ? FE->getName() : "<unknown>") << "\n";

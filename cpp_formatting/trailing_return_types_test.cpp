@@ -355,3 +355,63 @@ struct F {
 )cpp");
   // clang-format on
 }
+
+// ---------------------------------------------------------------------------
+// C++23 explicit object parameters ("deducing this", P0847)
+//
+// A member function with an explicit object parameter (`this Self self`) is
+// rewritten exactly like an ordinary member function: only the return type is
+// hoisted; the `this`-parameter is left untouched.  The `-std=c++23` helper is
+// required because the syntax is not valid before C++23.
+// ---------------------------------------------------------------------------
+
+static auto rewrite23(const char* code) -> std::string {
+  return rewriteToTrailingReturnTypes(code, {"-std=c++23", "-xc++"});
+}
+
+TEST(TrailingReturnTypesDeducingThis, ByConstReference) {
+  EXPECT_EQ(
+      rewrite23("struct S { int get(this const S& self) { return 42; } };"),
+      "struct S { auto get(this const S& self) -> int { return 42; } };");
+}
+
+TEST(TrailingReturnTypesDeducingThis, ByValue) {
+  EXPECT_EQ(
+      rewrite23("struct S { int v; int get(this S self) { return self.v; } };"),
+      "struct S { int v; auto get(this S self) -> int { return self.v; } };");
+}
+
+TEST(TrailingReturnTypesDeducingThis, ReferenceReturn) {
+  EXPECT_EQ(rewrite23("struct S { int v; int& ref(this S& self) { return "
+                      "self.v; } };"),
+            "struct S { int v; auto ref(this S& self) -> int& { return self.v; "
+            "} };");
+}
+
+TEST(TrailingReturnTypesDeducingThis, TemplatedSelf) {
+  // `this auto&& self` is an abbreviated function template; the explicit `int`
+  // return type must still be hoisted.
+  EXPECT_EQ(
+      rewrite23(
+          "struct S { int v; int get(this auto&& self) { return self.v; } };"),
+      "struct S { int v; auto get(this auto&& self) -> int { return self.v; } "
+      "};");
+}
+
+TEST(TrailingReturnTypesDeducingThis, VoidNotRewritten) {
+  const char* code =
+      "struct S { void noop(this const S& self) { (void)self; } };";
+  EXPECT_EQ(rewrite23(code), code);
+}
+
+TEST(TrailingReturnTypesDeducingThis, AlreadyTrailingNotRewritten) {
+  const char* code =
+      "struct S { auto get(this const S& self) -> int { return 42; } };";
+  EXPECT_EQ(rewrite23(code), code);
+}
+
+TEST(TrailingReturnTypesDeducingThis, AutoDeducedNotRewritten) {
+  const char* code =
+      "struct S { int v; auto get(this const S& self) { return self.v; } };";
+  EXPECT_EQ(rewrite23(code), code);
+}

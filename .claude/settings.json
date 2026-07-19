@@ -28,7 +28,10 @@
       "Bash(xxd --version)",
       "Bash(awk '{print $5}')",
       "Read(//home/ubuntu/.cache/**)",
-      "Bash(bazel-bin/cpp_formatting/normalize_variables --style=snake_case --scope=member /tmp/embedtest.cpp -- -std=c++17)"
+      "Bash(bazel-bin/cpp_formatting/normalize_variables --style=snake_case --scope=member /tmp/embedtest.cpp -- -std=c++17)",
+      "Bash(wait)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ],
     "additionalDirectories": [
       "/tmp",

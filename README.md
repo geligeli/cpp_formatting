@@ -12,7 +12,7 @@ A collection of Clang-based source-to-source rewrite tools for C++ codebases.
 
 - [Bazel](https://bazel.build/) 7+ with Bzlmod support
 - A C++17-capable host compiler (for building the tools)
-- Internet access on the first build (Bazel downloads LLVM 17, GoogleTest, etc.)
+- Internet access on the first build (Bazel downloads the LLVM 19 source, GoogleTest, etc.)
 
 The Clang built-in headers (`stddef.h`, `__stddef_max_align_t.h`, etc.) are embedded into every binary and extracted on-demand to `$XDG_CACHE_HOME/cpp_formatting/`, so no system Clang installation is required at runtime.
 
@@ -374,7 +374,8 @@ cpp_formatting/
   testdata/                               # input/expected pairs for integration tests
 
 MODULE.bazel                              # Bzlmod dependencies
-patches/                                  # patch applied to llvm-project
+third_party/llvm/                         # module extension that builds Clang/LLVM from source
+patches/                                  # (unused since the LLVM 19 upgrade)
 ```
 
 ## Dependencies
@@ -383,11 +384,21 @@ Managed via Bzlmod ([MODULE.bazel](MODULE.bazel)):
 
 | Dependency | Version |
 |---|---|
-| `llvm-project` (Clang libraries + LLVM YAML + builtin headers) | 17.0.3 |
+| `llvm-project` (Clang libraries + LLVM YAML + builtin headers) | 19.1.7 (built from source, see below) |
 | `googletest` | 1.14.0.bcr.1 |
 | `rules_cc` | 0.2.17 |
 | `rules_shell` | 0.4.1 |
 | `rules_pkg` | (bundles the clang builtin headers into the binary) |
+| `bazel_skylib`, `platforms`, `rules_python`, `apple_support` | (required by the LLVM overlay) |
+
+Clang/LLVM is **not** pulled from the Bazel Central Registry — the BCR only
+publishes `llvm-project` up to 17.0.4. To use Clang 19 (needed for C++23
+features such as deducing `this`), it is built from source via a local module
+extension in [third_party/llvm/](third_party/llvm/), which fetches the pinned
+`llvm-project` monorepo and runs LLVM's own Bazel overlay. The first build
+therefore compiles Clang/LLVM and takes a while; change the pinned version by
+editing `LLVM_VERSION`/`LLVM_SHA256` in
+[third_party/llvm/extensions.bzl](third_party/llvm/extensions.bzl).
 
 ## License
 

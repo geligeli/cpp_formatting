@@ -1,0 +1,7 @@
+# Marks //third_party/llvm as a package so the module extension can load
+# :configure.bzl and :extensions.bzl.  The .bzl files are exported for use
+# from MODULE.bazel.
+exports_files([
+    "configure.bzl",
+    "extensions.bzl",
+])
