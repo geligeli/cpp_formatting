@@ -16,6 +16,15 @@ build:windows --cxxopt=/GR-
 build:windows --cxxopt=/Zc:preprocessor
 build:windows --cxxopt=/wd5105
 
+# Silence the MSVC warnings LLVM headers trigger in volume (C4624 alone fired
+# ~10k times per build); LLVM's own CMake build suppresses the same set on
+# MSVC. Kept to warnings actually observed in CI logs.
+build:windows --cxxopt=/wd4244
+build:windows --cxxopt=/wd4267
+build:windows --cxxopt=/wd4319
+build:windows --cxxopt=/wd4624
+build:windows --cxxopt=/wd4805
+
 build:minify -c opt
 build:minify --copt=-ffunction-sections
 build:minify --copt=-fdata-sections
