@@ -98,7 +98,9 @@ All source files live under [cpp_formatting/](cpp_formatting/).
 
 #### `cpp_format` — combined tool with YAML config
 
-- [cpp_formatting/cpp_format.cpp](cpp_formatting/cpp_format.cpp) — `main()`: parses CLI options or a YAML config file, then runs `normalize_variables` passes followed by `trailing_return_types`. Shares `rename_variables_lib` and `trailing_return_types_lib`. In lint mode all passes report into one shared `LintReport`, and each pass's buffered rewrites are overlaid onto the next pass's `ClangTool` via `mapVirtualFile()` so lint results match sequential in-place runs.
+- [cpp_formatting/cpp_format.cpp](cpp_formatting/cpp_format.cpp) — `main()`: parses CLI options or a YAML config file, then runs every `normalize_variables` rule plus `trailing_return_types` in a **single** `ClangTool` pass via `CppFormatActionFactory` (each TU is parsed exactly once, regardless of how many rules are configured).
+- [cpp_formatting/cpp_format_lib.h](cpp_formatting/cpp_format_lib.h) — `NormalizeRule` (scope + rename callback + lint rule id) and `CppFormatActionFactory`: buffers rewritten content in `PendingRewrites` like `RenameActionFactory` and commits it via `flush()` after `ClangTool::run()`.
+- [cpp_formatting/cpp_format_lib.cpp](cpp_formatting/cpp_format_lib.cpp) — Implementation: per TU, `runRenameRuleOnAST()` (from `rename_variables_lib`) runs each rule's collect+apply visitors, then the trailing-return `MatchFinder` runs via `matchAST()` on the same AST, all sharing one `Rewriter`. Return-type text is extracted via `Rewriter::getRewrittenText()`, so a rename that landed inside a return type (e.g. a member in `decltype(count_)`) is carried into the moved `-> decltype(m_count)` text instead of being clobbered by the wholesale `auto` replacement.
 
 #### Lint support (CI/CD)
 

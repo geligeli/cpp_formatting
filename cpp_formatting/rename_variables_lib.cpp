@@ -486,11 +486,11 @@ class RenameVariablesConsumer : public ASTConsumer {
 
   void HandleTranslationUnit(ASTContext& Ctx) override {
     SourceManager& SM = Ctx.getSourceManager();
-    RenameMap Renames;
-    CollectRenamesVisitor Collector(SM, CB, Scope, Renames, CollectFrom);
-    Collector.TraverseDecl(Ctx.getTranslationUnitDecl());
 
     if (Mode == OutputMode::Debug) {
+      RenameMap Renames;
+      CollectRenamesVisitor Collector(SM, CB, Scope, Renames, CollectFrom);
+      Collector.TraverseDecl(Ctx.getTranslationUnitDecl());
       // LLVM 18 removed FileEntry::getName(); a file may be reachable under
       // several names, so the name now lives on FileEntryRef.
       OptionalFileEntryRef FE = SM.getFileEntryRefForID(SM.getMainFileID());
@@ -514,9 +514,7 @@ class RenameVariablesConsumer : public ASTConsumer {
       return;  // no rewrites in Debug mode
     }
 
-    if (Renames.empty()) return;
-    ApplyRenamesVisitor Applier(RW, SM, Renames, Report, RuleId);
-    Applier.TraverseDecl(Ctx.getTranslationUnitDecl());
+    runRenameRuleOnAST(Ctx, RW, CB, Scope, CollectFrom, Report, RuleId);
   }
 
  private:
@@ -623,6 +621,23 @@ class CaptureAction : public ASTFrontendAction {
 };
 
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// runRenameRuleOnAST (public)
+// ---------------------------------------------------------------------------
+
+void runRenameRuleOnAST(ASTContext& Ctx, Rewriter& RW,
+                        const VariableRenameCallback& CB, VariableScope Scope,
+                        const FileSet& CollectFrom, LintReport* Report,
+                        llvm::StringRef RuleId) {
+  SourceManager& SM = Ctx.getSourceManager();
+  RenameMap Renames;
+  CollectRenamesVisitor Collector(SM, CB, Scope, Renames, CollectFrom);
+  Collector.TraverseDecl(Ctx.getTranslationUnitDecl());
+  if (Renames.empty()) return;
+  ApplyRenamesVisitor Applier(RW, SM, Renames, Report, RuleId.str());
+  Applier.TraverseDecl(Ctx.getTranslationUnitDecl());
+}
 
 // ---------------------------------------------------------------------------
 // RenameActionFactory (public)

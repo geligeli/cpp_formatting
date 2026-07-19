@@ -117,10 +117,16 @@ void TrailingReturnCallback::run(const MatchFinder::MatchResult& Result) {
   SourceLocation ExtStart = skipQualifiersBackward(TypeBegin, SM);
   SourceRange FullReturnRange(ExtStart, ReturnRange.getEnd());
 
-  // Extract the EXACT original return-type text from the source.
+  // Extract the return-type text, accounting for edits already applied to
+  // this buffer.  In cpp_format's combined pass a rename rule may already
+  // have rewritten an identifier inside the return type (e.g. a member in
+  // `decltype(count_)`); getRewrittenText picks up that rename so the text
+  // moved after `->` stays consistent — the wholesale replace below would
+  // otherwise silently clobber the nested edit.  With no prior edits this
+  // returns the exact original source text, as before.
   const LangOptions& LangOpts = Func->getASTContext().getLangOpts();
-  StringRef OriginalTypeStr = Lexer::getSourceText(
-      CharSourceRange::getTokenRange(FullReturnRange), SM, LangOpts);
+  std::string OriginalTypeStr =
+      Rewrite.getRewrittenText(CharSourceRange::getTokenRange(FullReturnRange));
 
   if (OriginalTypeStr.empty()) return;
 
@@ -136,14 +142,16 @@ void TrailingReturnCallback::run(const MatchFinder::MatchResult& Result) {
     AutoReplacement = "auto ";
 
   // Replace the full return type (including any leading qualifiers) with
-  // "auto".
-  Rewrite.ReplaceText(FullReturnRange, AutoReplacement);
+  // "auto".  A failed replace means the location is not rewritable (e.g. it
+  // comes from a macro expansion); skip the whole rewrite rather than emit a
+  // trailing `->` without the `auto` replacement.
+  if (Rewrite.ReplaceText(FullReturnRange, AutoReplacement)) return;
 
   // Insert " -> OriginalType" after the local range end of the function type
   // (closing ')' plus any cv/ref/noexcept qualifiers tracked by
   // FunctionTypeLoc).
   SourceLocation InsertLoc = FTL.getLocalRangeEnd();
-  Rewrite.InsertTextAfterToken(InsertLoc, " -> " + OriginalTypeStr.str());
+  Rewrite.InsertTextAfterToken(InsertLoc, " -> " + OriginalTypeStr);
 
   if (Report) {
     PresumedLoc PLoc = SM.getPresumedLoc(Func->getLocation());

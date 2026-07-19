@@ -16,7 +16,9 @@
 
 namespace clang {
 class ASTConsumer;
+class ASTContext;
 class CompilerInstance;
+class Rewriter;
 }  // namespace clang
 
 // ---------------------------------------------------------------------------
@@ -123,6 +125,19 @@ class RenameActionFactory : public clang::tooling::FrontendActionFactory {
   LintReport* Report = nullptr;
   std::string RuleId;
 };
+
+// ---------------------------------------------------------------------------
+// Per-TU rename helper
+// ---------------------------------------------------------------------------
+
+/// Runs one rename rule (collect declarations, then apply renames) on an
+/// already-parsed translation unit, writing edits into \p RW.  Used by
+/// cpp_format to run several rules in a single ClangTool pass.
+void runRenameRuleOnAST(clang::ASTContext& Ctx, clang::Rewriter& RW,
+                        const VariableRenameCallback& CB, VariableScope Scope,
+                        const FileSet& CollectFrom,
+                        LintReport* Report = nullptr,
+                        llvm::StringRef RuleId = "");
 
 // ---------------------------------------------------------------------------
 // Convenience factories

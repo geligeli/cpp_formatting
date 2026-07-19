@@ -216,16 +216,35 @@ sh_test(
     ],
 )
 
+# Combined single-pass library used by the cpp_format binary: runs every
+# normalize_variables rule plus the trailing-return-type rewrite on one AST.
+cc_library(
+    name = "cpp_format_lib",
+    srcs = ["cpp_format_lib.cpp"],
+    hdrs = ["cpp_format_lib.h"],
+    deps = [
+        ":lint_lib",
+        ":output_mode",
+        ":rename_variables_lib",
+        ":trailing_return_types_lib",
+        "@llvm-project//clang:ast_matchers",
+        "@llvm-project//clang:frontend",
+        "@llvm-project//clang:rewrite",
+        "@llvm-project//clang:tooling",
+        "@llvm-project//llvm:Support",
+    ],
+)
+
 cc_binary(
     name = "cpp_format",
     srcs = ["cpp_format.cpp"],
     linkstatic = True,
     deps = [
+        ":cpp_format_lib",
         ":embedded_clang_resource",
         ":lint_lib",
         ":naming_convention",
         ":rename_variables_lib",
-        ":trailing_return_types_lib",
         "@llvm-project//clang:frontend",
         "@llvm-project//clang:tooling",
         "@llvm-project//llvm:Support",

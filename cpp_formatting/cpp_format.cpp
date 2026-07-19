@@ -3,11 +3,11 @@
 
 #include "clang/Tooling/CommonOptionsParser.h"
 #include "clang/Tooling/Tooling.h"
+#include "cpp_formatting/cpp_format_lib.h"
 #include "cpp_formatting/embedded_clang_resource.h"
 #include "cpp_formatting/lint_lib.h"
 #include "cpp_formatting/naming_convention.h"
 #include "cpp_formatting/rename_variables_lib.h"
-#include "cpp_formatting/trailing_return_types_lib.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -211,12 +211,11 @@ auto main(int argc, const char** argv) -> int {
   const std::string ResourceDir = ensureClangResourceDir();
 
   LintReport Report;
-  // Rewritten content accumulated across passes (Lint mode only).  Before
-  // each pass the accumulated files are overlaid onto the ClangTool so pass
-  // N sees pass N-1's output, matching sequential in-place semantics.
-  PendingRewrites Accum;
 
-  // Pass 1+: normalize_variables rules applied in order.
+  // Build the rule list for the single combined pass: every
+  // normalize_variables rule plus (optionally) trailing_return_types all run
+  // on the same AST, so each TU is parsed exactly once.
+  std::vector<NormalizeRule> Rules;
   for (const auto& rule : cfg.normalize_variables) {
     NamingStyle style{};
     if (!parseNamingStyle(rule.style, style)) {
@@ -252,84 +251,27 @@ auto main(int argc, const char** argv) -> int {
       return 1;
     }
 
-    FileSet collectFrom = buildFileSet(SourcePaths);
-    VariableRenameCallback cb = [style](std::string_view name,
-                                        std::string& newName) -> bool {
-      newName = renameToStyle(name, style);
-      return newName != name;
-    };
-
-    ClangTool Tool(OptionsParser.getCompilations(),
-                   orderSourcesForRename(SourcePaths));
-    applyArgumentAdjusters(Tool, ResourceDir);
-    if (Lint)
-      for (const auto& [Path, Content] : Accum)
-        Tool.mapVirtualFile(Path, Content);
-
-    std::unique_ptr<RenameActionFactory> factory;
-    switch (scope) {
-      case VariableScope::Member:
-        factory = RenameAllMemberVariables(std::move(cb), mode,
-                                           std::move(collectFrom));
-        break;
-      case VariableScope::Local:
-        factory = RenameAllLocalVariables(std::move(cb), mode,
-                                          std::move(collectFrom));
-        break;
-      case VariableScope::Global:
-        factory = RenameAllGlobalVariables(std::move(cb), mode,
-                                           std::move(collectFrom));
-        break;
-      case VariableScope::StaticMember:
-        factory = RenameAllStaticMemberVariables(std::move(cb), mode,
-                                                 std::move(collectFrom));
-        break;
-      case VariableScope::ConstMember:
-        factory = RenameAllConstMemberVariables(std::move(cb), mode,
-                                                std::move(collectFrom));
-        break;
-      case VariableScope::StaticGlobal:
-        factory = RenameAllStaticGlobalVariables(std::move(cb), mode,
-                                                 std::move(collectFrom));
-        break;
-      case VariableScope::ConstGlobal:
-        factory = RenameAllConstGlobalVariables(std::move(cb), mode,
-                                                std::move(collectFrom));
-        break;
-      case VariableScope::Method:
-        factory = RenameAllMemberFunctions(std::move(cb), mode,
-                                           std::move(collectFrom));
-        break;
-    }
-    if (Lint)
-      factory->setLintReport(
-          &Report, "normalize_variables/" + rule.scope + "/" + rule.style);
-    if (int rc = Tool.run(factory.get())) return rc;
-    if (Lint) {
-      for (const auto& [Path, Content] : factory->rewrites())
-        Accum[Path] = Content;
-    } else {
-      factory->flush();
-    }
+    Rules.push_back(
+        {scope,
+         [style](std::string_view name, std::string& newName) -> bool {
+           newName = renameToStyle(name, style);
+           return newName != name;
+         },
+         "normalize_variables/" + rule.scope + "/" + rule.style});
   }
 
-  // Final pass: trailing_return_types (runs after variable renames so it sees
-  // already-renamed identifiers, though in practice these passes are
-  // independent).
-  if (cfg.trailing_return_types) {
-    ClangTool Tool(OptionsParser.getCompilations(), SourcePaths);
-    applyArgumentAdjusters(Tool, ResourceDir);
-    if (Lint)
-      for (const auto& [Path, Content] : Accum)
-        Tool.mapVirtualFile(Path, Content);
-    TrailingReturnActionFactory Factory(mode);
-    if (Lint) Factory.setLintReport(&Report, "trailing_return_types");
-    if (int rc = Tool.run(&Factory)) return rc;
-    if (Lint)
-      for (const auto& [Path, Content] : Factory.rewrites())
-        Accum[Path] = Content;
-  }
+  ClangTool Tool(OptionsParser.getCompilations(),
+                 orderSourcesForRename(SourcePaths));
+  applyArgumentAdjusters(Tool, ResourceDir);
 
-  if (Lint) return emitLintResults(Report, Accum, FormatOpt, "cpp_format");
+  CppFormatActionFactory Factory(std::move(Rules), cfg.trailing_return_types,
+                                 "trailing_return_types", mode,
+                                 buildFileSet(SourcePaths));
+  if (Lint) Factory.setLintReport(&Report);
+  if (int rc = Tool.run(&Factory)) return rc;
+
+  if (Lint)
+    return emitLintResults(Report, Factory.rewrites(), FormatOpt, "cpp_format");
+  Factory.flush();
   return 0;
 }

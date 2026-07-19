@@ -158,7 +158,7 @@
   "moduleExtensions": {
     "//third_party/llvm:extensions.bzl%llvm": {
       "general": {
-        "bzlTransitiveDigest": "y4BuD+QsKRMj30A2nMoMRQx419xDaN+4ORHvEPRrgr4=",
+        "bzlTransitiveDigest": "ncE6jc2PYmSCtQtucqsPjwURcDvWUR+bkb+RzEWYfFg=",
         "usagesDigest": "CrcKKa5oBdOTLY3ZeaVBiY2x3U16aVNPJGOoRUUcsgs=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
@@ -168,6 +168,13 @@
             "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
             "attributes": {
               "build_file_content": "# empty",
+              "patch_args": [
+                "-p1"
+              ],
+              "patches": [
+                "@@//patches:llvm_blake3_no_asm_on_windows.patch",
+                "@@//patches:llvm_zstd_no_asm_on_windows.patch"
+              ],
               "sha256": "59abea1c22e64933fad4de1671a61cdb934098793c7a31b333ff58dc41bff36c",
               "strip_prefix": "llvm-project-llvmorg-19.1.7",
               "urls": [
