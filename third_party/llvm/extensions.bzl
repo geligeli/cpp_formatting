@@ -35,12 +35,15 @@ def _llvm_impl(_module_ctx):
         urls = ["https://github.com/facebook/zstd/releases/download/v1.5.2/zstd-1.5.2.tar.gz"],
     )
 
-    # Only the X86 backend is needed: the tools use Clang's AST/tooling layer
-    # and just require the host target to be registered.  Restricting targets
-    # keeps the from-source build small.
+    # Only the host backends are needed: the tools use Clang's AST/tooling
+    # layer and just require the host target to be registered.  The release
+    # workflow builds on both x86_64 and aarch64 runners, and LLVM's
+    # llvm-c/Target.h references LLVMInitialize<Host>Target* for the host
+    # architecture, so both X86 and AArch64 must be registered.  Restricting
+    # targets keeps the from-source build small.
     llvm_configure(
         name = "llvm-project",
-        targets = ["X86"],
+        targets = ["X86", "AArch64"],
     )
 
 llvm = module_extension(implementation = _llvm_impl)
