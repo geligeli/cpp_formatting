@@ -13,6 +13,10 @@ jobs:
             asset: cpp_format-linux-x86_64
           - runs-on: ubuntu-24.04-arm
             asset: cpp_format-linux-aarch64
+          - runs-on: macos-latest
+            asset: cpp_format-darwin-aarch64
+          - runs-on: windows-latest
+            asset: cpp_format-windows-x86_64.exe
     runs-on: ${{ matrix.runs-on }}
 
     steps:
@@ -36,11 +40,28 @@ jobs:
             bazel-disk-cache-release-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Build binary in devcontainer
+        if: runner.os == 'Linux'
         uses: devcontainers/ci@v0.3
         with:
           runCmd: |
             bazel build --disk_cache=/workspace/.disk_cache --repository_cache=/workspace/.bazel_cache --config=minify //cpp_formatting:cpp_format
             cp -L bazel-bin/cpp_formatting/cpp_format ${{ matrix.asset }}
+
+      - name: Setup Bazel
+        if: runner.os != 'Linux'
+        uses: bazel-contrib/setup-bazel@0.18.0
+        with:
+          bazel-version: 8.6.0
+
+      - name: Build binary
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          # The minify config uses GNU-ld flags and full static linking, which
+          # only work on Linux; use a plain optimized build here.
+          bazel build --disk_cache=.disk_cache --repository_cache=.bazel_cache -c opt //cpp_formatting:cpp_format
+          BIN=$(bazel cquery -c opt //cpp_formatting:cpp_format --output=files)
+          cp "$BIN" "${{ matrix.asset }}"
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
@@ -68,5 +89,6 @@ jobs:
         run: |
           TAG="$(date -u +%Y%m%d)-$(git rev-parse --short HEAD)"
           gh release create "$TAG" cpp_format-linux-x86_64 cpp_format-linux-aarch64 \
+            cpp_format-darwin-aarch64 cpp_format-windows-x86_64.exe \
             --title "$TAG" \
             --notes "Built from commit $(git rev-parse HEAD)"
