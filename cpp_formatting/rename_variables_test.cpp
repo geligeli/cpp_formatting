@@ -495,3 +495,89 @@ TEST(RenameMemberFunctions, TemplateMethodRenamedInInstantiation) {
             "template<typename T> struct Box { T value(); };\n"
             "int f() { Box<int> b; return b.value(); }");
 }
+
+TEST(RenameMemberFunctions, CoroutineMethod) {
+  // A coroutine member function (its body contains a co_return) must be
+  // renamed at the declaration, the out-of-line definition, and call sites.
+  const char* code =
+      "#include <coroutine>\n"
+      "struct Task {\n"
+      "  struct promise_type {\n"
+      "    Task get_return_object() { return {}; }\n"
+      "    std::suspend_never initial_suspend() const noexcept { return {}; }\n"
+      "    std::suspend_never final_suspend() const noexcept { return {}; }\n"
+      "    void return_void() {}\n"
+      "    void unhandled_exception() {}\n"
+      "  };\n"
+      "};\n"
+      "struct Worker { Task runTask(); };\n"
+      "Task Worker::runTask() { co_return; }\n"
+      "Task f(Worker& w) { return w.runTask(); }";
+  const char* expected =
+      "#include <coroutine>\n"
+      "struct Task {\n"
+      "  struct promise_type {\n"
+      "    Task get_return_object() { return {}; }\n"
+      "    std::suspend_never initial_suspend() const noexcept { return {}; }\n"
+      "    std::suspend_never final_suspend() const noexcept { return {}; }\n"
+      "    void return_void() {}\n"
+      "    void unhandled_exception() {}\n"
+      "  };\n"
+      "};\n"
+      "struct Worker { Task execute(); };\n"
+      "Task Worker::execute() { co_return; }\n"
+      "Task f(Worker& w) { return w.execute(); }";
+  EXPECT_EQ(rewriteMethod(code, renameOne("runTask", "execute")), expected);
+}
+
+TEST(RenameMemberFunctions, CoroutineLambdaCallSite) {
+  // A call to a coroutine member function from inside a coroutine lambda.
+  // The lambda's operator() desugaring references methods without a simple
+  // identifier (e.g. conversion operators); the rename visitors must not
+  // trip getName()'s isIdentifier() assertion on them.
+  const char* code =
+      "#include <coroutine>\n"
+      "struct Task {\n"
+      "  struct promise_type {\n"
+      "    Task get_return_object() { return {}; }\n"
+      "    std::suspend_never initial_suspend() const noexcept { return {}; }\n"
+      "    std::suspend_never final_suspend() const noexcept { return {}; }\n"
+      "    void return_void() {}\n"
+      "    void unhandled_exception() {}\n"
+      "  };\n"
+      "  bool await_ready() const noexcept { return true; }\n"
+      "  void await_suspend(std::coroutine_handle<>) const noexcept {}\n"
+      "  void await_resume() const noexcept {}\n"
+      "};\n"
+      "struct W {\n"
+      "  Task runTask();\n"
+      "  Task runAll() {\n"
+      "    auto lam = [this]() -> Task { co_await runTask(); };\n"
+      "    co_await lam();\n"
+      "  }\n"
+      "};\n"
+      "Task W::runTask() { co_return; }";
+  const char* expected =
+      "#include <coroutine>\n"
+      "struct Task {\n"
+      "  struct promise_type {\n"
+      "    Task get_return_object() { return {}; }\n"
+      "    std::suspend_never initial_suspend() const noexcept { return {}; }\n"
+      "    std::suspend_never final_suspend() const noexcept { return {}; }\n"
+      "    void return_void() {}\n"
+      "    void unhandled_exception() {}\n"
+      "  };\n"
+      "  bool await_ready() const noexcept { return true; }\n"
+      "  void await_suspend(std::coroutine_handle<>) const noexcept {}\n"
+      "  void await_resume() const noexcept {}\n"
+      "};\n"
+      "struct W {\n"
+      "  Task execute();\n"
+      "  Task runAll() {\n"
+      "    auto lam = [this]() -> Task { co_await execute(); };\n"
+      "    co_await lam();\n"
+      "  }\n"
+      "};\n"
+      "Task W::execute() { co_return; }";
+  EXPECT_EQ(rewriteMethod(code, renameOne("runTask", "execute")), expected);
+}

@@ -259,7 +259,10 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
       OldName = FD->getName();
     } else if (const auto* MD = dyn_cast<CXXMethodDecl>(E->getDecl())) {
       // Unqualified calls to static member functions and pointers to member
-      // functions (e.g. `S::count`, `&S::get`).
+      // functions (e.g. `S::count`, `&S::get`).  Coroutine desugaring can
+      // leave references to methods without a simple identifier (conversion
+      // operators, lambda `operator()`); getName() asserts on those.
+      if (!MD->getDeclName().isIdentifier()) return true;
       Key = primaryTemplateMethod(MD)->getCanonicalDecl();
       OldName = MD->getName();
     }
@@ -371,6 +374,7 @@ class DebugTraceVisitor : public RecursiveASTVisitor<DebugTraceVisitor> {
       Key = primaryTemplateMember(FD);
       OldName = FD->getName();
     } else if (const auto* MD = dyn_cast<CXXMethodDecl>(E->getDecl())) {
+      if (!MD->getDeclName().isIdentifier()) return true;
       Key = primaryTemplateMethod(MD)->getCanonicalDecl();
       OldName = MD->getName();
     }
@@ -390,6 +394,7 @@ class DebugTraceVisitor : public RecursiveASTVisitor<DebugTraceVisitor> {
       Key = primaryTemplateStaticMember(VD)->getCanonicalDecl();
       OldName = VD->getName();
     } else if (const auto* MD = dyn_cast<CXXMethodDecl>(E->getMemberDecl())) {
+      if (!MD->getDeclName().isIdentifier()) return true;
       Key = primaryTemplateMethod(MD)->getCanonicalDecl();
       OldName = MD->getName();
     }
