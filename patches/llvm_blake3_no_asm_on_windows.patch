@@ -1,0 +1,42 @@
+--- a/utils/bazel/llvm-project-overlay/llvm/BUILD.bazel	2026-07-19 19:39:27.217018571 +0000
++++ b/utils/bazel/llvm-project-overlay/llvm/BUILD.bazel	2026-07-19 19:39:56.218936310 +0000
+@@ -19,6 +19,14 @@
+ 
+ licenses(["notice"])
+ 
++config_setting(
++    name = "windows_x86_64",
++    constraint_values = [
++        "@platforms//cpu:x86_64",
++        "@platforms//os:windows",
++    ],
++)
++
+ exports_files([
+     "LICENSE.TXT",
+     "cmake/modules/llvm-driver-template.cpp.in",
+@@ -245,6 +253,11 @@
+         "@platforms//cpu:aarch64": [
+             "lib/Support/BLAKE3/blake3_neon.c",
+         ],
++        # The x86-64_unix.S files are GNU-assembler syntax, which MSVC's ml64
++        # cannot assemble. On Windows the SIMD code paths are disabled via
++        # BLAKE3_NO_* defines below and the portable C fallback is used.
++        ":windows_x86_64": [
++        ],
+         "@platforms//cpu:x86_64": [
+             "lib/Support/BLAKE3/blake3_avx2_x86-64_unix.S",
+             "lib/Support/BLAKE3/blake3_avx512_x86-64_unix.S",
+@@ -280,6 +293,12 @@
+             "BLAKE3_USE_NEON=0",
+         ],
+     }) + select({
++        ":windows_x86_64": [
++            "BLAKE3_NO_AVX2",
++            "BLAKE3_NO_AVX512",
++            "BLAKE3_NO_SSE2",
++            "BLAKE3_NO_SSE41",
++        ],
+         "@platforms//cpu:x86_64": [
+         ],
+         "//conditions:default": [
