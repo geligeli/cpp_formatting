@@ -1,5 +1,14 @@
 build --spawn_strategy=local
-build --cxxopt=-fno-rtti
+
+# Pick up build:linux / build:macos / build:windows sections below based on
+# the host platform.
+common --enable_platform_specific_config
+
+# Match LLVM's no-RTTI build (cl.exe doesn't understand -fno-rtti, so the
+# Windows build uses /GR- instead).
+build:linux --cxxopt=-fno-rtti
+build:macos --cxxopt=-fno-rtti
+build:windows --cxxopt=/GR-
 
 # MSVC's traditional preprocessor cannot handle the empty macro arguments in
 # LLVM's generated Options.inc (error C2365 'OPT_': redefinition); use the
