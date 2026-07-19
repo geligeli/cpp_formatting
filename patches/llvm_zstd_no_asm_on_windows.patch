@@ -1,0 +1,20 @@
+--- a/utils/bazel/third_party_build/zstd.BUILD	2026-07-19 19:28:13.393302222 +0000
++++ b/utils/bazel/third_party_build/zstd.BUILD	2026-07-19 19:28:23.179312175 +0000
+@@ -29,11 +29,16 @@
+             "lib/compress/*.h",
+             "lib/decompress/*.c",
+             "lib/decompress/*.h",
+-            "lib/decompress/*.S",
+             "lib/dictBuilder/*.c",
+             "lib/dictBuilder/*.h",
+         ]),
+         "//conditions:default": [],
++    }) + select({
++        # huf_decompress_amd64.S is GNU-assembler syntax; MSVC's ml64 cannot
++        # assemble it. zstd only uses the asm loop under __GNUC__, so on
++        # Windows the C fallback is used and the file is simply excluded.
++        "@platforms//os:windows": [],
++        "//conditions:default": glob(["lib/decompress/*.S"]),
+     }),
+     hdrs = select({
+         ":llvm_zstd_enabled": [

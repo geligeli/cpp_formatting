@@ -14,6 +14,8 @@ def _llvm_impl(_module_ctx):
     http_archive(
         name = "llvm-raw",
         build_file_content = "# empty",
+        patch_args = ["-p1"],
+        patches = ["//patches:llvm_zstd_no_asm_on_windows.patch"],
         sha256 = LLVM_SHA256,
         strip_prefix = "llvm-project-llvmorg-" + LLVM_VERSION,
         urls = ["https://github.com/llvm/llvm-project/archive/refs/tags/llvmorg-{v}.tar.gz".format(v = LLVM_VERSION)],
