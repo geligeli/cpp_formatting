@@ -57,6 +57,9 @@ jobs:
         run: |
           # The minify config uses GNU-ld flags and full static linking, which
           # only work on Linux; use a plain optimized build here.
+          # MSYS_NO_PATHCONV: stop git-bash from rewriting //target patterns
+          # into POSIX paths on Windows.
+          export MSYS_NO_PATHCONV=1
           bazel build --disk_cache=.disk_cache --repository_cache=.bazel_cache -c opt //cpp_formatting:cpp_format
           BIN=$(bazel cquery -c opt //cpp_formatting:cpp_format --output=files)
           cp "$BIN" "${{ matrix.asset }}"
