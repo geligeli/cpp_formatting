@@ -17,6 +17,7 @@ def _llvm_impl(_module_ctx):
         patch_args = ["-p1"],
         patches = [
             "//patches:llvm_blake3_no_asm_on_windows.patch",
+            "//patches:llvm_zlib_std_c11_msvc.patch",
             "//patches:llvm_zstd_no_asm_on_windows.patch",
         ],
         sha256 = LLVM_SHA256,

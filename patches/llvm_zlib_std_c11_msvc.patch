@@ -1,0 +1,24 @@
+--- a/utils/bazel/third_party_build/zlib-ng.BUILD
++++ b/utils/bazel/third_party_build/zlib-ng.BUILD
+@@ -86,7 +86,6 @@
+         "//conditions:default": [],
+     }),
+     copts = [
+-        "-std=c11",
+         "-DZLIB_COMPAT",
+         "-DWITH_GZFILEOP",
+         "-DWITH_OPTIM",
+@@ -94,7 +93,12 @@
+         # For local builds you might want to add "-DWITH_NATIVE_INSTRUCTIONS"
+         # here to improve performance. Native instructions aren't enabled in
+         # the default config for reproducibility.
+-    ],
++    ] + select({
++        # cl.exe does not understand the GCC-style -std=c11 and warns D9002
++        # for every file; its default C mode compiles zlib-ng just fine.
++        "@platforms//os:windows": [],
++        "//conditions:default": ["-std=c11"],
++    }),
+     defines = select({
+         ":llvm_zlib_enabled": [
+             "LLVM_ENABLE_ZLIB=1",
