@@ -202,6 +202,14 @@ pkg_tar(
     extension = "tar.gz",
 )
 
+# Host tool that converts a binary file into a C++ source file embedding its
+# bytes as a const array.  Used instead of `xxd -i` so the genrule below works
+# on any platform.
+cc_binary(
+    name = "embed_file",
+    srcs = ["embed_file.cpp"],
+)
+
 # Convert clang_include_headers.tar.gz into a C++ source file embedding the
 # bytes as a const array.  Built into binaries so they can extract the headers
 # at runtime without depending on a system-installed clang.
@@ -209,16 +217,8 @@ genrule(
     name = "clang_include_headers_embed_cc",
     srcs = [":clang_include_headers"],
     outs = ["clang_include_headers_embed.cc"],
-    cmd = """
-(
-echo '#include <cstddef>'
-echo ''
-echo 'extern "C" const unsigned char kClangIncludeHeadersTarGz[] = {'
-xxd -i < $(location :clang_include_headers)
-echo '};'
-echo 'extern "C" const size_t kClangIncludeHeadersTarGzSize = sizeof(kClangIncludeHeadersTarGz);'
-) > $@
-""",
+    cmd = "$(execpath :embed_file) $(location :clang_include_headers) $@ kClangIncludeHeadersTarGz",
+    tools = [":embed_file"],
 )
 
 cc_library(
@@ -228,4 +228,7 @@ cc_library(
         ":clang_include_headers_embed_cc",
     ],
     hdrs = ["embedded_clang_resource.h"],
+    deps = [
+        "@llvm_zlib//:zlib",
+    ],
 )
