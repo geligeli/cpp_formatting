@@ -50,8 +50,6 @@ jobs:
       - name: Setup Bazel
         if: runner.os != 'Linux'
         uses: bazel-contrib/setup-bazel@0.18.0
-        with:
-          bazel-version: 8.6.0
 
       - name: Build binary
         if: runner.os != 'Linux'
