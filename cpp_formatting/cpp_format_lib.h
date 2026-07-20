@@ -50,8 +50,13 @@ class CppFormatActionFactory : public clang::tooling::FrontendActionFactory {
   auto rewrites() const -> const PendingRewrites& { return Pending; }
 
   /// Commit buffered rewrites: print them (DryRun) or write them to disk
-  /// atomically (InPlace).  No-op in Lint mode.
+  /// atomically (InPlace).  No-op in Lint/Emit mode.
   void flush();
+
+  /// In Emit mode, writes this run's edit records (every rule's renames plus
+  /// the trailing-return rewrites) and the dependent-token resolution sidecar
+  /// as JSON to \p OS.  Call after ClangTool::run() completes.
+  void emitEdits(llvm::raw_ostream& OS);
 
  private:
   std::vector<NormalizeRule> Rules;
@@ -60,6 +65,12 @@ class CppFormatActionFactory : public clang::tooling::FrontendActionFactory {
   OutputMode Mode;
   FileSet CollectFrom;
   PendingRewrites Pending;
+  EditReport Edits;  // populated in Emit mode (all rules + trailing-return)
+  // One cross-TU dependent-token resolution map per rule (see
+  // DependentResolutions).  Persists for the whole ClangTool::run() so a header
+  // TU can consume resolutions recorded by earlier .cpp TUs.  Kept per-rule so
+  // a token resolved by one rule is never re-applied by another.
+  std::vector<DependentResolutions> DepResPerRule;
   LintReport* Report = nullptr;
 };
 

@@ -101,6 +101,14 @@ static cl::opt<std::string> FormatOpt(
              "A non-default value implies --lint."),
     cl::init("text"), cl::cat(CppFormatCategory));
 
+static cl::opt<std::string> EmitEditsOpt(
+    "emit-edits",
+    cl::desc("Emit structured edit records (every rule's renames plus the "
+             "trailing-return rewrites) and a template-dependent-token "
+             "resolution sidecar as JSON to the given file, for cross-TU "
+             "aggregation. Modifies no source files."),
+    cl::init(""), cl::cat(CppFormatCategory));
+
 // ---------------------------------------------------------------------------
 // Helpers shared across passes
 // ---------------------------------------------------------------------------
@@ -195,8 +203,14 @@ auto main(int argc, const char** argv) -> int {
   }
 
   const bool Lint = LintOpt || FormatOpt != "text";
+  const bool Emit = !EmitEditsOpt.empty();
   if (Lint && InPlace) {
     llvm::errs() << "--lint/--format cannot be combined with --in-place\n";
+    return 1;
+  }
+  if (Emit && (InPlace || Lint)) {
+    llvm::errs() << "--emit-edits cannot be combined with --in-place or "
+                    "--lint/--format\n";
     return 1;
   }
   if (FormatOpt != "text" && FormatOpt != "sarif" && FormatOpt != "diff") {
@@ -205,7 +219,8 @@ auto main(int argc, const char** argv) -> int {
     return 1;
   }
 
-  const OutputMode mode = Lint      ? OutputMode::Lint
+  const OutputMode mode = Emit      ? OutputMode::Emit
+                          : Lint    ? OutputMode::Lint
                           : InPlace ? OutputMode::InPlace
                                     : OutputMode::DryRun;
   const std::string ResourceDir = ensureClangResourceDir();
@@ -270,6 +285,17 @@ auto main(int argc, const char** argv) -> int {
   if (Lint) Factory.setLintReport(&Report);
   if (int rc = Tool.run(&Factory)) return rc;
 
+  if (Emit) {
+    std::error_code EC;
+    llvm::raw_fd_ostream OS(EmitEditsOpt, EC);
+    if (EC) {
+      llvm::errs() << "Cannot write '" << EmitEditsOpt << "': " << EC.message()
+                   << "\n";
+      return 1;
+    }
+    Factory.emitEdits(OS);
+    return 0;
+  }
   if (Lint)
     return emitLintResults(Report, Factory.rewrites(), FormatOpt, "cpp_format");
   Factory.flush();

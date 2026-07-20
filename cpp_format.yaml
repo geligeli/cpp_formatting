@@ -1,0 +1,6 @@
+# Ruleset for the Bazel cpp_format integration (see bazel/cpp_format.bzl).
+# Applied by the per-target aspect via `cpp_format --config=cpp_format.yaml
+# --emit-edits ...`.  Keep this in sync with whatever style the repo enforces.
+normalize_variables:
+  - scope: member
+    style: snake_case

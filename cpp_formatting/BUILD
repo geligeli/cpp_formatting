@@ -239,6 +239,7 @@ cc_binary(
     name = "cpp_format",
     srcs = ["cpp_format.cpp"],
     linkstatic = True,
+    visibility = ["//visibility:public"],
     deps = [
         ":cpp_format_lib",
         ":embedded_clang_resource",
@@ -247,6 +248,21 @@ cc_binary(
         ":rename_variables_lib",
         "@llvm-project//clang:frontend",
         "@llvm-project//clang:tooling",
+        "@llvm-project//llvm:Support",
+    ],
+)
+
+# Aggregates per-TU edit-record files (from --emit-edits) into one repository
+# change: resolves template-dependent tokens across TUs, merges edits per file,
+# and prints a unified diff or applies in place.  No Clang/LLVM tooling needed —
+# it only reads records and files.
+cc_binary(
+    name = "aggregate_edits",
+    srcs = ["aggregate_edits.cpp"],
+    linkstatic = True,
+    visibility = ["//visibility:public"],
+    deps = [
+        ":lint_lib",
         "@llvm-project//llvm:Support",
     ],
 )

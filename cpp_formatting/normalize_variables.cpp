@@ -52,6 +52,13 @@ static cl::opt<std::string> FormatOpt(
              "A non-default value implies --lint."),
     cl::init("text"), cl::cat(NormalizeVarsCategory));
 
+static cl::opt<std::string> EmitEditsOpt(
+    "emit-edits",
+    cl::desc("Emit structured edit records (+ a template-dependent-token "
+             "resolution sidecar) as JSON to the given file, for cross-TU "
+             "aggregation. Modifies no source files."),
+    cl::init(""), cl::cat(NormalizeVarsCategory));
+
 namespace {
 
 // Build the FileSet from the list of source paths.  We resolve each path to
@@ -115,8 +122,14 @@ auto main(int argc, const char** argv) -> int {
   }
 
   const bool Lint = LintOpt || FormatOpt != "text";
+  const bool Emit = !EmitEditsOpt.empty();
   if (Lint && InPlace) {
     llvm::errs() << "--lint/--format cannot be combined with --in-place\n";
+    return 1;
+  }
+  if (Emit && (InPlace || Lint)) {
+    llvm::errs() << "--emit-edits cannot be combined with --in-place or "
+                    "--lint/--format\n";
     return 1;
   }
   if (FormatOpt != "text" && FormatOpt != "sarif" && FormatOpt != "diff") {
@@ -126,6 +139,7 @@ auto main(int argc, const char** argv) -> int {
   }
 
   const OutputMode mode = DebugTrace ? OutputMode::Debug
+                          : Emit     ? OutputMode::Emit
                           : Lint     ? OutputMode::Lint
                           : InPlace  ? OutputMode::InPlace
                                      : OutputMode::DryRun;
@@ -206,6 +220,18 @@ auto main(int argc, const char** argv) -> int {
                                         ScopeOpt.getValue() + "/" +
                                         StyleOpt.getValue());
   int rc = Tool.run(factory.get());
+  if (Emit) {
+    if (rc != 0) return rc;
+    std::error_code EC;
+    llvm::raw_fd_ostream OS(EmitEditsOpt, EC);
+    if (EC) {
+      llvm::errs() << "Cannot write '" << EmitEditsOpt << "': " << EC.message()
+                   << "\n";
+      return 1;
+    }
+    factory->emitEdits(OS);
+    return rc;
+  }
   if (Lint) {
     if (rc != 0) return rc;
     return emitLintResults(Report, factory->rewrites(), FormatOpt,

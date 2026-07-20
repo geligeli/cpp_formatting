@@ -1,0 +1,20 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//bazel:cpp_format.bzl", "cpp_format_targets")
+
+# A small first-party cc_library used to exercise the cpp_format Bazel
+# integration end to end: a member the `member -> snake_case` rule renames
+# (Widget::itemCount) plus a header-only template whose dependent token
+# (`w.itemCount`) is resolved across TUs by the aggregation phase.
+cc_library(
+    name = "demo",
+    srcs = ["demo.cpp"],
+    hdrs = ["demo.h"],
+    includes = ["."],
+)
+
+# Generates :format.check (test / lint gate), :format.diff and :format.fix
+# (bazel run) over //bazel/testdata:demo.
+cpp_format_targets(
+    name = "format",
+    deps = [":demo"],
+)

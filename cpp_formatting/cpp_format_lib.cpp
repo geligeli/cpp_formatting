@@ -23,25 +23,32 @@ class CppFormatConsumer : public ASTConsumer {
  public:
   CppFormatConsumer(Rewriter& RW, const std::vector<NormalizeRule>& Rules,
                     bool TrailingReturnTypes, const std::string& TrailingRuleId,
-                    const FileSet& CollectFrom, LintReport* Report)
+                    const FileSet& CollectFrom, LintReport* Report,
+                    std::vector<DependentResolutions>* DepResPerRule,
+                    EditReport* Edits)
       : RW(RW),
         Rules(Rules),
         TrailingReturnTypes(TrailingReturnTypes),
         TrailingRuleId(TrailingRuleId),
         CollectFrom(CollectFrom),
-        Report(Report) {}
+        Report(Report),
+        DepResPerRule(DepResPerRule),
+        Edits(Edits) {}
 
   void HandleTranslationUnit(ASTContext& Ctx) override {
-    for (const NormalizeRule& Rule : Rules)
-      runRenameRuleOnAST(Ctx, RW, Rule.CB, Rule.Scope, CollectFrom, Report,
-                         Rule.RuleId);
+    for (size_t I = 0; I < Rules.size(); ++I)
+      runRenameRuleOnAST(Ctx, RW, Rules[I].CB, Rules[I].Scope, CollectFrom,
+                         Report, Rules[I].RuleId,
+                         DepResPerRule ? &(*DepResPerRule)[I] : nullptr, Edits);
 
     if (TrailingReturnTypes) {
       // MatchFinder::matchAST runs the matchers on the already-parsed AST —
-      // no extra parse.  Shares the Rewriter with the rename rules.
+      // no extra parse.  Shares the Rewriter with the rename rules, so it runs
+      // last and can subsume rename edits that landed inside a return type.
       ast_matchers::MatchFinder Finder;
       TrailingReturnCallback Callback(RW);
       if (Report) Callback.setLintReport(Report, TrailingRuleId);
+      if (Edits) Callback.setEmitReport(Edits);
       registerTrailingReturnMatchers(Finder, Callback);
       Finder.matchAST(Ctx);
     }
@@ -54,6 +61,8 @@ class CppFormatConsumer : public ASTConsumer {
   const std::string& TrailingRuleId;
   const FileSet& CollectFrom;
   LintReport* Report;  // null outside Lint mode
+  std::vector<DependentResolutions>* DepResPerRule;
+  EditReport* Edits;  // non-null in Emit mode
 };
 
 // ---------------------------------------------------------------------------
@@ -70,14 +79,18 @@ class CppFormatAction : public ASTFrontendAction {
   CppFormatAction(const std::vector<NormalizeRule>& Rules,
                   bool TrailingReturnTypes, const std::string& TrailingRuleId,
                   OutputMode Mode, const FileSet& CollectFrom,
-                  PendingRewrites* Pending, LintReport* Report)
+                  PendingRewrites* Pending, LintReport* Report,
+                  std::vector<DependentResolutions>* DepResPerRule,
+                  EditReport* Edits)
       : Rules(Rules),
         TrailingReturnTypes(TrailingReturnTypes),
         TrailingRuleId(TrailingRuleId),
         Mode(Mode),
         CollectFrom(CollectFrom),
         Pending(Pending),
-        Report(Report) {}
+        Report(Report),
+        DepResPerRule(DepResPerRule),
+        Edits(Edits) {}
 
   void EndSourceFileAction() override {
     SourceManager& SM = TheRewriter.getSourceMgr();
@@ -105,7 +118,7 @@ class CppFormatAction : public ASTFrontendAction {
     TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
     return std::make_unique<CppFormatConsumer>(
         TheRewriter, Rules, TrailingReturnTypes, TrailingRuleId, CollectFrom,
-        Report);
+        Report, DepResPerRule, Edits);
   }
 
  private:
@@ -116,6 +129,8 @@ class CppFormatAction : public ASTFrontendAction {
   const FileSet& CollectFrom;
   PendingRewrites* Pending;
   LintReport* Report;
+  std::vector<DependentResolutions>* DepResPerRule;
+  EditReport* Edits;
   Rewriter TheRewriter;
 };
 
@@ -134,17 +149,33 @@ CppFormatActionFactory::CppFormatActionFactory(std::vector<NormalizeRule> Rules,
       TrailingReturnTypes(TrailingReturnTypes),
       TrailingRuleId(std::move(TrailingRuleId)),
       Mode(Mode),
-      CollectFrom(std::move(CollectFrom)) {}
+      CollectFrom(std::move(CollectFrom)),
+      DepResPerRule(this->Rules.size()) {}
 
 auto CppFormatActionFactory::create()
     -> std::unique_ptr<clang::FrontendAction> {
-  return std::make_unique<CppFormatAction>(Rules, TrailingReturnTypes,
-                                           TrailingRuleId, Mode, CollectFrom,
-                                           &Pending, Report);
+  return std::make_unique<CppFormatAction>(
+      Rules, TrailingReturnTypes, TrailingRuleId, Mode, CollectFrom, &Pending,
+      Report, &DepResPerRule, Mode == OutputMode::Emit ? &Edits : nullptr);
+}
+
+void CppFormatActionFactory::emitEdits(llvm::raw_ostream& OS) {
+  // Fold every rule's cross-TU dependent-token resolutions into the sidecar;
+  // aggregation resolves them across all TUs before turning survivors into
+  // edits.  Keys are relativized to cwd to match the edit records and be stable
+  // across sandboxes.
+  for (const DependentResolutions& Map : DepResPerRule)
+    for (const auto& [Key, R] : Map) {
+      if (!R.HasName && !R.Vetoed) continue;
+      Edits.Resolutions.push_back({relativizeToCwd(Key.first), Key.second,
+                                   R.Length, R.OldName, R.NewName, R.Vetoed});
+    }
+  Edits.emitJSON(OS);
 }
 
 void CppFormatActionFactory::flush() {
-  if (Mode == OutputMode::Debug || Mode == OutputMode::Lint) {
+  if (Mode == OutputMode::Debug || Mode == OutputMode::Lint ||
+      Mode == OutputMode::Emit) {
     Pending.clear();
     return;
   }

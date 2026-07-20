@@ -1,0 +1,3 @@
+# Root package: exports the cpp_format ruleset consumed by the Bazel aspect in
+# bazel/cpp_format.bzl.
+exports_files(["cpp_format.yaml"])

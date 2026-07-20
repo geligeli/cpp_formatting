@@ -92,7 +92,7 @@ All source files live under [cpp_formatting/](cpp_formatting/).
   - Factory functions: `RenameAllMemberVariables`, `RenameAllLocalVariables`, `RenameAllGlobalVariables`, `RenameAllStaticMemberVariables`, `RenameAllConstMemberVariables`, `RenameAllStaticGlobalVariables`, `RenameAllConstGlobalVariables`, `RenameAllMemberFunctions`
   - `orderSourcesForRename()` — promotes header files to the end of the source list so every `.cpp` TU is parsed against the original on-disk header content
   - `rewriteVariableNames()` — test helper (single in-memory TU, returns the rewritten string)
-- [cpp_formatting/rename_variables_lib.cpp](cpp_formatting/rename_variables_lib.cpp) — Implementation: two-pass `RecursiveASTVisitor` (collect declarations, then apply renames). A third visitor (`DebugTraceVisitor`) runs in `OutputMode::Debug` to print every reference site without modifying anything.
+- [cpp_formatting/rename_variables_lib.cpp](cpp_formatting/rename_variables_lib.cpp) — Implementation: two-pass `RecursiveASTVisitor` (collect declarations, then apply renames), plus `DependentTokenCollector` + `RecordDependentResolutionsVisitor` (the latter walks template instantiations) that together resolve template-dependent member tokens across TUs. A separate `DebugTraceVisitor` runs in `OutputMode::Debug` to print every reference site without modifying anything.
 - [cpp_formatting/naming_convention.h](cpp_formatting/naming_convention.h) — `NamingStyle` enum, `splitIntoWords`, `formatName`, `renameToStyle`, `parseNamingStyle`.
 - [cpp_formatting/naming_convention.cpp](cpp_formatting/naming_convention.cpp) — Splits camelCase/snake_case/prefixed names into word lists and reassembles in any target style.
 
@@ -124,12 +124,14 @@ All three binaries link the Clang built-in headers (`stddef.h`, `__stddef_max_al
   3. In-place on two files in one invocation — both files are modified.
   4. In-place on a file with system `#include`s — validates the embedded Clang resource directory works (no system Clang required).
 - [cpp_formatting/naming_convention_test.cpp](cpp_formatting/naming_convention_test.cpp) — gtest unit tests for `naming_convention`: `splitIntoWords`, `formatName`, `renameToStyle`.
-- [cpp_formatting/rename_variables_test.cpp](cpp_formatting/rename_variables_test.cpp) — gtest unit tests for `rename_variables_lib` (member, local, global, static data members, const members, static globals, const globals, member functions, templates, cross-file, constructor initializers, C++23 explicit object parameters / "deducing this").
+- [cpp_formatting/rename_variables_test.cpp](cpp_formatting/rename_variables_test.cpp) — gtest unit tests for `rename_variables_lib` (member, local, global, static data members, const members, static globals, const globals, member functions, templates, template-dependent member tokens resolved through instantiations, cross-file, constructor initializers, C++23 explicit object parameters / "deducing this").
 - [cpp_formatting/normalize_variables_integration_test.sh](cpp_formatting/normalize_variables_integration_test.sh) — Shell integration tests for `normalize_variables`:
   1. Multi-file member rename — cross-file references, pointer-to-member, lambda, scope separation.
   2. Shadowed variable — global renamed, same-named local parameter unchanged.
   3. Source ordering — header passed in the middle of the source list; tool auto-promotes it to the end so every `.cpp` is parsed against the original header.
   4. Member function rename — virtual override hierarchy, out-of-line static definition, cross-file call sites; destructor, data members, and free functions unchanged.
+  5. Template-dependent member token — `set_val`'s `x.val` in a header is rewritten from the resolution recorded while the instantiating `.cpp` files are processed (self-contained fixtures generated inline).
+  6. Out-of-scope veto — the same template instantiated with a type outside the passed source set leaves the shared header token untouched while still renaming the owned type.
 - [cpp_formatting/lint_lib_test.cpp](cpp_formatting/lint_lib_test.cpp) — gtest unit tests for `lint_lib`: unified diff (hunks, context merging, missing trailing newline, empty inputs) and SARIF emission (parsed back with `llvm::json`).
 - [cpp_formatting/lint_integration_test.sh](cpp_formatting/lint_integration_test.sh) — Shell integration tests for `--lint`/`--format` across all three binaries:
   1. Text lint — diagnostics on stdout, exit 1, file byte-identical.
@@ -176,6 +178,23 @@ Supported scopes: `member`, `local`, `global`, `static_member`, `const_member`, 
 
 Supported styles: `snake_case`, `_leading`, `trailing_`, `m_prefix`, `camelCase`, `UpperCamelCase`, `UPPER_SNAKE_CASE`, `kConstant`.
 
+## Bazel integration ([bazel/cpp_format.bzl](bazel/cpp_format.bzl))
+
+Runs `cpp_format` from the build graph so compile info and the full header set come from Bazel, not a committed `compile_commands.json`. This solves the sandboxing problem where one target's TU can't reach headers owned by other targets.
+
+**How it works** — a per-target **aspect** (`cpp_format_aspect`) derives each `cc_*` target's compile flags from `CcInfo.compilation_context` + the toolchain (`cc_common.get_memory_inefficient_command_line(CPP_COMPILE_ACTION_NAME)`), and runs `cpp_format --config=cpp_format.yaml --emit-edits=<target>.cpp_format.json <srcs+hdrs> -- -x c++ <flags> -resource-dir=<staged builtin headers>`. It declares the target's sources **plus `compilation_context.headers` (transitive)** and `cc_toolchain.all_files` as action inputs — that declaration is what makes headers reachable under sandboxing. Each action is parallel and cached; first-party targets only (guarded by `ctx.label.workspace_name == ""`).
+
+**Records, not diffs** — the emit action writes offset-level edit records (`{file, offset, length, old, new}`) plus a template-dependent-token resolution sidecar (see "template-dependent member tokens"). Textual diffs can't be merged (hunk offsets don't compose); records can. [aggregate_edits](cpp_formatting/aggregate_edits.cpp) unions all targets' records, resolves dependent tokens across TUs (agree → edit, veto/disagree → dropped), merges per file (dedup identical, flag overlapping-distinct conflicts), and renders/applies via `emitUnifiedDiff`. This is the clang-tidy `--export-fixes` + `clang-apply-replacements` model. The rename↔trailing-return overlap (a member renamed inside a `decltype(...)` return type that trailing-return also rewrites) is handled in [trailing_return_types_lib.cpp](cpp_formatting/trailing_return_types_lib.cpp): the trailing-return edit subsumes (drops) rename records inside its range, since its `-> type` text already carries the rename.
+
+**Rules** — `cpp_format_targets(name, deps)` generates three targets (see [bazel/testdata/BUILD.bazel](bazel/testdata/BUILD.bazel) for the demo):
+- `<name>.check` — a **test** (hermetic lint gate): `mergeEditReports` counts edits without reading sources; exit 1 if any. `bazel test //…:<name>.check`.
+- `<name>.diff` — `bazel run` prints the merged git-apply-able unified diff (review artifact).
+- `<name>.fix` — `bazel run` applies edits in `$BUILD_WORKSPACE_DIRECTORY` (outside the action graph, since Bazel actions can't mutate sources).
+
+`--config=lint` in [.bazelrc](.bazelrc) runs the aspect and materializes each target's records (`bazel build --config=lint //…`) for inspection/CI; the failing gate is the `.check` test.
+
+**Non-obvious behaviours** — record file keys are the source's **real path**, which under Bazel resolves to the absolute workspace path (source symlinks) — stable across actions/sandboxes; `aggregate_edits` uses absolute keys directly and joins relative keys with `--root`. `-x c++` is forced so headers parse as C++ (not C). `-resource-dir` is derived from the staged `@llvm-project//clang:builtin_headers_gen` paths (robust to a module-extension rename). The aspect needs `cpp_format` in the **exec** configuration (a one-time from-source Clang/LLVM build). Portability caveat: absolute paths in records make remote-cache reuse across machines suboptimal.
+
 ## Key Design Decisions
 
 ### `trailing_return_types`: what gets rewritten
@@ -199,6 +218,18 @@ Edits are buffered in `RenameActionFactory::Pending` (a path → content map) an
 
 `FileSet` (in `rename_variables_lib.h`) holds the real absolute paths of all source files. `CollectRenamesVisitor` collects declarations from any file in the set (not just the main file), enabling the header's declarations to be found when compiling the `.cpp`.
 
+### `normalize_variables`: template-dependent member tokens
+
+A member accessed through a template parameter — e.g. `x.val` in `auto set_val(auto& x) { x.val = 12; }` (or the explicit `template <class T> void set_val(T& x)`) — is a **dependent** expression (`CXXDependentScopeMemberExpr`): which member `val` names is unknown until the template is instantiated, and the instantiations usually live in the `.cpp` files, not in the header that spells the token. The per-main-file `Rewriter` model can't rename it on its own — the header's own TU never instantiates the template, and an instantiating `.cpp`'s TU doesn't rewrite the header.
+
+The tool bridges this with a **cross-TU resolution map** (`DependentResolutions` in `rename_variables_lib.h`), keyed by the token's `(real path, byte offset)` and threaded through every TU of one `ClangTool::run()` (the factories own it — `RenameActionFactory::DepRes`, and one **per rule** in `CppFormatActionFactory::DepResPerRule` so a token resolved by one rule is never re-applied by another). Per TU, `runRenameRuleOnAST` does three things:
+
+1. `DependentTokenCollector` (cheap, no instantiations) finds dependent-member token locations in owned files. If there are none, the rest is skipped — the feature is zero-cost for non-template code.
+2. `RecordDependentResolutionsVisitor` (`shouldVisitTemplateInstantiations() == true`) walks this TU's instantiations and, for each resolved member access landing on a known dependent-token location, records the new name it resolves to. A binding to a member that is **not** being renamed (e.g. a type outside the `FileSet`) or a disagreement between instantiations **vetoes** the location.
+3. `ApplyRenamesVisitor::VisitCXXDependentScopeMemberExpr` rewrites the token in its **own** main-file TU using the agreed name (skipping vetoed/unresolved entries).
+
+Because `orderSourcesForRename()` puts headers last, every instantiating `.cpp` TU runs before the header TU that consumes its resolutions. `ApplyRenamesVisitor` itself keeps `shouldVisitTemplateInstantiations() == false`, so all non-dependent paths are unchanged — the feature is purely additive. **Soundness is bounded by the passed source set:** an instantiation in a TU that is *not* passed to the tool is invisible, so its member may be renamed while its dependent use is missed; conversely a visible out-of-scope binding is vetoed conservatively (leaving the token), which can produce an incomplete rename. Both cases surface as a compile error on the next build — the intended review gate — rather than a silent miscompile. Full all-or-nothing propagation (skipping a member's declaration rename when a dependent use can't be safely rewritten) is a possible future hardening.
+
 ### Known non-obvious behaviours
 
 - **`QualifiedTypeLoc` gap** — Clang's `QualifiedTypeLoc` does not include leading `const`/`volatile`/`restrict` in its source range. `skipQualifiersBackward()` scans the raw source buffer leftward.
@@ -208,6 +239,7 @@ Edits are buffered in `RenameActionFactory::Pending` (a path → content map) an
 - **Constructor mem-initializers** — `S() : val_(0) {}` is a `CXXCtorInitializer`, not a `Stmt` or `Decl`, so it is not visited by the standard `Visit*` callbacks. `ApplyRenamesVisitor` overrides `TraverseConstructorInitializer` and rewrites at `getMemberLocation()`.
 - **Designated initializers** — `S s{.val_ = 0}` stores the field name in the `Designator` of a `DesignatedInitExpr`, not a `MemberExpr`. `VisitDesignatedInitExpr` rewrites field designators at `getFieldLoc()`.
 - **Template instantiation** — `FieldDecl` instances in template specializations are mapped back to the primary-template field by index walk through `ClassTemplateSpecializationDecl`. For member functions, `primaryTemplateMethod()` walks `getInstantiatedFromMemberFunction()` instead.
+- **Template-dependent member tokens** — `x.val` where `x` is a template parameter is a `CXXDependentScopeMemberExpr` with no resolved member; it is renamed via the cross-TU `DependentResolutions` map populated from instantiations (see "template-dependent member tokens" above), not by the ordinary `Visit*` paths. Only the `member`/`method` scopes are affected. `ApplyRenamesVisitor` deliberately does **not** visit template instantiations, so resolved member accesses inside instantiations are never double-rewritten (their source locations point back into the pattern, which is rewritten once via the dependent-token path).
 - **Member-function scope (`Method`)** — constructors, destructors, conversion functions, and overloaded operators are never renamed (`isRenamableMethod()`); their names are not plain identifiers. A virtual function is renamed together with its entire override hierarchy (`collectOverrideFamily()`); if any function in the hierarchy is declared outside the `FileSet`, the rename is skipped entirely so `override` checking can never be broken.
 - **Shadowed variables** — `matchesScope()` filters by scope: a parameter with the same name as a global is not collected when renaming globals.
 - **Per-file-content cache key** — the embedded Clang resource directory is extracted under a directory whose name includes the FNV-1a hash of the embedded `.tar.gz`. If the embedded headers change (e.g. after an LLVM upgrade) a fresh cache directory is created automatically.

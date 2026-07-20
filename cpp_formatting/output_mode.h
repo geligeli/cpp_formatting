@@ -9,6 +9,10 @@ enum class OutputMode {
             ///< Makes no modifications to source files.
   Lint,     ///< Buffer rewrites like DryRun and record one lint diagnostic
             ///< per rewrite; never writes to disk or prints source.
+  Emit,     ///< Emit structured edit records (+ a dependent-token resolution
+            ///< sidecar) for later cross-TU aggregation; never writes to disk.
+  ///< Template-dependent tokens are NOT applied here — their edits are
+  ///< produced by the aggregation phase from the sidecar.
 };
 
 #endif  // CPP_FORMATTING_OUTPUT_MODE_H_

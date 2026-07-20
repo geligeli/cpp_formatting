@@ -41,3 +41,10 @@ build:minify --action_env=CC=clang
 build:minify --action_env=CXX=clang++
 build:minify --features=fully_static_link
 build:minify --platform_suffix=-minify
+
+# cpp_format lint: run the aspect over the build graph and materialise each
+# target's edit-record JSON (see bazel/cpp_format.bzl).  The failing lint gate
+# is `bazel test //path:<name>.check`; this config just builds the records
+# (e.g. `bazel build --config=lint //bazel/testdata:demo`) for inspection/CI.
+build:lint --aspects=//bazel:cpp_format.bzl%cpp_format_aspect
+build:lint --output_groups=+cpp_format_edits

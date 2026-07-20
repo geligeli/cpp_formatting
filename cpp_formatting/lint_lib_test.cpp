@@ -171,4 +171,88 @@ TEST(LintReportSARIF, ParsesAndHasExpectedShape) {
   EXPECT_EQ(*Col, 5);
 }
 
+// ---------------------------------------------------------------------------
+// Structured edits: emit/parse round-trip + aggregation
+// ---------------------------------------------------------------------------
+
+// In-memory file provider for aggregateEdits.
+static std::function<std::optional<std::string>(llvm::StringRef)> filesFrom(
+    std::map<std::string, std::string> Files) {
+  return [Files = std::move(Files)](
+             llvm::StringRef F) -> std::optional<std::string> {
+    auto It = Files.find(F.str());
+    if (It == Files.end()) return std::nullopt;
+    return It->second;
+  };
+}
+
+TEST(EditRecords, JSONRoundTrip) {
+  EditReport R;
+  R.Edits.push_back({"a.cpp", 5, 3, "val", "val_"});
+  R.Resolutions.push_back({"h.h", 10, 3, "val", "val_", false});
+  std::string Json;
+  llvm::raw_string_ostream OS(Json);
+  R.emitJSON(OS);
+  OS.flush();
+
+  EditReport Parsed;
+  ASSERT_TRUE(parseEditReport(Json, Parsed));
+  ASSERT_EQ(Parsed.Edits.size(), 1u);
+  EXPECT_EQ(Parsed.Edits[0].File, "a.cpp");
+  EXPECT_EQ(Parsed.Edits[0].Offset, 5u);
+  EXPECT_EQ(Parsed.Edits[0].New, "val_");
+  ASSERT_EQ(Parsed.Resolutions.size(), 1u);
+  EXPECT_EQ(Parsed.Resolutions[0].File, "h.h");
+  EXPECT_EQ(Parsed.Resolutions[0].New, "val_");
+}
+
+TEST(AggregateEdits, MergesDisjointFilesAndDedupsIdentical) {
+  EditReport A, B;
+  A.Edits.push_back({"a.cpp", 0, 3, "int", "u32"});
+  B.Edits.push_back({"b.cpp", 4, 3, "int", "u32"});
+  // Same edit reported by two TUs (e.g. a shared header) must dedup, not stack.
+  A.Edits.push_back({"h.h", 1, 1, "x", "y"});
+  B.Edits.push_back({"h.h", 1, 1, "x", "y"});
+
+  std::map<std::string, std::string> Out;
+  std::vector<std::string> Conflicts;
+  ASSERT_TRUE(aggregateEdits(
+      {A, B},
+      filesFrom({{"a.cpp", "int a;"}, {"b.cpp", "var int;"}, {"h.h", "axb"}}),
+      Out, Conflicts));
+  EXPECT_TRUE(Conflicts.empty());
+  EXPECT_EQ(Out["a.cpp"], "u32 a;");
+  EXPECT_EQ(Out["b.cpp"], "var u32;");
+  EXPECT_EQ(Out["h.h"], "ayb");  // applied once, not twice
+}
+
+TEST(AggregateEdits, PromotesAgreeingResolutionsAndDropsVetoed) {
+  // Two TUs agree on the header token -> becomes an edit.
+  EditReport A, B, C;
+  A.Resolutions.push_back({"h.h", 0, 3, "val", "val_", false});
+  B.Resolutions.push_back({"h.h", 0, 3, "val", "val_", false});
+  // A different token vetoed by one TU -> dropped even though another resolves
+  // it.
+  A.Resolutions.push_back({"h.h", 4, 3, "biz", "biz_", false});
+  C.Resolutions.push_back({"h.h", 4, 3, "biz", "biz_", true});
+
+  std::map<std::string, std::string> Out;
+  std::vector<std::string> Conflicts;
+  ASSERT_TRUE(aggregateEdits({A, B, C}, filesFrom({{"h.h", "val biz"}}), Out,
+                             Conflicts));
+  EXPECT_EQ(Out["h.h"], "val_ biz");  // first promoted, second vetoed
+}
+
+TEST(AggregateEdits, ReportsConflictOnOverlappingDistinctEdits) {
+  EditReport A, B;
+  A.Edits.push_back({"a.cpp", 0, 3, "int", "u32"});
+  B.Edits.push_back({"a.cpp", 1, 1, "n", "N"});  // overlaps [0,3)
+
+  std::map<std::string, std::string> Out;
+  std::vector<std::string> Conflicts;
+  EXPECT_FALSE(
+      aggregateEdits({A, B}, filesFrom({{"a.cpp", "int"}}), Out, Conflicts));
+  EXPECT_FALSE(Conflicts.empty());
+}
+
 }  // namespace

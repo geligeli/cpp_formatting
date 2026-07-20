@@ -303,3 +303,190 @@ auto emitLintResults(const LintReport& Report, const PendingRewrites& Rewrites,
   }
   return Report.empty() ? 0 : 1;
 }
+
+// ---------------------------------------------------------------------------
+// Structured edits (Bazel per-TU emit + aggregation)
+// ---------------------------------------------------------------------------
+
+void EditReport::emitJSON(llvm::raw_ostream& OS) const {
+  llvm::json::Array Edits;
+  for (const EditRecord& E : this->Edits)
+    Edits.push_back(
+        llvm::json::Object{{"file", E.File},
+                           {"offset", static_cast<int64_t>(E.Offset)},
+                           {"length", static_cast<int64_t>(E.Length)},
+                           {"old", E.Old},
+                           {"new", E.New}});
+  llvm::json::Array Res;
+  for (const ResolutionRecord& R : this->Resolutions)
+    Res.push_back(llvm::json::Object{{"file", R.File},
+                                     {"offset", static_cast<int64_t>(R.Offset)},
+                                     {"length", static_cast<int64_t>(R.Length)},
+                                     {"old", R.Old},
+                                     {"new", R.New},
+                                     {"veto", R.Veto}});
+  llvm::json::Object Root{{"edits", std::move(Edits)},
+                          {"resolutions", std::move(Res)}};
+  OS << llvm::formatv("{0:2}", llvm::json::Value(std::move(Root))) << "\n";
+}
+
+auto parseEditReport(llvm::StringRef Json, EditReport& Out) -> bool {
+  llvm::Expected<llvm::json::Value> Parsed = llvm::json::parse(Json);
+  if (!Parsed) {
+    llvm::consumeError(Parsed.takeError());
+    return false;
+  }
+  const llvm::json::Object* Root = Parsed->getAsObject();
+  if (!Root) return false;
+
+  if (const llvm::json::Array* Edits = Root->getArray("edits")) {
+    for (const llvm::json::Value& V : *Edits) {
+      const llvm::json::Object* O = V.getAsObject();
+      if (!O) return false;
+      EditRecord E;
+      E.File = O->getString("file").value_or("").str();
+      E.Offset = static_cast<unsigned>(O->getInteger("offset").value_or(0));
+      E.Length = static_cast<unsigned>(O->getInteger("length").value_or(0));
+      E.Old = O->getString("old").value_or("").str();
+      E.New = O->getString("new").value_or("").str();
+      if (E.File.empty()) return false;
+      Out.Edits.push_back(std::move(E));
+    }
+  }
+  if (const llvm::json::Array* Res = Root->getArray("resolutions")) {
+    for (const llvm::json::Value& V : *Res) {
+      const llvm::json::Object* O = V.getAsObject();
+      if (!O) return false;
+      ResolutionRecord R;
+      R.File = O->getString("file").value_or("").str();
+      R.Offset = static_cast<unsigned>(O->getInteger("offset").value_or(0));
+      R.Length = static_cast<unsigned>(O->getInteger("length").value_or(0));
+      R.Old = O->getString("old").value_or("").str();
+      R.New = O->getString("new").value_or("").str();
+      R.Veto = O->getBoolean("veto").value_or(false);
+      if (R.File.empty()) return false;
+      Out.Resolutions.push_back(std::move(R));
+    }
+  }
+  return true;
+}
+
+namespace {
+
+// Applies non-overlapping edits (sorted ascending by offset) to \p Original.
+// Returns false if any edit runs past the end of the buffer.
+auto applyEditsToContent(llvm::StringRef Original,
+                         const std::vector<EditRecord>& Sorted,
+                         std::string& Out) -> bool {
+  Out.clear();
+  unsigned Pos = 0;
+  for (const EditRecord& E : Sorted) {
+    if (E.Offset < Pos || E.Offset + E.Length > Original.size()) return false;
+    Out.append(Original.data() + Pos, Original.data() + E.Offset);
+    Out.append(E.New);
+    Pos = E.Offset + E.Length;
+  }
+  Out.append(Original.data() + Pos, Original.data() + Original.size());
+  return true;
+}
+
+}  // namespace
+
+auto mergeEditReports(
+    const std::vector<EditReport>& Reports,
+    std::map<std::string, std::vector<EditRecord>>& MergedByFile,
+    std::vector<std::string>& Conflicts) -> bool {
+  // 1. Resolve the union of dependent-token resolutions, keyed by
+  // (file,offset).
+  //    Mirrors recordResolution/vetoResolution in rename_variables_lib.
+  struct Resolved {
+    ResolutionRecord Rec;
+    bool Vetoed = false;
+    bool HasName = false;
+  };
+  std::map<std::pair<std::string, unsigned>, Resolved> ResMap;
+  for (const EditReport& Rep : Reports) {
+    for (const ResolutionRecord& R : Rep.Resolutions) {
+      Resolved& S = ResMap[{R.File, R.Offset}];
+      if (R.Veto) {
+        S.Vetoed = true;
+        continue;
+      }
+      if (S.HasName && S.Rec.New != R.New) {
+        S.Vetoed = true;  // instantiations disagree.
+        continue;
+      }
+      S.Rec = R;
+      S.HasName = true;
+    }
+  }
+
+  // 2. Gather all edits per file: ordinary edits + surviving resolutions.
+  std::map<std::string, std::vector<EditRecord>> ByFile;
+  for (const EditReport& Rep : Reports)
+    for (const EditRecord& E : Rep.Edits) ByFile[E.File].push_back(E);
+  for (const auto& [Key, S] : ResMap) {
+    if (S.Vetoed || !S.HasName) continue;
+    ByFile[S.Rec.File].push_back(
+        {S.Rec.File, S.Rec.Offset, S.Rec.Length, S.Rec.Old, S.Rec.New});
+  }
+
+  // 3. Per file: sort, dedup identical, detect overlap, apply to the original.
+  bool Ok = true;
+  for (auto& [File, Edits] : ByFile) {
+    std::sort(Edits.begin(), Edits.end(),
+              [](const EditRecord& A, const EditRecord& B) {
+                if (A.Offset != B.Offset) return A.Offset < B.Offset;
+                return A.Length < B.Length;
+              });
+    std::vector<EditRecord> Merged;
+    bool Conflict = false;
+    for (const EditRecord& E : Edits) {
+      if (!Merged.empty()) {
+        const EditRecord& P = Merged.back();
+        if (P.Offset == E.Offset && P.Length == E.Length && P.New == E.New)
+          continue;  // byte-identical duplicate.
+        if (E.Offset < P.Offset + P.Length ||
+            (E.Offset == P.Offset && (P.Length == 0 || E.Length == 0) &&
+             P.New != E.New)) {
+          Conflicts.push_back(File + ": conflicting edits at offset " +
+                              std::to_string(E.Offset));
+          Conflict = true;
+          break;
+        }
+      }
+      Merged.push_back(E);
+    }
+    if (Conflict) {
+      Ok = false;
+      continue;
+    }
+    MergedByFile[File] = std::move(Merged);
+  }
+  return Ok;
+}
+
+auto aggregateEdits(
+    const std::vector<EditReport>& Reports,
+    const std::function<std::optional<std::string>(llvm::StringRef)>& ReadFile,
+    std::map<std::string, std::string>& Out,
+    std::vector<std::string>& Conflicts) -> bool {
+  std::map<std::string, std::vector<EditRecord>> MergedByFile;
+  bool Ok = mergeEditReports(Reports, MergedByFile, Conflicts);
+  for (const auto& [File, Merged] : MergedByFile) {
+    std::optional<std::string> Original = ReadFile(File);
+    if (!Original) {
+      Conflicts.push_back(File + ": cannot read original content");
+      Ok = false;
+      continue;
+    }
+    std::string Content;
+    if (!applyEditsToContent(*Original, Merged, Content)) {
+      Conflicts.push_back(File + ": edit out of range (stale records?)");
+      Ok = false;
+      continue;
+    }
+    Out[File] = std::move(Content);
+  }
+  return Ok;
+}

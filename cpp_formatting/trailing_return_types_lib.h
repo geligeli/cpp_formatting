@@ -37,10 +37,17 @@ class TrailingReturnCallback
     this->RuleId = std::move(RuleId);
   }
 
+  /// Attach an edit report (Emit mode).  When set, each rewrite is appended as
+  /// structured edit records instead of only mutating the Rewriter, and any
+  /// rename edits already recorded inside the moved return type are dropped
+  /// (their text is carried into the "-> type" insertion).  Not owned.
+  void setEmitReport(EditReport* Edits) { this->Emit = Edits; }
+
  private:
   clang::Rewriter& Rewrite;
   LintReport* Report = nullptr;  // null outside Lint mode
   std::string RuleId;
+  EditReport* Emit = nullptr;  // non-null in Emit mode
 };
 
 // ---------------------------------------------------------------------------

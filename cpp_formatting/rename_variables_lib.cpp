@@ -1,11 +1,16 @@
 #include "cpp_formatting/rename_variables_lib.h"
 
+#include <algorithm>
 #include <fstream>
+#include <optional>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclTemplate.h"
+#include "clang/AST/ExprCXX.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Basic/FileEntry.h"
 #include "clang/Frontend/CompilerInstance.h"
@@ -134,6 +139,64 @@ static bool shouldCollect(SourceLocation Loc, SourceManager& SM,
 }
 
 // ---------------------------------------------------------------------------
+// Owned-file key for cross-TU dependent-token resolution
+// ---------------------------------------------------------------------------
+
+// Returns a (file identifier, byte offset) key for \p Loc when it points into a
+// file the tool owns, or nullopt otherwise.  The identifier is the file's real
+// path, which is stable across translation units (so a token recorded while
+// compiling a.cpp matches the same token when the header is compiled as its own
+// TU).  For in-memory buffers with no real path (the unit-test helper) it falls
+// back to the presumed file name, which is enough for the single-TU case where
+// ownership is decided by isWrittenInMainFile.
+static std::optional<std::pair<std::string, unsigned>> ownedKey(
+    SourceLocation Loc, SourceManager& SM, const FileSet& CollectFrom) {
+  if (Loc.isInvalid()) return std::nullopt;
+  SourceLocation Spelling = SM.getSpellingLoc(Loc);
+  std::pair<FileID, unsigned> Decomposed = SM.getDecomposedLoc(Spelling);
+  const FileEntry* FE = SM.getFileEntryForID(Decomposed.first);
+  std::string Path;
+  if (FE) {
+    llvm::StringRef RealPath = FE->tryGetRealPathName();
+    if (!RealPath.empty()) Path = RealPath.str();
+  }
+  const bool Owned = CollectFrom.empty()
+                         ? SM.isWrittenInMainFile(Loc)
+                         : (!Path.empty() && CollectFrom.count(Path) > 0);
+  if (!Owned) return std::nullopt;
+  if (Path.empty()) {
+    PresumedLoc PLoc = SM.getPresumedLoc(Spelling);
+    Path = PLoc.isValid() ? PLoc.getFilename() : "<main>";
+  }
+  return std::make_pair(std::move(Path), Decomposed.second);
+}
+
+// ---------------------------------------------------------------------------
+// Dependent-token resolution map helpers
+// ---------------------------------------------------------------------------
+
+static void recordResolution(DependentResolutions& DepRes,
+                             const std::pair<std::string, unsigned>& Key,
+                             const std::string& NewName,
+                             llvm::StringRef OldName, unsigned Length) {
+  DependentResolution& R = DepRes[Key];
+  if (R.Vetoed) return;
+  if (R.HasName && R.NewName != NewName) {
+    R.Vetoed = true;  // instantiations disagree — leave the token alone.
+    return;
+  }
+  R.NewName = NewName;
+  R.HasName = true;
+  R.OldName = OldName.str();
+  R.Length = Length;
+}
+
+static void vetoResolution(DependentResolutions& DepRes,
+                           const std::pair<std::string, unsigned>& Key) {
+  DepRes[Key].Vetoed = true;
+}
+
+// ---------------------------------------------------------------------------
 // Pass 1: collect the rename map
 // ---------------------------------------------------------------------------
 
@@ -203,20 +266,111 @@ class CollectRenamesVisitor
 };
 
 // ---------------------------------------------------------------------------
+// Dependent member tokens (cross-TU resolution)
+// ---------------------------------------------------------------------------
+
+// The canonical rename-map key for the member a MemberExpr resolves to, or null
+// if the member is not one of the kinds we rename.  Mirrors the dispatch in
+// ApplyRenamesVisitor::VisitMemberExpr.
+static const Decl* memberExprKey(const MemberExpr* E) {
+  if (const auto* FD = dyn_cast<FieldDecl>(E->getMemberDecl()))
+    return primaryTemplateMember(FD);
+  if (const auto* VD = dyn_cast<VarDecl>(E->getMemberDecl()))
+    return primaryTemplateStaticMember(VD)->getCanonicalDecl();
+  if (const auto* MD = dyn_cast<CXXMethodDecl>(E->getMemberDecl()))
+    return primaryTemplateMethod(MD)->getCanonicalDecl();
+  return nullptr;
+}
+
+// Pass A (cheap, no instantiations): find the locations of template-dependent
+// member tokens (`x.val` where x is dependent) that live in files we own.  If
+// none exist we can skip the expensive instantiation walk of Pass B entirely.
+class DependentTokenCollector
+    : public RecursiveASTVisitor<DependentTokenCollector> {
+ public:
+  DependentTokenCollector(SourceManager& SM, const FileSet& CollectFrom,
+                          std::set<std::pair<std::string, unsigned>>& Locs)
+      : SM(SM), CollectFrom(CollectFrom), Locs(Locs) {}
+
+  bool VisitCXXDependentScopeMemberExpr(CXXDependentScopeMemberExpr* E) {
+    SourceLocation Loc = E->getMemberLoc();
+    if (Loc.isInvalid() || Loc.isMacroID()) return true;
+    if (auto Key = ownedKey(Loc, SM, CollectFrom)) Locs.insert(*Key);
+    return true;
+  }
+
+ private:
+  SourceManager& SM;
+  const FileSet& CollectFrom;
+  std::set<std::pair<std::string, unsigned>>& Locs;
+};
+
+// Pass B (walks template instantiations): for every resolved member access that
+// lands on a known dependent-token location, record the new name it resolves
+// to.  A binding to a member that is not being renamed vetoes the location, so
+// a template instantiated with a type outside the FileSet is never left with a
+// dangling member access.
+class RecordDependentResolutionsVisitor
+    : public RecursiveASTVisitor<RecordDependentResolutionsVisitor> {
+ public:
+  RecordDependentResolutionsVisitor(
+      SourceManager& SM, const RenameMap& Renames, const FileSet& CollectFrom,
+      const std::set<std::pair<std::string, unsigned>>& DependentLocs,
+      DependentResolutions& DepRes)
+      : SM(SM),
+        Renames(Renames),
+        CollectFrom(CollectFrom),
+        DependentLocs(DependentLocs),
+        DepRes(DepRes) {}
+
+  bool shouldVisitTemplateInstantiations() const { return true; }
+
+  bool VisitMemberExpr(MemberExpr* E) {
+    SourceLocation Loc = E->getMemberLoc();
+    if (Loc.isInvalid() || Loc.isMacroID()) return true;
+    auto Key = ownedKey(Loc, SM, CollectFrom);
+    if (!Key || DependentLocs.find(*Key) == DependentLocs.end()) return true;
+    const Decl* MemberKey = memberExprKey(E);
+    if (!MemberKey) return true;
+    const NamedDecl* Member = E->getMemberDecl();
+    if (!Member->getDeclName().isIdentifier()) return true;
+    llvm::StringRef Old = Member->getName();
+    auto It = Renames.find(MemberKey);
+    if (It != Renames.end())
+      recordResolution(DepRes, *Key, It->second, Old, Old.size());
+    else
+      vetoResolution(DepRes, *Key);
+    return true;
+  }
+
+ private:
+  SourceManager& SM;
+  const RenameMap& Renames;
+  const FileSet& CollectFrom;
+  const std::set<std::pair<std::string, unsigned>>& DependentLocs;
+  DependentResolutions& DepRes;
+};
+
+// ---------------------------------------------------------------------------
 // Pass 2: apply renames at every declaration and use site
 // ---------------------------------------------------------------------------
 
 class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
  public:
   ApplyRenamesVisitor(Rewriter& RW, SourceManager& SM, const RenameMap& Renames,
-                      LintReport* Report, std::string RuleId)
+                      const FileSet& CollectFrom, DependentResolutions* DepRes,
+                      LintReport* Report, std::string RuleId, EditReport* Edits)
       : RW(RW),
         SM(SM),
         Renames(Renames),
+        CollectFrom(CollectFrom),
+        DepRes(DepRes),
         Report(Report),
-        RuleId(std::move(RuleId)) {}
+        RuleId(std::move(RuleId)),
+        Edits(Edits) {}
 
-  // Applies one rewrite and, in Lint mode, records the matching diagnostic.
+  // Applies one rewrite and, in Lint mode, records the matching diagnostic; in
+  // Emit mode, appends a structured edit record instead of (only) rewriting.
   // All call sites already filter to main-file, non-macro locations, so the
   // recorded location always points at the rewritten token.
   void renameAt(SourceLocation Loc, StringRef OldName,
@@ -228,6 +382,22 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
       Report->add({PLoc.isValid() ? PLoc.getFilename() : "", PLoc.getLine(),
                    PLoc.getColumn(), RuleId,
                    "'" + OldName.str() + "' should be '" + NewName + "'"});
+    }
+    if (Edits) {
+      SourceLocation Spell = SM.getSpellingLoc(Loc);
+      std::pair<FileID, unsigned> D = SM.getDecomposedLoc(Spell);
+      std::string Path;
+      if (const FileEntry* FE = SM.getFileEntryForID(D.first)) {
+        llvm::StringRef RP = FE->tryGetRealPathName();
+        if (!RP.empty()) Path = RP.str();
+      }
+      if (Path.empty()) {
+        PresumedLoc PL = SM.getPresumedLoc(Spell);
+        if (PL.isValid()) Path = PL.getFilename();
+      }
+      Edits->Edits.push_back({relativizeToCwd(Path), D.second,
+                              static_cast<unsigned>(OldName.size()),
+                              OldName.str(), NewName});
     }
   }
 
@@ -335,12 +505,39 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
     return true;
   }
 
+  // Template-dependent member access (e.g. `x.val` where x is a template
+  // parameter).  The member is unresolved in this TU, so we rewrite it from the
+  // cross-TU resolution recorded by the TUs that instantiate the template.
+  // Only the token in its own main file is rewritten (as for every other site),
+  // which — combined with headers-last ordering — keeps each file written once.
+  bool VisitCXXDependentScopeMemberExpr(CXXDependentScopeMemberExpr* E) {
+    // Emit mode defers dependent-token edits to the aggregation phase (which
+    // has the full cross-TU resolution picture); here we only serialize the
+    // resolutions this TU observed.
+    if (!DepRes || Edits) return true;
+    SourceLocation Loc = E->getMemberLoc();
+    if (!SM.isWrittenInMainFile(Loc) || Loc.isInvalid() || Loc.isMacroID())
+      return true;
+    auto Key = ownedKey(Loc, SM, CollectFrom);
+    if (!Key) return true;
+    auto It = DepRes->find(*Key);
+    if (It == DepRes->end() || It->second.Vetoed || !It->second.HasName)
+      return true;
+    const IdentifierInfo* II = E->getMember().getAsIdentifierInfo();
+    if (!II) return true;
+    renameAt(Loc, II->getName(), It->second.NewName);
+    return true;
+  }
+
  private:
   Rewriter& RW;
   SourceManager& SM;
   const RenameMap& Renames;
-  LintReport* Report;  // null outside Lint mode
+  const FileSet& CollectFrom;
+  DependentResolutions* DepRes;  // null when the feature is disabled
+  LintReport* Report;            // null outside Lint mode
   std::string RuleId;
+  EditReport* Edits;  // non-null in Emit mode
 };
 
 // ---------------------------------------------------------------------------
@@ -475,14 +672,18 @@ class RenameVariablesConsumer : public ASTConsumer {
   RenameVariablesConsumer(Rewriter& RW, VariableRenameCallback CB,
                           VariableScope Scope, FileSet CollectFrom,
                           OutputMode Mode = OutputMode::DryRun,
-                          LintReport* Report = nullptr, std::string RuleId = "")
+                          LintReport* Report = nullptr, std::string RuleId = "",
+                          DependentResolutions* DepRes = nullptr,
+                          EditReport* Edits = nullptr)
       : RW(RW),
         CB(std::move(CB)),
         Scope(Scope),
         CollectFrom(std::move(CollectFrom)),
         Mode(Mode),
         Report(Report),
-        RuleId(std::move(RuleId)) {}
+        RuleId(std::move(RuleId)),
+        DepRes(DepRes),
+        Edits(Edits) {}
 
   void HandleTranslationUnit(ASTContext& Ctx) override {
     SourceManager& SM = Ctx.getSourceManager();
@@ -514,7 +715,8 @@ class RenameVariablesConsumer : public ASTConsumer {
       return;  // no rewrites in Debug mode
     }
 
-    runRenameRuleOnAST(Ctx, RW, CB, Scope, CollectFrom, Report, RuleId);
+    runRenameRuleOnAST(Ctx, RW, CB, Scope, CollectFrom, Report, RuleId, DepRes,
+                       Edits);
   }
 
  private:
@@ -525,6 +727,8 @@ class RenameVariablesConsumer : public ASTConsumer {
   OutputMode Mode;
   LintReport* Report;  // null outside Lint mode
   std::string RuleId;
+  DependentResolutions* DepRes;  // null when the feature is disabled
+  EditReport* Edits;             // non-null in Emit mode
 };
 
 // ---------------------------------------------------------------------------
@@ -542,14 +746,17 @@ class RenameVariablesAction : public ASTFrontendAction {
   RenameVariablesAction(VariableRenameCallback CB, VariableScope Scope,
                         OutputMode Mode, const FileSet& CollectFrom,
                         PendingRewrites* Pending, LintReport* Report,
-                        std::string RuleId)
+                        std::string RuleId, DependentResolutions* DepRes,
+                        EditReport* Edits)
       : CB(std::move(CB)),
         Scope(Scope),
         Mode(Mode),
         CollectFrom(CollectFrom),
         Pending(Pending),
         Report(Report),
-        RuleId(std::move(RuleId)) {}
+        RuleId(std::move(RuleId)),
+        DepRes(DepRes),
+        Edits(Edits) {}
 
   void EndSourceFileAction() override {
     SourceManager& SM = TheRewriter.getSourceMgr();
@@ -575,8 +782,9 @@ class RenameVariablesAction : public ASTFrontendAction {
   auto CreateASTConsumer(CompilerInstance& CI, StringRef)
       -> std::unique_ptr<ASTConsumer> override {
     TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
-    return std::make_unique<RenameVariablesConsumer>(
-        TheRewriter, CB, Scope, CollectFrom, Mode, Report, RuleId);
+    return std::make_unique<RenameVariablesConsumer>(TheRewriter, CB, Scope,
+                                                     CollectFrom, Mode, Report,
+                                                     RuleId, DepRes, Edits);
   }
 
  private:
@@ -587,6 +795,8 @@ class RenameVariablesAction : public ASTFrontendAction {
   PendingRewrites* Pending;
   LintReport* Report;
   std::string RuleId;
+  DependentResolutions* DepRes;
+  EditReport* Edits;
   Rewriter TheRewriter;
 };
 
@@ -609,8 +819,9 @@ class CaptureAction : public ASTFrontendAction {
   auto CreateASTConsumer(CompilerInstance& CI, StringRef)
       -> std::unique_ptr<ASTConsumer> override {
     TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
-    return std::make_unique<RenameVariablesConsumer>(TheRewriter, CB, Scope,
-                                                     FileSet{});
+    return std::make_unique<RenameVariablesConsumer>(
+        TheRewriter, CB, Scope, FileSet{}, OutputMode::DryRun,
+        /*Report=*/nullptr, /*RuleId=*/"", &DepRes);
   }
 
  private:
@@ -618,6 +829,9 @@ class CaptureAction : public ASTFrontendAction {
   VariableScope Scope;
   Rewriter TheRewriter;
   std::string& Output;
+  // Single in-memory TU: instantiations and their dependent tokens are in the
+  // same file, so intra-TU resolution needs a place to record them.
+  DependentResolutions DepRes;
 };
 
 }  // namespace
@@ -629,14 +843,48 @@ class CaptureAction : public ASTFrontendAction {
 void runRenameRuleOnAST(ASTContext& Ctx, Rewriter& RW,
                         const VariableRenameCallback& CB, VariableScope Scope,
                         const FileSet& CollectFrom, LintReport* Report,
-                        llvm::StringRef RuleId) {
+                        llvm::StringRef RuleId, DependentResolutions* DepRes,
+                        EditReport* Edits) {
   SourceManager& SM = Ctx.getSourceManager();
+  Decl* TU = Ctx.getTranslationUnitDecl();
+
   RenameMap Renames;
   CollectRenamesVisitor Collector(SM, CB, Scope, Renames, CollectFrom);
-  Collector.TraverseDecl(Ctx.getTranslationUnitDecl());
-  if (Renames.empty()) return;
-  ApplyRenamesVisitor Applier(RW, SM, Renames, Report, RuleId.str());
-  Applier.TraverseDecl(Ctx.getTranslationUnitDecl());
+  Collector.TraverseDecl(TU);
+
+  // Template-dependent member tokens (e.g. `x.val` where x is a template
+  // parameter) spelled in files we own.  Pass A is cheap (no instantiations)
+  // and gates the rest: absent such tokens the whole feature is a no-op.
+  std::set<std::pair<std::string, unsigned>> DependentLocs;
+  if (DepRes) {
+    DependentTokenCollector Collect(SM, CollectFrom, DependentLocs);
+    Collect.TraverseDecl(TU);
+  }
+
+  // Record what this TU's instantiations resolve those tokens to.  Needs a
+  // rename map, and only pays for the instantiation walk when there is a token
+  // to resolve.
+  if (DepRes && !Renames.empty() && !DependentLocs.empty()) {
+    RecordDependentResolutionsVisitor Recorder(SM, Renames, CollectFrom,
+                                               DependentLocs, *DepRes);
+    Recorder.TraverseDecl(TU);
+  }
+
+  // Apply.  Besides its own declarations/uses (Renames), this TU may spell a
+  // dependent token that an earlier TU already resolved — the header that
+  // defines a template is typically processed after, and declares nothing to
+  // rename itself — so run the apply pass whenever either has work.
+  const bool ApplyDependent =
+      DepRes && std::any_of(DependentLocs.begin(), DependentLocs.end(),
+                            [&](const auto& L) {
+                              auto It = DepRes->find(L);
+                              return It != DepRes->end() &&
+                                     It->second.HasName && !It->second.Vetoed;
+                            });
+  if (Renames.empty() && !ApplyDependent) return;
+  ApplyRenamesVisitor Applier(RW, SM, Renames, CollectFrom, DepRes, Report,
+                              RuleId.str(), Edits);
+  Applier.TraverseDecl(TU);
 }
 
 // ---------------------------------------------------------------------------
@@ -652,12 +900,27 @@ RenameActionFactory::RenameActionFactory(VariableRenameCallback CB,
       CollectFrom(std::move(CollectFrom)) {}
 
 auto RenameActionFactory::create() -> std::unique_ptr<clang::FrontendAction> {
-  return std::make_unique<RenameVariablesAction>(CB, Scope, Mode, CollectFrom,
-                                                 &Pending, Report, RuleId);
+  return std::make_unique<RenameVariablesAction>(
+      CB, Scope, Mode, CollectFrom, &Pending, Report, RuleId, &DepRes,
+      Mode == OutputMode::Emit ? &Edits : nullptr);
+}
+
+void RenameActionFactory::emitEdits(llvm::raw_ostream& OS) {
+  // Promote the cross-TU dependent-token resolutions to sidecar records; the
+  // aggregation phase resolves them across all TUs before turning survivors
+  // into edits.  Keys are relativized to cwd so they match the edit records and
+  // are stable across sandboxes.
+  for (const auto& [Key, R] : DepRes) {
+    if (!R.HasName && !R.Vetoed) continue;
+    Edits.Resolutions.push_back({relativizeToCwd(Key.first), Key.second,
+                                 R.Length, R.OldName, R.NewName, R.Vetoed});
+  }
+  Edits.emitJSON(OS);
 }
 
 void RenameActionFactory::flush() {
-  if (Mode == OutputMode::Debug || Mode == OutputMode::Lint) {
+  if (Mode == OutputMode::Debug || Mode == OutputMode::Lint ||
+      Mode == OutputMode::Emit) {
     Pending.clear();
     return;
   }

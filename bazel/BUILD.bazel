@@ -1,0 +1,3 @@
+# Makes //bazel a package so the aspect and rules in cpp_format.bzl are
+# addressable (e.g. --aspects=//bazel:cpp_format.bzl%cpp_format_aspect).
+exports_files(["cpp_format.bzl"])

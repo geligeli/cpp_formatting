@@ -336,6 +336,58 @@ TEST(RenameMemberVariables, TemplateMemberRenamedInInstantiation) {
             "int f() { Box<int> b; return b.value_; }");
 }
 
+// A member accessed through a template parameter (`x.val`) is a dependent
+// expression with no resolved member in the template pattern.  When the same TU
+// instantiates the template, the tool resolves the token via the instantiation
+// and rewrites it consistently with the concrete member's rename.
+TEST(RenameMemberVariables, DependentMemberThroughTemplateParam) {
+  EXPECT_EQ(rewriteMember("template <class T> void set_val(T& x) "
+                          "{ x.val = 12; }\n"
+                          "struct A { int val; };\n"
+                          "void use() { A a; set_val(a); }\n",
+                          renameOne("val", "val_")),
+            "template <class T> void set_val(T& x) { x.val_ = 12; }\n"
+            "struct A { int val_; };\n"
+            "void use() { A a; set_val(a); }\n");
+}
+
+// Same feature via the C++20 abbreviated-function-template spelling.
+TEST(RenameMemberVariables, DependentMemberThroughAbbreviatedTemplate) {
+  EXPECT_EQ(rewriteMember("auto set_val(auto& x) { x.val = 12; }\n"
+                          "struct A { int val; };\n"
+                          "void use() { A a; set_val(a); }\n",
+                          renameOne("val", "val_")),
+            "auto set_val(auto& x) { x.val_ = 12; }\n"
+            "struct A { int val_; };\n"
+            "void use() { A a; set_val(a); }\n");
+}
+
+// Two instantiations that agree on the new name still rewrite the shared token
+// exactly once.
+TEST(RenameMemberVariables, DependentMemberTwoInstantiationsAgree) {
+  EXPECT_EQ(rewriteMember("template <class T> void set_val(T& x) "
+                          "{ x.val = 12; }\n"
+                          "struct A { int val; };\n"
+                          "struct B { int val; };\n"
+                          "void use() { A a; set_val(a); B b; set_val(b); }\n",
+                          renameOne("val", "val_")),
+            "template <class T> void set_val(T& x) { x.val_ = 12; }\n"
+            "struct A { int val_; };\n"
+            "struct B { int val_; };\n"
+            "void use() { A a; set_val(a); B b; set_val(b); }\n");
+}
+
+// A template that is never instantiated gives no information about which member
+// its dependent token binds to, so the token is left untouched (conservative).
+TEST(RenameMemberVariables, DependentMemberUninstantiatedLeftAlone) {
+  EXPECT_EQ(rewriteMember("template <class T> void set_val(T& x) "
+                          "{ x.val = 12; }\n"
+                          "struct A { int val; };\n",
+                          renameOne("val", "val_")),
+            "template <class T> void set_val(T& x) { x.val = 12; }\n"
+            "struct A { int val_; };\n");
+}
+
 TEST(RenameMemberVariables, RenamesMemberInConstructorInitializer) {
   EXPECT_EQ(
       rewriteMember(

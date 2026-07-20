@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "clang/Tooling/Tooling.h"
@@ -32,6 +33,41 @@ class Rewriter;
 // set. An empty FileSet falls back to the original behaviour (main-file-only
 // collection).
 using FileSet = std::unordered_set<std::string>;
+
+// ---------------------------------------------------------------------------
+// Cross-TU resolution of template-dependent member tokens
+// ---------------------------------------------------------------------------
+//
+// A member access through a template parameter — e.g. `x.val` in
+//   auto set_val(auto& x) { x.val = 12; }
+// — is a *dependent* expression: the member it names is only known once the
+// template is instantiated, and the instantiation typically lives in a
+// different translation unit than the header that spells the token.  The
+// per-main-file Rewriter model therefore cannot rename such a token on its own:
+// the header's own TU never instantiates the template, and the instantiating
+// .cpp's TU may not rewrite the header.
+//
+// To bridge the two, every TU records — keyed by the token's (real path, byte
+// offset) — the new name each observed instantiation resolves the token to.
+// When the header is later processed as its own main file, the token is
+// rewritten using that agreed-upon name.  If instantiations disagree, or any
+// instantiation binds the token to a member that is not being renamed (e.g. a
+// type outside the FileSet), the entry is vetoed and the token is left
+// untouched.  Because header sources are ordered last (see
+// orderSourcesForRename), all instantiating .cpp TUs are processed before the
+// header TU that consumes their resolutions.
+struct DependentResolution {
+  std::string NewName;   ///< the agreed-upon new name
+  bool HasName = false;  ///< at least one instantiation resolved a new name
+  bool Vetoed = false;   ///< conflicting / out-of-scope binding: do not rewrite
+  std::string OldName;   ///< spelled member identifier (for emitting a record)
+  unsigned Length = 0;   ///< length of the spelled token
+};
+
+/// (real path — or, for in-memory buffers, a presumed file name — and byte
+/// offset within that file) -> resolution.
+using DependentResolutions =
+    std::map<std::pair<std::string, unsigned>, DependentResolution>;
 
 // ---------------------------------------------------------------------------
 // Rename callback
@@ -116,12 +152,22 @@ class RenameActionFactory : public clang::tooling::FrontendActionFactory {
   /// ClangTool::run() completes.  No-op in DryRun mode.
   void flush();
 
+  /// In Emit mode, writes this run's edit records plus the dependent-token
+  /// resolution sidecar (built from the cross-TU map) as JSON to \p OS.  Call
+  /// after ClangTool::run() completes.
+  void emitEdits(llvm::raw_ostream& OS);
+
  private:
   VariableRenameCallback CB;
   VariableScope Scope;
   OutputMode Mode;
   FileSet CollectFrom;
   PendingRewrites Pending;
+  EditReport Edits;  // populated in Emit mode
+  // Template-dependent member tokens resolved across TUs; persists for the
+  // whole ClangTool::run() so a header TU can consume resolutions recorded by
+  // earlier .cpp TUs.  See DependentResolutions above.
+  DependentResolutions DepRes;
   LintReport* Report = nullptr;
   std::string RuleId;
 };
@@ -133,11 +179,23 @@ class RenameActionFactory : public clang::tooling::FrontendActionFactory {
 /// Runs one rename rule (collect declarations, then apply renames) on an
 /// already-parsed translation unit, writing edits into \p RW.  Used by
 /// cpp_format to run several rules in a single ClangTool pass.
+/// \p DepRes, when non-null, enables cross-TU renaming of template-dependent
+/// member tokens: this TU's instantiations record resolutions into it, and its
+/// dependent tokens are rewritten from resolutions recorded by earlier TUs.
+/// The same DependentResolutions instance must be passed for every TU of one
+/// ClangTool::run() (the factories hold one and thread its address through).
+///
+/// \p Edits, when non-null, switches to emit mode: ordinary decl/use renames
+/// are appended as edit records instead of being consumed for output, and
+/// template-dependent tokens are NOT applied (their resolutions are serialized
+/// separately for the aggregation phase).
 void runRenameRuleOnAST(clang::ASTContext& Ctx, clang::Rewriter& RW,
                         const VariableRenameCallback& CB, VariableScope Scope,
                         const FileSet& CollectFrom,
                         LintReport* Report = nullptr,
-                        llvm::StringRef RuleId = "");
+                        llvm::StringRef RuleId = "",
+                        DependentResolutions* DepRes = nullptr,
+                        EditReport* Edits = nullptr);
 
 // ---------------------------------------------------------------------------
 // Convenience factories

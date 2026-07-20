@@ -1,5 +1,8 @@
 #include "cpp_formatting/trailing_return_types_lib.h"
 
+#include <algorithm>
+#include <string>
+
 #include "clang/ASTMatchers/ASTMatchers.h"
 #include "clang/Basic/FileEntry.h"
 #include "clang/Frontend/CompilerInstance.h"
@@ -152,6 +155,44 @@ void TrailingReturnCallback::run(const MatchFinder::MatchResult& Result) {
   // FunctionTypeLoc).
   SourceLocation InsertLoc = FTL.getLocalRangeEnd();
   Rewrite.InsertTextAfterToken(InsertLoc, " -> " + OriginalTypeStr);
+
+  if (Emit) {
+    auto offsetOf = [&](SourceLocation L) {
+      return SM.getDecomposedLoc(SM.getSpellingLoc(L)).second;
+    };
+    std::pair<FileID, unsigned> Begin =
+        SM.getDecomposedLoc(SM.getSpellingLoc(ExtStart));
+    unsigned BeginOff = Begin.second;
+    unsigned EndOff = offsetOf(
+        Lexer::getLocForEndOfToken(ReturnRange.getEnd(), 0, SM, LangOpts));
+    std::string Path;
+    if (const FileEntry* FE = SM.getFileEntryForID(Begin.first)) {
+      StringRef RP = FE->tryGetRealPathName();
+      if (!RP.empty()) Path = relativizeToCwd(RP);
+    }
+    if (!Path.empty() && EndOff > BeginOff) {
+      // Drop rename edits already recorded inside the return type: their text
+      // is carried into OriginalTypeStr (via getRewrittenText) and moved after
+      // the
+      // "->", so replaying them separately would double-apply / conflict.
+      auto& E = Emit->Edits;
+      E.erase(std::remove_if(E.begin(), E.end(),
+                             [&](const EditRecord& R) {
+                               return R.File == Path && R.Offset >= BeginOff &&
+                                      R.Offset + R.Length <= EndOff;
+                             }),
+              E.end());
+      std::string OldText =
+          Lexer::getSourceText(CharSourceRange::getTokenRange(FullReturnRange),
+                               SM, LangOpts)
+              .str();
+      E.push_back(
+          {Path, BeginOff, EndOff - BeginOff, OldText, AutoReplacement});
+      unsigned InsOff =
+          offsetOf(Lexer::getLocForEndOfToken(InsertLoc, 0, SM, LangOpts));
+      E.push_back({Path, InsOff, 0, "", " -> " + OriginalTypeStr});
+    }
+  }
 
   if (Report) {
     PresumedLoc PLoc = SM.getPresumedLoc(Func->getLocation());

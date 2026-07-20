@@ -135,3 +135,105 @@ diff -u "$method_h_exp"   "$tmpdir/normalize_method_input.h"   \
 diff -u "$method_cpp_exp" "$tmpdir/normalize_method_input.cpp" \
   || fail "method test: impl file does not match expected"
 echo "PASS: member function rename (virtual hierarchy, static method, cross-file call sites)"
+
+# ---------------------------------------------------------------------------
+# Test 5 — template-dependent member token resolved across files
+#
+# `set_val`'s `x.val` is a dependent member access: which member it names is
+# only known once the template is instantiated, and the instantiations live in
+# the .cpp files, not in the header.  Renaming `val` -> `val_` must rewrite the
+# concrete members in the .cpp files AND the dependent token in the header,
+# using the resolution recorded while the .cpp TUs were processed.  These files
+# are self-contained (no committed testdata needed).
+# ---------------------------------------------------------------------------
+depdir="$tmpdir/dep"
+mkdir -p "$depdir"
+cat > "$depdir/dep.h" <<'EOF'
+#ifndef DEP_H
+#define DEP_H
+template <class T>
+void set_val(T& x) {
+  x.val = 12;
+}
+#endif
+EOF
+cat > "$depdir/dep_a.cpp" <<'EOF'
+#include "dep.h"
+struct A { int val; };
+int use_a() { A a; set_val(a); return a.val; }
+EOF
+cat > "$depdir/dep_b.cpp" <<'EOF'
+#include "dep.h"
+struct B { int val; };
+int use_b() { B b; set_val(b); return b.val; }
+EOF
+
+"$binary" \
+  --style=trailing_ --scope=member --in-place \
+  "$depdir/dep_a.cpp" "$depdir/dep_b.cpp" "$depdir/dep.h" \
+  -- -std=c++17 -xc++ -Wno-pragma-once-outside-header -I"$depdir"
+
+cat > "$depdir/dep_expected.h" <<'EOF'
+#ifndef DEP_H
+#define DEP_H
+template <class T>
+void set_val(T& x) {
+  x.val_ = 12;
+}
+#endif
+EOF
+grep -q 'x.val_ = 12;' "$depdir/dep.h" \
+  || fail "dependent test: header dependent token x.val was not renamed to x.val_"
+diff -u "$depdir/dep_expected.h" "$depdir/dep.h" \
+  || fail "dependent test: header does not match expected"
+grep -q 'int val_;' "$depdir/dep_a.cpp" \
+  || fail "dependent test: A::val was not renamed"
+grep -q 'return a.val_;' "$depdir/dep_a.cpp" \
+  || fail "dependent test: use a.val was not renamed"
+echo "PASS: template-dependent member token resolved across files (x.val -> x.val_ in header)"
+
+# ---------------------------------------------------------------------------
+# Test 6 — out-of-scope instantiation vetoes the dependent token
+#
+# `set_val` is also instantiated with `Ext`, a type declared in a header that is
+# NOT passed to the tool (out of the file set).  Renaming the shared token to
+# `val_` would break `set_val<Ext>`, so the tool must leave the header token
+# alone (veto) even though it renames the owned type `A` in the .cpp.
+# ---------------------------------------------------------------------------
+vetodir="$tmpdir/veto"
+mkdir -p "$vetodir"
+cat > "$vetodir/ext.h" <<'EOF'
+#ifndef EXT_H
+#define EXT_H
+struct Ext { int val; };
+#endif
+EOF
+cat > "$vetodir/dep.h" <<'EOF'
+#ifndef DEP_H
+#define DEP_H
+template <class T>
+void set_val(T& x) { x.val = 12; }
+#endif
+EOF
+cat > "$vetodir/dep_a.cpp" <<'EOF'
+#include "ext.h"
+#include "dep.h"
+struct A { int val; };
+int use() { A a; set_val(a); Ext e; set_val(e); return a.val + e.val; }
+EOF
+cp "$vetodir/dep.h" "$vetodir/dep_before.h"
+
+# Pass only dep_a.cpp and dep.h — ext.h is intentionally not owned.
+"$binary" \
+  --style=trailing_ --scope=member --in-place \
+  "$vetodir/dep_a.cpp" "$vetodir/dep.h" \
+  -- -std=c++17 -xc++ -Wno-pragma-once-outside-header -I"$vetodir"
+
+diff -u "$vetodir/dep_before.h" "$vetodir/dep.h" \
+  || fail "veto test: header token was rewritten despite an out-of-scope binding"
+grep -q 'struct A { int val_; };' "$vetodir/dep_a.cpp" \
+  || fail "veto test: owned type A::val should still be renamed"
+if grep -q 'e.val_' "$vetodir/dep_a.cpp"; then
+  fail "veto test: out-of-scope Ext::val must be left unchanged"
+fi
+echo "PASS: out-of-scope instantiation vetoes the shared dependent token"
