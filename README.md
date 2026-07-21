@@ -4,9 +4,10 @@ A collection of Clang-based source-to-source rewrite tools for C++ codebases.
 
 ## Add cpp_format to your Bazel codebase
 
-Get a parallel, cached **lint / diff / fix** gate over your C++ sources using
-the **prebuilt release binary** — no need to build Clang/LLVM from source. A
-per-target [aspect](bazel/integration/cpp_format.bzl) derives each target's
+Get a parallel, cached **lint / diff / fix** pass over your C++ using the
+**prebuilt release binary** — no need to build Clang/LLVM from source, and **no
+per-target wiring**: one command formats the whole repo (or any target
+pattern). A [aspect](bazel/integration/cpp_format.bzl) derives each target's
 compile flags and header set from `CcInfo` + the toolchain, so every include is
 reachable under sandboxing with **no `compile_commands.json`**. The binary
 embeds and self-extracts the Clang builtin headers, so nothing else is fetched.
@@ -16,8 +17,9 @@ from this repo into your own (e.g. as `third_party/cpp_format/`):
 
 ```
 third_party/cpp_format/
+  cpp_format.sh      # the lint/diff/fix entry point (run this)
   extensions.bzl     # fetches the release binary for the host platform
-  cpp_format.bzl     # the aspect + check/diff/fix rules
+  cpp_format.bzl     # the aspect (+ optional cpp_format_targets rule)
   BUILD.bazel
 ```
 
@@ -55,43 +57,54 @@ The aspect reads it as `//:cpp_format.yaml`, so export it from your root
 exports_files(["cpp_format.yaml"])
 ```
 
-**4. Declare the targets** to format in any `BUILD.bazel`:
+**4. Run it** — the wrapper formats the whole repo (default `//...`) or any
+target pattern. No BUILD changes, no per-target wiring:
+
+```sh
+third_party/cpp_format/cpp_format.sh check          # CI gate: exit 1 if anything would change
+third_party/cpp_format/cpp_format.sh diff           # print the merged, git-apply-able patch
+third_party/cpp_format/cpp_format.sh fix            # apply the fixes in place
+
+third_party/cpp_format/cpp_format.sh fix //app/...  # scope to a package tree
+third_party/cpp_format/cpp_format.sh check //lib:core
+```
+
+It queries the matching first-party `cc_*` targets, runs the aspect over them
+(each emits an edit-record file — parallel and cached), and merges every
+target's records into one repository-wide change — deduping, resolving
+template-dependent member tokens across translation units, and flagging genuine
+conflicts. Tag a target `no-cpp-format` to exclude it. See
+[Bazel integration](#bazel-integration) below for how it works.
+
+**Optional — pin a lint gate in CI.** For a stable `bazel test` gate over a
+specific, reviewed set of targets (rather than the whole repo), add
+`cpp_format_targets`:
 
 ```starlark
 load("//third_party/cpp_format:cpp_format.bzl", "cpp_format_targets")
 
-cpp_format_targets(
-    name = "format",
-    deps = [
-        "//src:mylib",   # any first-party cc_library / cc_binary targets;
-        "//src:myapp",   # their transitive first-party sources are covered
-    ],
-)
+cpp_format_targets(name = "format", deps = ["//app:main", "//lib:core"])
 ```
-
-**5. Run it:**
 
 ```sh
-bazel run  //:format.diff    # preview the merged, git-apply-able repo patch
-bazel test //:format.check   # CI lint gate — fails if any edit would be made
-bazel run  //:format.fix     # apply the edits to your sources in place
+bazel test //:format.check   # test gate    bazel run //:format.fix   # apply
 ```
 
-`.check` is a hermetic test (parallel & cached per target); `.fix` and `.diff`
-merge every target's edit records — deduping, resolving template-dependent
-member tokens across translation units, and flagging genuine conflicts — into
-one repository-wide change. See [Bazel integration](#bazel-integration) below
-for how it works.
+Use one or the other — don't run `cpp_format.sh //...` while `cpp_format_targets`
+are defined over the same targets (the aspect would be applied twice and Bazel
+would report conflicting actions); the wrapper's query already skips the
+`cpp_format_targets` rule targets, so scoping the wrapper away from them is
+enough.
 
 > **Notes.** Only first-party `cc_*` targets are formatted (external deps are
 > skipped). Each header is owned by the single target that lists it in `hdrs`;
 > a header in no target's `srcs`/`hdrs` is never visited. The binary extracts
 > its embedded headers to a temp cache per action, so a strict sandbox needs a
-> writable `TMPDIR` (Bazel provides one by default). To format the whole repo,
-> point `deps` at your top-level targets — the aspect follows `deps`
-> transitively. If you'd rather build the tool from source instead of using a
-> release, depend on `//cpp_formatting:cpp_format` and use
-> [bazel/cpp_format.bzl](bazel/cpp_format.bzl) instead of the vendored kit.
+> writable `TMPDIR` (Bazel provides one by default). If you'd rather build the
+> tool from source instead of using a release, depend on
+> `//cpp_formatting:cpp_format` and set `CPP_FORMAT_ASPECT` /
+> `CPP_FORMAT_BIN_LABEL` (see the top of `cpp_format.sh`) to the in-repo
+> [bazel/cpp_format.bzl](bazel/cpp_format.bzl) aspect and binary.
 
 ---
 
@@ -495,7 +508,15 @@ disagreement → dropped), merges per file (dedup identical, flag
 overlapping-distinct conflicts), and renders or applies the result. This is the
 clang-tidy `--export-fixes` + `clang-apply-replacements` model.
 
-**Targets.** `cpp_format_targets(name, deps)` generates three:
+**Entry points.** `cpp_format.sh <check|diff|fix> [pattern]` is the ergonomic
+front door: it `bazel query`s the first-party `cc_*` targets under `pattern`
+(default `//...`), builds them with `--aspects=…%cpp_format_aspect
+--output_groups=+cpp_format_edits` to materialize each target's record file,
+derives the record paths (`//pkg:name` → `<bazel-bin>/pkg/name.cpp_format.json`),
+and runs `cpp_format --aggregate` over them. It is a plain script, not a `bazel
+run` target, precisely so it can invoke `bazel build` without nesting a Bazel
+server inside a running one. For a pinned CI gate, `cpp_format_targets(name,
+deps)` instead generates three graph targets:
 
 | Target | Kind | Purpose |
 |---|---|---|

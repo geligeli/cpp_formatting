@@ -1,3 +1,5 @@
 # Vendored cpp_format integration kit.  Copy this directory into your repo
-# (e.g. as third_party/cpp_format/) and load cpp_format.bzl from your BUILD
-# files.  The .bzl files carry no build targets of their own.
+# (e.g. as third_party/cpp_format/), then run `cpp_format.sh <check|diff|fix>`
+# to lint/fix the whole repo (or a target pattern).  See the README quick start.
+# The .bzl files carry no build targets of their own; cpp_format.sh is a plain
+# script (not a bazel target) so it can drive `bazel build` without nesting.
