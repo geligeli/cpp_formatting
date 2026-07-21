@@ -2,6 +2,99 @@
 
 A collection of Clang-based source-to-source rewrite tools for C++ codebases.
 
+## Add cpp_format to your Bazel codebase
+
+Get a parallel, cached **lint / diff / fix** gate over your C++ sources using
+the **prebuilt release binary** — no need to build Clang/LLVM from source. A
+per-target [aspect](bazel/integration/cpp_format.bzl) derives each target's
+compile flags and header set from `CcInfo` + the toolchain, so every include is
+reachable under sandboxing with **no `compile_commands.json`**. The binary
+embeds and self-extracts the Clang builtin headers, so nothing else is fetched.
+
+**1. Vendor the integration kit.** Copy [bazel/integration/](bazel/integration/)
+from this repo into your own (e.g. as `third_party/cpp_format/`):
+
+```
+third_party/cpp_format/
+  extensions.bzl     # fetches the release binary for the host platform
+  cpp_format.bzl     # the aspect + check/diff/fix rules
+  BUILD.bazel
+```
+
+**2. Fetch the binary in `MODULE.bazel`.** Pick a release tag from the
+[Releases](https://github.com/geligeli/cpp_formatting/releases) page (tags are
+`<YYYYMMDD>-<shortsha>`):
+
+```starlark
+cpp_format = use_extension("//third_party/cpp_format:extensions.bzl", "cpp_format")
+cpp_format.release(
+    version = "20260720-39c5de9",
+    # Optional but recommended for reproducible CI — pin per-asset hashes:
+    # sha256 = {"cpp_format-linux-x86_64": "…"},
+)
+use_repo(cpp_format, "cpp_format_bin")
+```
+
+The host platform's asset is selected automatically (Linux x86_64/aarch64,
+macOS arm64, Windows x64).
+
+**3. Add a ruleset** — `cpp_format.yaml` at your repo root describes the passes
+to run (see [YAML config](#config-file---config)):
+
+```yaml
+normalize_variables:
+  - scope: member
+    style: snake_case
+trailing_return_types: true
+```
+
+The aspect reads it as `//:cpp_format.yaml`, so export it from your root
+`BUILD.bazel` (a cross-package file reference needs this):
+
+```starlark
+exports_files(["cpp_format.yaml"])
+```
+
+**4. Declare the targets** to format in any `BUILD.bazel`:
+
+```starlark
+load("//third_party/cpp_format:cpp_format.bzl", "cpp_format_targets")
+
+cpp_format_targets(
+    name = "format",
+    deps = [
+        "//src:mylib",   # any first-party cc_library / cc_binary targets;
+        "//src:myapp",   # their transitive first-party sources are covered
+    ],
+)
+```
+
+**5. Run it:**
+
+```sh
+bazel run  //:format.diff    # preview the merged, git-apply-able repo patch
+bazel test //:format.check   # CI lint gate — fails if any edit would be made
+bazel run  //:format.fix     # apply the edits to your sources in place
+```
+
+`.check` is a hermetic test (parallel & cached per target); `.fix` and `.diff`
+merge every target's edit records — deduping, resolving template-dependent
+member tokens across translation units, and flagging genuine conflicts — into
+one repository-wide change. See [Bazel integration](#bazel-integration) below
+for how it works.
+
+> **Notes.** Only first-party `cc_*` targets are formatted (external deps are
+> skipped). Each header is owned by the single target that lists it in `hdrs`;
+> a header in no target's `srcs`/`hdrs` is never visited. The binary extracts
+> its embedded headers to a temp cache per action, so a strict sandbox needs a
+> writable `TMPDIR` (Bazel provides one by default). To format the whole repo,
+> point `deps` at your top-level targets — the aspect follows `deps`
+> transitively. If you'd rather build the tool from source instead of using a
+> release, depend on `//cpp_formatting:cpp_format` and use
+> [bazel/cpp_format.bzl](bazel/cpp_format.bzl) instead of the vendored kit.
+
+---
+
 | Tool | Description |
 |---|---|
 | `trailing_return_types` | Converts functions from leading to trailing return type syntax |
@@ -375,6 +468,50 @@ repos:
 ```sh
 pre-commit run cpp-format --all-files
 ```
+
+---
+
+## Bazel integration
+
+The [quick start](#add-cpp_format-to-your-bazel-codebase) above wires
+`cpp_format` into the build graph so compile info and the full header set come
+from Bazel — not a committed `compile_commands.json`. This solves the
+sandboxing problem where one target's translation unit cannot reach headers
+owned by other targets.
+
+**How it works.** A per-target **aspect** derives each `cc_*` target's compile
+flags from `CcInfo.compilation_context` + the toolchain
+(`cc_common.get_memory_inefficient_command_line`) and runs `cpp_format
+--emit-edits`, declaring the target's sources **plus its transitive headers** as
+action inputs — that declaration is what makes headers reachable under
+sandboxing. Each action is parallel and cached; first-party targets only.
+
+**Records, not diffs.** Each emit action writes offset-level **edit records**
+(`{file, offset, length, old, new}`) plus a template-dependent-token resolution
+sidecar — never a rendered diff, which cannot be merged because hunk offsets
+don't compose. `cpp_format --aggregate` unions all targets' records, resolves
+dependent tokens across TUs (agreeing instantiations → an edit; a veto or
+disagreement → dropped), merges per file (dedup identical, flag
+overlapping-distinct conflicts), and renders or applies the result. This is the
+clang-tidy `--export-fixes` + `clang-apply-replacements` model.
+
+**Targets.** `cpp_format_targets(name, deps)` generates three:
+
+| Target | Kind | Purpose |
+|---|---|---|
+| `<name>.check` | `bazel test` | Hermetic lint gate — counts edits without reading sources; exits 1 if any. |
+| `<name>.diff` | `bazel run` | Prints the merged, git-apply-able unified diff (review artifact). |
+| `<name>.fix` | `bazel run` | Applies the edits in `$BUILD_WORKSPACE_DIRECTORY` (outside the action graph, since Bazel actions cannot mutate sources). |
+
+**Two delivery paths.** The vendored kit in [bazel/integration/](bazel/integration/)
+uses the **prebuilt release binary** (no LLVM build). Alternatively, if
+`cpp_formatting` is a source dependency of your module, build the tool from
+source and use [bazel/cpp_format.bzl](bazel/cpp_format.bzl) directly — it is the
+same aspect, but it drives `//cpp_formatting:cpp_format` and stages the Clang
+builtin headers from `@llvm-project` (see [bazel/testdata/BUILD.bazel](bazel/testdata/BUILD.bazel)
+for a worked example). The single published binary both emits records and
+aggregates them (`--aggregate`), so the release-based kit needs only that one
+download.
 
 ---
 

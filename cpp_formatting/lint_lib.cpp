@@ -1,6 +1,9 @@
 #include "cpp_formatting/lint_lib.h"
 
 #include <algorithm>
+#include <fstream>
+#include <ios>
+#include <map>
 #include <set>
 #include <tuple>
 #include <utility>
@@ -10,6 +13,7 @@
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/raw_ostream.h"
 
 namespace {
 
@@ -489,4 +493,83 @@ auto aggregateEdits(
     Out[File] = std::move(Content);
   }
   return Ok;
+}
+
+auto runEditAggregation(const std::vector<std::string>& InputPaths,
+                        llvm::StringRef Root, bool Apply, bool Check) -> int {
+  // Record keys are the file's real path.  Under Bazel that resolves to the
+  // absolute workspace path (source symlinks), so absolute keys are used as-is;
+  // relative keys (e.g. from a plain `--emit-edits` run) join with Root.
+  auto resolvePath = [&](llvm::StringRef File) -> std::string {
+    if (llvm::sys::path::is_absolute(File) || Root.empty()) return File.str();
+    return (Root + "/" + File).str();
+  };
+  // A workspace-relative label for diff headers (git-apply-able from the root).
+  auto displayPath = [&](llvm::StringRef File) -> std::string {
+    if (!Root.empty() && File.starts_with(Root) && File.size() > Root.size() &&
+        File[Root.size()] == '/')
+      return File.drop_front(Root.size() + 1).str();
+    return File.str();
+  };
+  auto readFile = [&](llvm::StringRef File) -> std::optional<std::string> {
+    auto Buf = llvm::MemoryBuffer::getFile(resolvePath(File));
+    if (!Buf) return std::nullopt;
+    return (*Buf)->getBuffer().str();
+  };
+
+  std::vector<EditReport> Reports;
+  for (const std::string& Path : InputPaths) {
+    auto Buf = llvm::MemoryBuffer::getFile(Path);
+    if (!Buf) {
+      llvm::errs() << "cannot read '" << Path
+                   << "': " << Buf.getError().message() << "\n";
+      return 2;
+    }
+    EditReport R;
+    if (!parseEditReport((*Buf)->getBuffer(), R)) {
+      llvm::errs() << "malformed edit records: '" << Path << "'\n";
+      return 2;
+    }
+    Reports.push_back(std::move(R));
+  }
+
+  if (Check) {
+    std::map<std::string, std::vector<EditRecord>> Merged;
+    std::vector<std::string> Conflicts;
+    const bool Ok = mergeEditReports(Reports, Merged, Conflicts);
+    for (const std::string& C : Conflicts)
+      llvm::errs() << "conflict: " << C << "\n";
+    std::size_t Total = 0;
+    for (const auto& [File, Edits] : Merged) {
+      if (Edits.empty()) continue;
+      llvm::outs() << File << ": " << Edits.size() << " edit(s)\n";
+      Total += Edits.size();
+    }
+    if (Total == 0 && Ok) return 0;
+    llvm::errs() << Total << " formatting edit(s) would be applied across "
+                 << Merged.size()
+                 << " file(s); run the `.fix` target to apply, or `.diff` to "
+                    "preview.\n";
+    return 1;
+  }
+
+  std::map<std::string, std::string> Out;
+  std::vector<std::string> Conflicts;
+  const bool Ok = aggregateEdits(Reports, readFile, Out, Conflicts);
+  for (const std::string& C : Conflicts)
+    llvm::errs() << "conflict: " << C << "\n";
+
+  if (Apply) {
+    for (const auto& [File, Content] : Out) {
+      std::ofstream O(resolvePath(File), std::ios::trunc | std::ios::binary);
+      O << Content;
+    }
+  } else {
+    for (const auto& [File, Content] : Out) {
+      std::optional<std::string> Original = readFile(File);
+      emitUnifiedDiff(Original ? *Original : "", Content, displayPath(File),
+                      llvm::outs());
+    }
+  }
+  return Ok ? 0 : 1;
 }

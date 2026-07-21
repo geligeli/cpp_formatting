@@ -151,4 +151,18 @@ auto aggregateEdits(
     std::map<std::string, std::string>& Out,
     std::vector<std::string>& Conflicts) -> bool;
 
+// Shared command-line aggregation entry point used by both the standalone
+// `aggregate_edits` binary and `cpp_format --aggregate`.  Reads and parses
+// every record file named in \p InputPaths, merges them, and then:
+//   * Check   -> prints per-file edit counts and exits 1 if any edit would be
+//                applied; reads no source files (a hermetic lint gate),
+//   * Apply   -> writes the merged content back to each touched file in place,
+//   * neither -> prints a git-apply-able unified diff to stdout.
+// Record file keys resolve against \p Root — an absolute key is used verbatim,
+// a relative key is joined with \p Root (empty \p Root => the current working
+// directory).  Diagnostics go to stderr.  Returns the process exit code
+// (0 success / clean, 1 edits-present or conflict, 2 unreadable input).
+auto runEditAggregation(const std::vector<std::string>& InputPaths,
+                        llvm::StringRef Root, bool Apply, bool Check) -> int;
+
 #endif  // CPP_FORMATTING_LINT_LIB_H_

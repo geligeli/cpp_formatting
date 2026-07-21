@@ -32,6 +32,7 @@ bazel test //cpp_formatting:rename_variables_test
 bazel test //cpp_formatting:normalize_variables_integration_test
 bazel test //cpp_formatting:lint_lib_test
 bazel test //cpp_formatting:lint_integration_test
+bazel test //cpp_formatting:aggregate_integration_test
 ```
 
 **Run a binary (dry-run):**
@@ -98,14 +99,14 @@ All source files live under [cpp_formatting/](cpp_formatting/).
 
 #### `cpp_format` — combined tool with YAML config
 
-- [cpp_formatting/cpp_format.cpp](cpp_formatting/cpp_format.cpp) — `main()`: parses CLI options or a YAML config file, then runs every `normalize_variables` rule plus `trailing_return_types` in a **single** `ClangTool` pass via `CppFormatActionFactory` (each TU is parsed exactly once, regardless of how many rules are configured).
+- [cpp_formatting/cpp_format.cpp](cpp_formatting/cpp_format.cpp) — `main()`: parses CLI options or a YAML config file, then runs every `normalize_variables` rule plus `trailing_return_types` in a **single** `ClangTool` pass via `CppFormatActionFactory` (each TU is parsed exactly once, regardless of how many rules are configured). Also hosts the `--emit-edits=<file>` mode (writes per-TU edit records for Bazel aggregation) and the `--aggregate` mode (merges those records; dispatched before `CommonOptionsParser`, delegates to `lint_lib`'s `runEditAggregation`).
 - [cpp_formatting/cpp_format_lib.h](cpp_formatting/cpp_format_lib.h) — `NormalizeRule` (scope + rename callback + lint rule id) and `CppFormatActionFactory`: buffers rewritten content in `PendingRewrites` like `RenameActionFactory` and commits it via `flush()` after `ClangTool::run()`.
 - [cpp_formatting/cpp_format_lib.cpp](cpp_formatting/cpp_format_lib.cpp) — Implementation: per TU, `runRenameRuleOnAST()` (from `rename_variables_lib`) runs each rule's collect+apply visitors, then the trailing-return `MatchFinder` runs via `matchAST()` on the same AST, all sharing one `Rewriter`. Return-type text is extracted via `Rewriter::getRewrittenText()`, so a rename that landed inside a return type (e.g. a member in `decltype(count_)`) is carried into the moved `-> decltype(m_count)` text instead of being clobbered by the wholesale `auto` replacement.
 
 #### Lint support (CI/CD)
 
 - [cpp_formatting/lint_lib.h](cpp_formatting/lint_lib.h) — `PendingRewrites` (path → rewritten content, shared by both rewrite libs), `LintDiagnostic`, `LintReport` (`emitText`/`emitSARIF`), `emitUnifiedDiff()` (Myers line diff, git-apply-able), `relativizeToCwd()`, `emitLintResults()` (shared by the three mains: emits the chosen format and returns the exit code).
-- [cpp_formatting/lint_lib.cpp](cpp_formatting/lint_lib.cpp) — Implementation. JSON via `llvm/Support/JSON.h` (no new dependency). Lint diagnostics are recorded at the same choke points that perform rewrites (`ApplyRenamesVisitor::renameAt`, `TrailingReturnCallback::run`), so lint results exactly match what in-place mode would change.
+- [cpp_formatting/lint_lib.cpp](cpp_formatting/lint_lib.cpp) — Implementation. JSON via `llvm/Support/JSON.h` (no new dependency). Lint diagnostics are recorded at the same choke points that perform rewrites (`ApplyRenamesVisitor::renameAt`, `TrailingReturnCallback::run`), so lint results exactly match what in-place mode would change. Also implements the edit-record model (`EditReport`/`parseEditReport`/`mergeEditReports`/`aggregateEdits`) and `runEditAggregation()` — the shared CLI entry point behind both `aggregate_edits` and `cpp_format --aggregate`.
 
 #### Embedded Clang resource directory
 
@@ -140,6 +141,10 @@ All three binaries link the Clang built-in headers (`stddef.h`, `__stddef_max_al
   4. Clean file — exit 0, no diagnostics.
   5. `trailing_return_types` lint — text and diff round-trip.
   6. `cpp_format` lint — multi-pass run aggregates both rule ids into one SARIF report.
+- [cpp_formatting/aggregate_integration_test.sh](cpp_formatting/aggregate_integration_test.sh) — Shell integration tests for the per-TU emit + aggregate pipeline (`cpp_format --emit-edits` then `cpp_format --aggregate`), on a two-file fixture whose header holds a template-dependent member token resolved from the instantiating `.cpp`:
+  1. `--aggregate` diff is byte-identical to the standalone `aggregate_edits` binary and rewrites both the member decl and the cross-TU dependent token.
+  2. `--aggregate --check` exits 1 with per-file edit counts.
+  3. `--aggregate --apply` rewrites the files on disk; re-emitting against the fixed sources and re-checking exits 0.
 
 ### Build files
 
@@ -184,7 +189,7 @@ Runs `cpp_format` from the build graph so compile info and the full header set c
 
 **How it works** — a per-target **aspect** (`cpp_format_aspect`) derives each `cc_*` target's compile flags from `CcInfo.compilation_context` + the toolchain (`cc_common.get_memory_inefficient_command_line(CPP_COMPILE_ACTION_NAME)`), and runs `cpp_format --config=cpp_format.yaml --emit-edits=<target>.cpp_format.json <srcs+hdrs> -- -x c++ <flags> -resource-dir=<staged builtin headers>`. It declares the target's sources **plus `compilation_context.headers` (transitive)** and `cc_toolchain.all_files` as action inputs — that declaration is what makes headers reachable under sandboxing. Each action is parallel and cached; first-party targets only (guarded by `ctx.label.workspace_name == ""`).
 
-**Records, not diffs** — the emit action writes offset-level edit records (`{file, offset, length, old, new}`) plus a template-dependent-token resolution sidecar (see "template-dependent member tokens"). Textual diffs can't be merged (hunk offsets don't compose); records can. [aggregate_edits](cpp_formatting/aggregate_edits.cpp) unions all targets' records, resolves dependent tokens across TUs (agree → edit, veto/disagree → dropped), merges per file (dedup identical, flag overlapping-distinct conflicts), and renders/applies via `emitUnifiedDiff`. This is the clang-tidy `--export-fixes` + `clang-apply-replacements` model. The rename↔trailing-return overlap (a member renamed inside a `decltype(...)` return type that trailing-return also rewrites) is handled in [trailing_return_types_lib.cpp](cpp_formatting/trailing_return_types_lib.cpp): the trailing-return edit subsumes (drops) rename records inside its range, since its `-> type` text already carries the rename.
+**Records, not diffs** — the emit action writes offset-level edit records (`{file, offset, length, old, new}`) plus a template-dependent-token resolution sidecar (see "template-dependent member tokens"). Textual diffs can't be merged (hunk offsets don't compose); records can. Aggregation unions all targets' records, resolves dependent tokens across TUs (agree → edit, veto/disagree → dropped), merges per file (dedup identical, flag overlapping-distinct conflicts), and renders/applies via `emitUnifiedDiff`. This is the clang-tidy `--export-fixes` + `clang-apply-replacements` model. The rename↔trailing-return overlap (a member renamed inside a `decltype(...)` return type that trailing-return also rewrites) is handled in [trailing_return_types_lib.cpp](cpp_formatting/trailing_return_types_lib.cpp): the trailing-return edit subsumes (drops) rename records inside its range, since its `-> type` text already carries the rename. The aggregation logic lives in one place — `runEditAggregation()` in [lint_lib.cpp](cpp_formatting/lint_lib.cpp) — exposed by two thin CLIs: the standalone [aggregate_edits](cpp_formatting/aggregate_edits.cpp) binary (used by the from-source aspect) and `cpp_format --aggregate` (so the single published binary is self-sufficient — see the prebuilt kit below). `cpp_format --aggregate` is dispatched before `CommonOptionsParser` in [cpp_format.cpp](cpp_formatting/cpp_format.cpp) and hand-parses `--apply`/`--check`/`--root` (it has no source paths or `--` compile args).
 
 **Rules** — `cpp_format_targets(name, deps)` generates three targets (see [bazel/testdata/BUILD.bazel](bazel/testdata/BUILD.bazel) for the demo):
 - `<name>.check` — a **test** (hermetic lint gate): `mergeEditReports` counts edits without reading sources; exit 1 if any. `bazel test //…:<name>.check`.
@@ -194,6 +199,15 @@ Runs `cpp_format` from the build graph so compile info and the full header set c
 `--config=lint` in [.bazelrc](.bazelrc) runs the aspect and materializes each target's records (`bazel build --config=lint //…`) for inspection/CI; the failing gate is the `.check` test.
 
 **Non-obvious behaviours** — record file keys are the source's **real path**, which under Bazel resolves to the absolute workspace path (source symlinks) — stable across actions/sandboxes; `aggregate_edits` uses absolute keys directly and joins relative keys with `--root`. `-x c++` is forced so headers parse as C++ (not C). `-resource-dir` is derived from the staged `@llvm-project//clang:builtin_headers_gen` paths (robust to a module-extension rename). The aspect needs `cpp_format` in the **exec** configuration (a one-time from-source Clang/LLVM build). Portability caveat: absolute paths in records make remote-cache reuse across machines suboptimal.
+
+### Prebuilt-binary integration kit ([bazel/integration/](bazel/integration/))
+
+A self-contained, **vendorable** variant of the integration for external repos that want the lint/fix gate **without** building Clang/LLVM from source. It is documented for end users in the README quick start. Two files, copied wholesale into a consumer repo (e.g. `third_party/cpp_format/`):
+
+- [bazel/integration/extensions.bzl](bazel/integration/extensions.bzl) — a Bzlmod `module_extension` (`cpp_format`) with a `release(version, base_url, sha256)` tag class. Its repo rule detects the host OS/arch (`rctx.os`), downloads the matching release asset (`cpp_format-{linux-x86_64,linux-aarch64,darwin-aarch64,windows-x86_64.exe}`) into a `bin/` subdir, and exposes it as `@cpp_format_bin//:cpp_format`. **The download target file must not share the `cpp_format` filegroup's name** — a same-name `src` is a self-edge cycle (hence `bin/`).
+- [bazel/integration/cpp_format.bzl](bazel/integration/cpp_format.bzl) — the same aspect + `cpp_format_targets` as [bazel/cpp_format.bzl](bazel/cpp_format.bzl), with three differences: it runs the prebuilt binary as a plain `File` (`ctx.file._cpp_format`, `executable=`/`tools=`, no `cfg="exec"` build); it stages **no** `@llvm-project` builtin headers and passes **no** `-resource-dir` (the published binary self-extracts its embedded Clang headers via `ensureClangResourceDir()` — verified to work even with a cleared env, falling back to `TMPDIR`); and the aggregator rules exec `cpp_format --aggregate` instead of the separate `aggregate_edits` binary. `_rlocation_path()` derives each runfiles key from `File.short_path` (`../<canonical>/…` for the external binary → strip `../`; main-repo records → `_main/…`), so it works for both the external binary and generated records.
+
+The in-repo [bazel/cpp_format.bzl](bazel/cpp_format.bzl) (from-source, staged headers) remains the path used by this repo's own `//bazel/testdata` demo and tests; the kit is the copy external consumers use.
 
 ## Key Design Decisions
 

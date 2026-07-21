@@ -115,6 +115,48 @@ static cl::opt<std::string> EmitEditsOpt(
 
 namespace {
 
+// Aggregate mode: merge per-TU edit-record files (emitted by --emit-edits) into
+// one repository change.  It shares nothing with the LibTooling parse pipeline
+// (no compilation database, no `--` separator), so it is dispatched before
+// CommonOptionsParser and parses its own small flag set by hand — reusing
+// lint_lib's runEditAggregation, the exact code path of the standalone
+// aggregate_edits binary.  This is what lets the single published cpp_format
+// binary both emit and aggregate, so a Bazel integration needs only one binary.
+auto runAggregate(int argc, const char** argv) -> int {
+  bool Apply = false;
+  bool Check = false;
+  std::string Root;
+  std::vector<std::string> Inputs;
+  for (int i = 1; i < argc; ++i) {
+    StringRef Arg(argv[i]);
+    if (Arg == "--aggregate") continue;
+    if (Arg == "--apply") {
+      Apply = true;
+    } else if (Arg == "--check") {
+      Check = true;
+    } else if (Arg == "--root") {
+      if (i + 1 >= argc) {
+        llvm::errs() << "--root requires a directory argument\n";
+        return 2;
+      }
+      Root = argv[++i];
+    } else if (Arg.starts_with("--root=")) {
+      Root = Arg.drop_front(std::string("--root=").size()).str();
+    } else if (Arg.starts_with("-")) {
+      llvm::errs() << "unknown --aggregate flag '" << Arg
+                   << "' (expected --apply, --check, or --root=<dir>)\n";
+      return 2;
+    } else {
+      Inputs.push_back(Arg.str());
+    }
+  }
+  if (Inputs.empty()) {
+    llvm::errs() << "--aggregate requires one or more <records.json> inputs\n";
+    return 2;
+  }
+  return runEditAggregation(Inputs, Root, Apply, Check);
+}
+
 FileSet buildFileSet(const std::vector<std::string>& SourcePaths) {
   FileSet FS;
   for (const auto& P : SourcePaths) {
@@ -155,6 +197,11 @@ void applyArgumentAdjusters(ClangTool& Tool, const std::string& ResourceDir) {
 // ---------------------------------------------------------------------------
 
 auto main(int argc, const char** argv) -> int {
+  // Aggregate mode is a distinct sub-tool that does not use the LibTooling
+  // compilation-database machinery; dispatch it before CommonOptionsParser.
+  for (int i = 1; i < argc; ++i)
+    if (StringRef(argv[i]) == "--aggregate") return runAggregate(argc, argv);
+
   auto ExpectedParser =
       CommonOptionsParser::create(argc, argv, CppFormatCategory);
   if (!ExpectedParser) {

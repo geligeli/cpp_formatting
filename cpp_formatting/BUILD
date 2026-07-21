@@ -267,6 +267,22 @@ cc_binary(
     ],
 )
 
+# Exercises `cpp_format --emit-edits` + `cpp_format --aggregate` (the single
+# published binary's aggregation mode) and its equivalence with the standalone
+# aggregate_edits binary, including the cross-TU dependent-token path.
+sh_test(
+    name = "aggregate_integration_test",
+    srcs = ["aggregate_integration_test.sh"],
+    args = [
+        "$(location //cpp_formatting:cpp_format)",
+        "$(location //cpp_formatting:aggregate_edits)",
+    ],
+    data = [
+        "//cpp_formatting:aggregate_edits",
+        "//cpp_formatting:cpp_format",
+    ],
+)
+
 cc_test(
     name = "rename_variables_test",
     srcs = ["rename_variables_test.cpp"],

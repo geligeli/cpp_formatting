@@ -1,0 +1,3 @@
+# Vendored cpp_format integration kit.  Copy this directory into your repo
+# (e.g. as third_party/cpp_format/) and load cpp_format.bzl from your BUILD
+# files.  The .bzl files carry no build targets of their own.
