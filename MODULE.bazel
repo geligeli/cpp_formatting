@@ -18,3 +18,11 @@ bazel_dep(name = "apple_support", version = "1.24.1", repo_name = "build_bazel_a
 # fetches the monorepo source and runs the upstream `llvm_configure` rule.
 llvm = use_extension("//third_party/llvm:extensions.bzl", "llvm")
 use_repo(llvm, "llvm-project", "llvm-raw", "llvm_zlib", "llvm_zstd")
+
+cpp_format = use_extension("//bazel/integration:extensions.bzl", "cpp_format")
+cpp_format.release(
+    version = "20260721-eec734d",
+    # Optional but recommended for reproducible CI — pin per-asset hashes:
+    # sha256 = {"cpp_format-linux-x86_64": "…"},
+)
+use_repo(cpp_format, "cpp_format_bin")

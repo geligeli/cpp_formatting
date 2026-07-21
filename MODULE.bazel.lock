@@ -156,6 +156,26 @@
   },
   "selectedYankedVersions": {},
   "moduleExtensions": {
+    "//bazel/integration:extensions.bzl%cpp_format": {
+      "general": {
+        "bzlTransitiveDigest": "FXdQa7Nrq9frN/6XLD8Yu/eG0K5gEeQ870OMnPi80F0=",
+        "usagesDigest": "kHvn0RWs3aMa9tgtUB6uPYuftMwV8pvO0XNFO1cyZ3s=",
+        "recordedFileInputs": {},
+        "recordedDirentsInputs": {},
+        "envVariables": {},
+        "generatedRepoSpecs": {
+          "cpp_format_bin": {
+            "repoRuleId": "@@//bazel/integration:extensions.bzl%_binary_repo",
+            "attributes": {
+              "version": "20260721-eec734d",
+              "base_url": "https://github.com/geligeli/cpp_formatting/releases/download",
+              "sha256": {}
+            }
+          }
+        },
+        "recordedRepoMappingEntries": []
+      }
+    },
     "//third_party/llvm:extensions.bzl%llvm": {
       "general": {
         "bzlTransitiveDigest": "flwE6Q4ZYNAD4IsV+4mEgnHQcFFyp60Z0/V2I3Qgb4E=",

@@ -1,5 +1,5 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("//bazel:cpp_format.bzl", "cpp_format_targets")
+load("//bazel/integration:cpp_format.bzl", "cpp_format_targets")
 
 # A small first-party cc_library used to exercise the cpp_format Bazel
 # integration end to end: a member the `member -> snake_case` rule renames
