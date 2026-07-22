@@ -219,3 +219,62 @@ def cpp_format_targets(name, deps, **kwargs):
     _cpp_format_test(name = name + ".check", deps = deps, mode_flags = "--check", **kwargs)
     _cpp_format_run(name = name + ".diff", deps = deps, mode_flags = "", **kwargs)
     _cpp_format_run(name = name + ".fix", deps = deps, mode_flags = "--apply", **kwargs)
+
+# ---------------------------------------------------------------------------
+# `bazel run //…:install` — drop cpp_format.sh into the consumer's workspace
+# ---------------------------------------------------------------------------
+
+# The canonical `<repo>//bazel/integration:cpp_format.bzl%cpp_format_aspect`
+# spec, resolved in the consumer's module graph (so it is valid from their
+# command line whether the kit was imported by URL or vendored).
+_ASPECT_SPEC = str(Label(":cpp_format.bzl")) + "%cpp_format_aspect"
+
+# The default ASPECT literal in cpp_format.sh that install bakes over.
+_ASPECT_PLACEHOLDER = "//third_party/cpp_format:cpp_format.bzl%cpp_format_aspect"
+
+def _install_impl(ctx):
+    # Bake the imported aspect label into the placed script, so it runs with no
+    # CPP_FORMAT_ASPECT needed.  Env still overrides (the `:-` default remains).
+    placed = ctx.actions.declare_file(ctx.label.name + ".cpp_format.sh")
+    ctx.actions.expand_template(
+        template = ctx.file._script,
+        output = placed,
+        substitutions = {_ASPECT_PLACEHOLDER: _ASPECT_SPEC},
+    )
+    launcher = ctx.actions.declare_file(ctx.label.name + ".launch.sh")
+    ctx.actions.write(
+        output = launcher,
+        is_executable = True,
+        content = (
+            _RUNFILES_PREAMBLE +
+            'dest="${1:-' + ctx.attr.dest + '}"\n' +
+            'ws="${BUILD_WORKSPACE_DIRECTORY:?run this with \'bazel run\'}"\n' +
+            'src="$(rlocation "' + _rlocation_path(placed) + '")"\n' +
+            'mkdir -p "$(dirname "$ws/$dest")"\n' +
+            'cp -f "$src" "$ws/$dest"\n' +
+            'chmod 755 "$ws/$dest"\n' +
+            'echo "cpp_format: installed wrapper -> $dest"\n' +
+            'echo "run it with: $dest check | diff | fix [pattern]"\n'
+        ),
+    )
+    runfiles = ctx.runfiles(files = [placed])
+    runfiles = runfiles.merge(ctx.attr._bash_runfiles[DefaultInfo].default_runfiles)
+    return [DefaultInfo(executable = launcher, runfiles = runfiles)]
+
+cpp_format_install = rule(
+    doc = "bazel run this to copy cpp_format.sh into $BUILD_WORKSPACE_DIRECTORY " +
+          "(default tools/cpp_format.sh; override with a positional arg).",
+    implementation = _install_impl,
+    executable = True,
+    attrs = {
+        "dest": attr.string(
+            default = "tools/cpp_format.sh",
+            doc = "Default workspace-relative install path.",
+        ),
+        "_script": attr.label(
+            default = Label(":cpp_format.sh"),
+            allow_single_file = True,
+        ),
+        "_bash_runfiles": attr.label(default = Label("@bazel_tools//tools/bash/runfiles")),
+    },
+)

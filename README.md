@@ -59,12 +59,13 @@ exports_files(["cpp_format.yaml"])
 **3. Lint / fix the whole repo.** Two entry points; pick per need.
 
 *Whole repo, or any pattern* — the `cpp_format.sh` wrapper. It runs *outside*
-Bazel (so it can drive `bazel build` for the aspect without nesting), so grab
-that **one** script — e.g. copy [bazel/integration/cpp_format.sh](bazel/integration/cpp_format.sh)
-into your `tools/`, or `curl` it — and point it at the imported aspect:
+Bazel (so it can drive `bazel build` for the aspect without nesting), so it's
+the one script you keep locally. Drop it in with one command — the aspect label
+is baked in, so it needs no configuration:
 
 ```sh
-export CPP_FORMAT_ASPECT='@cpp_formatting//bazel/integration:cpp_format.bzl%cpp_format_aspect'
+bazel run @cpp_formatting//bazel/integration:install   # -> tools/cpp_format.sh
+#   ... or `bazel run …:install -- scripts/fmt.sh` to choose the path.
 
 tools/cpp_format.sh check          # CI gate: exit 1 if anything would change
 tools/cpp_format.sh diff           # print the merged, git-apply-able patch
@@ -72,7 +73,8 @@ tools/cpp_format.sh fix            # apply the fixes in place
 tools/cpp_format.sh fix //app/...  # scope to a package tree
 ```
 
-It queries the matching first-party `cc_*` targets, runs the aspect over them
+Commit the placed script (it's a normal, editable file). It queries the
+matching first-party `cc_*` targets, runs the aspect over them
 (each emits an edit-record file — parallel and cached), and merges every
 target's records into one repository-wide change — deduping, resolving
 template-dependent member tokens across translation units, and flagging genuine
