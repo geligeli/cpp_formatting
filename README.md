@@ -7,40 +7,39 @@ A collection of Clang-based source-to-source rewrite tools for C++ codebases.
 Get a parallel, cached **lint / diff / fix** pass over your C++ using the
 **prebuilt release binary** — no need to build Clang/LLVM from source, and **no
 per-target wiring**: one command formats the whole repo (or any target
-pattern). A [aspect](bazel/integration/cpp_format.bzl) derives each target's
-compile flags and header set from `CcInfo` + the toolchain, so every include is
-reachable under sandboxing with **no `compile_commands.json`**. The binary
-embeds and self-extracts the Clang builtin headers, so nothing else is fetched.
+pattern). The Bazel glue is imported straight from this repo **by URL** — you
+don't vendor it. An [aspect](bazel/integration/cpp_format.bzl) derives each
+target's compile flags and header set from `CcInfo` + the toolchain, so every
+include is reachable under sandboxing with **no `compile_commands.json`**. The
+binary embeds and self-extracts the Clang builtin headers, so nothing else is
+fetched.
 
-**1. Vendor the integration kit.** Copy [bazel/integration/](bazel/integration/)
-from this repo into your own (e.g. as `third_party/cpp_format/`):
-
-```
-third_party/cpp_format/
-  cpp_format.sh      # the lint/diff/fix entry point (run this)
-  extensions.bzl     # fetches the release binary for the host platform
-  cpp_format.bzl     # the aspect (+ optional cpp_format_targets rule)
-  BUILD.bazel
-```
-
-**2. Fetch the binary in `MODULE.bazel`.** Pick a release tag from the
+**1. Import the kit in `MODULE.bazel`.** Pick a release tag from the
 [Releases](https://github.com/geligeli/cpp_formatting/releases) page (tags are
-`<YYYYMMDD>-<shortsha>`):
+`<YYYYMMDD>-<shortsha>`). `archive_override` pulls the Bazel glue by URL; the
+`cpp_format` extension downloads the prebuilt binary for your host platform:
 
 ```starlark
-cpp_format = use_extension("//third_party/cpp_format:extensions.bzl", "cpp_format")
+bazel_dep(name = "cpp_formatting", version = "0.1.0")
+archive_override(
+    module_name = "cpp_formatting",
+    urls = ["https://github.com/geligeli/cpp_formatting/archive/refs/tags/20260721-eec734d.tar.gz"],
+    strip_prefix = "cpp_formatting-20260721-eec734d",
+)
+
+cpp_format = use_extension("@cpp_formatting//bazel/integration:extensions.bzl", "cpp_format")
 cpp_format.release(
-    version = "20260720-39c5de9",
+    version = "20260721-eec734d",
     # Optional but recommended for reproducible CI — pin per-asset hashes:
     # sha256 = {"cpp_format-linux-x86_64": "…"},
 )
 use_repo(cpp_format, "cpp_format_bin")
 ```
 
-The host platform's asset is selected automatically (Linux x86_64/aarch64,
-macOS arm64, Windows x64).
+The host asset is selected automatically (Linux x86_64/aarch64, macOS arm64,
+Windows x64).
 
-**3. Add a ruleset** — `cpp_format.yaml` at your repo root describes the passes
+**2. Add a ruleset** — `cpp_format.yaml` at your repo root describes the passes
 to run (see [YAML config](#config-file---config)):
 
 ```yaml
@@ -50,38 +49,40 @@ normalize_variables:
 trailing_return_types: true
 ```
 
-The aspect reads it as `//:cpp_format.yaml`, so export it from your root
-`BUILD.bazel` (a cross-package file reference needs this):
+The aspect reads it as your root module's `//:cpp_format.yaml`, so export it
+from your root `BUILD.bazel`:
 
 ```starlark
 exports_files(["cpp_format.yaml"])
 ```
 
-**4. Run it** — the wrapper formats the whole repo (default `//...`) or any
-target pattern. No BUILD changes, no per-target wiring:
+**3. Lint / fix the whole repo.** Two entry points; pick per need.
+
+*Whole repo, or any pattern* — the `cpp_format.sh` wrapper. It runs *outside*
+Bazel (so it can drive `bazel build` for the aspect without nesting), so grab
+that **one** script — e.g. copy [bazel/integration/cpp_format.sh](bazel/integration/cpp_format.sh)
+into your `tools/`, or `curl` it — and point it at the imported aspect:
 
 ```sh
-third_party/cpp_format/cpp_format.sh check          # CI gate: exit 1 if anything would change
-third_party/cpp_format/cpp_format.sh diff           # print the merged, git-apply-able patch
-third_party/cpp_format/cpp_format.sh fix            # apply the fixes in place
+export CPP_FORMAT_ASPECT='@cpp_formatting//bazel/integration:cpp_format.bzl%cpp_format_aspect'
 
-third_party/cpp_format/cpp_format.sh fix //app/...  # scope to a package tree
-third_party/cpp_format/cpp_format.sh check //lib:core
+tools/cpp_format.sh check          # CI gate: exit 1 if anything would change
+tools/cpp_format.sh diff           # print the merged, git-apply-able patch
+tools/cpp_format.sh fix            # apply the fixes in place
+tools/cpp_format.sh fix //app/...  # scope to a package tree
 ```
 
 It queries the matching first-party `cc_*` targets, runs the aspect over them
 (each emits an edit-record file — parallel and cached), and merges every
 target's records into one repository-wide change — deduping, resolving
 template-dependent member tokens across translation units, and flagging genuine
-conflicts. Tag a target `no-cpp-format` to exclude it. See
-[Bazel integration](#bazel-integration) below for how it works.
+conflicts. Tag a target `no-cpp-format` to exclude it.
 
-**Optional — pin a lint gate in CI.** For a stable `bazel test` gate over a
-specific, reviewed set of targets (rather than the whole repo), add
-`cpp_format_targets`:
+*A pinned CI gate* — `cpp_format_targets` needs **no local script** (pure URL
+import), and gives a `bazel test` gate over a specific, reviewed dep set:
 
 ```starlark
-load("//third_party/cpp_format:cpp_format.bzl", "cpp_format_targets")
+load("@cpp_formatting//bazel/integration:cpp_format.bzl", "cpp_format_targets")
 
 cpp_format_targets(name = "format", deps = ["//app:main", "//lib:core"])
 ```
@@ -100,11 +101,15 @@ enough.
 > skipped). Each header is owned by the single target that lists it in `hdrs`;
 > a header in no target's `srcs`/`hdrs` is never visited. The binary extracts
 > its embedded headers to a temp cache per action, so a strict sandbox needs a
-> writable `TMPDIR` (Bazel provides one by default). If you'd rather build the
-> tool from source instead of using a release, depend on
-> `//cpp_formatting:cpp_format` and set `CPP_FORMAT_ASPECT` /
-> `CPP_FORMAT_BIN_LABEL` (see the top of `cpp_format.sh`) to the in-repo
-> [bazel/cpp_format.bzl](bazel/cpp_format.bzl) aspect and binary.
+> writable `TMPDIR` (Bazel provides one by default). Importing by URL does not
+> build LLVM — the LLVM-from-source parts of this module are lazy and never
+> referenced by the kit. Prefer to keep everything local? Copy
+> [bazel/integration/](bazel/integration/) into your repo instead of the
+> `archive_override`, load it as `//third_party/cpp_format:…`, and drop the
+> `CPP_FORMAT_ASPECT` export (the vendored default matches). To build the tool
+> from source rather than download it, set `CPP_FORMAT_BIN_LABEL` /
+> `CPP_FORMAT_ASPECT` (see the top of `cpp_format.sh`) to the in-repo
+> [bazel/cpp_format.bzl](bazel/cpp_format.bzl) aspect and `//cpp_formatting:cpp_format`.
 
 ---
 
@@ -524,15 +529,18 @@ deps)` instead generates three graph targets:
 | `<name>.diff` | `bazel run` | Prints the merged, git-apply-able unified diff (review artifact). |
 | `<name>.fix` | `bazel run` | Applies the edits in `$BUILD_WORKSPACE_DIRECTORY` (outside the action graph, since Bazel actions cannot mutate sources). |
 
-**Two delivery paths.** The vendored kit in [bazel/integration/](bazel/integration/)
-uses the **prebuilt release binary** (no LLVM build). Alternatively, if
-`cpp_formatting` is a source dependency of your module, build the tool from
-source and use [bazel/cpp_format.bzl](bazel/cpp_format.bzl) directly — it is the
-same aspect, but it drives `//cpp_formatting:cpp_format` and stages the Clang
-builtin headers from `@llvm-project` (see [bazel/testdata/BUILD.bazel](bazel/testdata/BUILD.bazel)
-for a worked example). The single published binary both emits records and
-aggregates them (`--aggregate`), so the release-based kit needs only that one
-download.
+**Delivery paths.** The kit in [bazel/integration/](bazel/integration/) uses the
+**prebuilt release binary** (no LLVM build) and is consumed either by URL
+(`archive_override` — nothing copied but the one `cpp_format.sh` script) or by
+copying the directory in. Its aspect reads the config as `@@//:cpp_format.yaml`
+— the **root module's** file — so the same `.bzl` picks up *your* ruleset
+whether it was imported or vendored. The single published binary both emits
+records and aggregates them (`--aggregate`), so the kit needs only that one
+download. Alternatively, if `cpp_formatting` is already a source dependency you
+build, use [bazel/cpp_format.bzl](bazel/cpp_format.bzl) directly — the same
+aspect, but it drives `//cpp_formatting:cpp_format` from source and stages the
+Clang builtin headers from `@llvm-project` (see
+[bazel/testdata/BUILD.bazel](bazel/testdata/BUILD.bazel) for a worked example).
 
 ---
 

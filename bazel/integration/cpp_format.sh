@@ -19,13 +19,15 @@
 #
 #   Tag a target `no-cpp-format` to exclude it.
 #
-# Vendored with the integration kit — no need to edit it unless you copied the
-# kit somewhere other than //third_party/cpp_format, in which case update
-# ASPECT/BIN_LABEL below (or override them in the environment).
+# This is the one file you keep locally (it runs outside Bazel). Point it at the
+# aspect via CPP_FORMAT_ASPECT:
+#   * imported by URL (archive_override):
+#       @cpp_formatting//bazel/integration:cpp_format.bzl%cpp_format_aspect
+#   * vendored into //third_party/cpp_format (the default below): no env needed.
 
 set -euo pipefail
 
-# --- configuration (kit defaults; override via env if you vendored elsewhere) -
+# --- configuration (override via env for URL import or a different vendor dir) -
 ASPECT="${CPP_FORMAT_ASPECT:-//third_party/cpp_format:cpp_format.bzl%cpp_format_aspect}"
 BIN_LABEL="${CPP_FORMAT_BIN_LABEL:-@cpp_format_bin//:cpp_format}"
 BAZEL="${BAZEL:-bazel}"

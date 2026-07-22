@@ -127,7 +127,7 @@ cpp_format_aspect = aspect(
             allow_single_file = True,
         ),
         "_config": attr.label(
-            default = Label("//:cpp_format.yaml"),
+            default = Label("@@//:cpp_format.yaml"),
             allow_single_file = True,
         ),
     },
