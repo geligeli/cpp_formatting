@@ -10,3 +10,4 @@ compile_commands.json
 # BAZEL_REPO_CACHE point at a shared cache.
 /.disk_cache
 /.bazel_cache
+.claude/worktrees/
