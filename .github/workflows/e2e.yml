@@ -36,6 +36,8 @@ jobs:
           - macro_repo-member_snake_case
           - googletest-trailing_return_types
           - googletest-member_snake_case
+          - googletest-return_types_roundtrip
+          - abseil_cpp-trailing_return_types
 
     steps:
       - uses: actions/checkout@v4

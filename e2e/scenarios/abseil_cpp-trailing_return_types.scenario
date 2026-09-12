@@ -1,0 +1,16 @@
+# The stress case: ~558 targets of macro-heavy, template-heavy C++.
+#
+# Measured: 14226 edits across 622 files apply with 0 conflicts, //absl/...
+# rebuilds clean, and a second pass has nothing left to do.
+#
+# This scenario was blocked entirely on Clang 19, which aborted on
+# absl/log/log_format_test.cc inside its own Sema (ExprClassification.cpp,
+# `isLValue()`) while instantiating a local variable's initializer. Clang 21.1.8
+# parses it. Getting from there to green then took two tool fixes that only
+# abseil exposed: a return type spelled through a macro (`const ElfW(Phdr)*`),
+# and the arrow being inserted in front of a trailing attribute
+# (ABSL_ATTRIBUTE_LIFETIME_BOUND) -- the latter caught by `converge`, since gcc
+# accepts that output and only the next parse rejects it.
+REPO=abseil-cpp
+RULESET=trailing_return_types
+EXPECT=pass
