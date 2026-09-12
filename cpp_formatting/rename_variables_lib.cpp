@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <fstream>
+#include <map>
 #include <optional>
 #include <set>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -207,12 +209,14 @@ class CollectRenamesVisitor
  public:
   CollectRenamesVisitor(SourceManager& SM, const VariableRenameCallback& CB,
                         VariableScope Scope, RenameMap& Renames,
-                        const FileSet& CollectFrom)
+                        const FileSet& CollectFrom,
+                        RenameConflicts* Conflicts = nullptr)
       : SM(SM),
         CB(CB),
         Scope(Scope),
         Renames(Renames),
-        CollectFrom(CollectFrom) {}
+        CollectFrom(CollectFrom),
+        Conflicts(Conflicts) {}
 
   bool VisitFieldDecl(FieldDecl* D) {
     collect(D);
@@ -234,7 +238,8 @@ class CollectRenamesVisitor
     const Decl* Key = D->getCanonicalDecl();
     if (!Visited.insert(Key).second) return;
     std::string NewName;
-    if (CB(D->getName(), NewName) && NewName != D->getName().str())
+    if (CB(D->getName(), NewName) && NewName != D->getName().str() &&
+        !collides(D, NewName))
       Renames[Key] = std::move(NewName);
   }
 
@@ -252,9 +257,71 @@ class CollectRenamesVisitor
     for (const CXXMethodDecl* M : Family)
       if (!shouldCollect(M->getLocation(), SM, CollectFrom)) return;
     std::string NewName;
-    if (CB(D->getName(), NewName) && NewName != D->getName().str())
-      for (const CXXMethodDecl* M : Family)
-        Renames[M->getCanonicalDecl()] = NewName;
+    if (!CB(D->getName(), NewName) || NewName == D->getName().str()) return;
+    // One check for the whole family: a clash anywhere in the hierarchy means
+    // the rename cannot be applied consistently, so none of it is.
+    for (const CXXMethodDecl* M : Family)
+      if (collides(M, NewName)) return;
+    for (const CXXMethodDecl* M : Family)
+      Renames[M->getCanonicalDecl()] = NewName;
+  }
+
+  // True when NewName is already taken in D's own scope, in which case the
+  // rename is skipped entirely (declaration and uses) and recorded.  Renaming
+  // into an occupied name is not a formatting change: at best it fails to
+  // compile, at worst it silently rebinds uses to the other entity.
+  bool collides(const NamedDecl* D, llvm::StringRef NewName) {
+    const DeclContext* DC = D->getDeclContext();
+    if (!DC) return false;
+    DC = DC->getPrimaryContext();
+    const Decl* Key = D->getCanonicalDecl();
+
+    // Something of that name is already declared in the *same* scope.  Only
+    // the immediate context is consulted: shadowing an inherited member or an
+    // outer-scope name is legal C++ and not this tool's business.
+    ASTContext& Ctx = D->getASTContext();
+    DeclarationName DN(&Ctx.Idents.get(NewName));
+    for (const NamedDecl* ND : DC->lookup(DN)) {
+      if (ND->getCanonicalDecl() == Key || ND->isImplicit()) continue;
+      if (overloadsCleanly(Ctx, D, ND)) continue;
+      record(D, NewName,
+             ("existing " + std::string(ND->getDeclKindName()) + " '" +
+              NewName.str() + "'"));
+      return true;
+    }
+
+    // Two declarations in the same scope renaming to the same new name: the
+    // first one through keeps it, the second is skipped -- unless they are
+    // functions that would form a legal overload set.
+    auto [It, Inserted] = Claimed.try_emplace({DC, NewName.str()}, D);
+    if (!Inserted && It->second->getCanonicalDecl() != Key &&
+        !overloadsCleanly(Ctx, D, It->second)) {
+      record(D, NewName, "another declaration in the same scope renames to it");
+      return true;
+    }
+    return false;
+  }
+
+  // Two functions may share a name in one scope -- that is an overload set, and
+  // renaming one onto another's name is a supported outcome.  Identical
+  // signatures are not: that is a redeclaration.  Anything else (a field and a
+  // method, two fields) cannot share a name at all.
+  static bool overloadsCleanly(ASTContext& Ctx, const NamedDecl* A,
+                               const NamedDecl* B) {
+    const auto* FA = dyn_cast<FunctionDecl>(A);
+    const auto* FB = dyn_cast<FunctionDecl>(B);
+    if (!FA || !FB) return false;
+    return !Ctx.hasSameType(FA->getType(), FB->getType());
+  }
+
+  void record(const NamedDecl* D, llvm::StringRef NewName,
+              const std::string& Reason) {
+    if (!Conflicts) return;
+    const PresumedLoc PL = SM.getPresumedLoc(D->getLocation());
+    Conflicts->push_back(RenameConflict{
+        PL.isValid() ? PL.getFilename() : "", PL.isValid() ? PL.getLine() : 0,
+        PL.isValid() ? PL.getColumn() : 0, D->getName().str(), NewName.str(),
+        Reason});
   }
 
   SourceManager& SM;
@@ -262,7 +329,11 @@ class CollectRenamesVisitor
   VariableScope Scope;
   RenameMap& Renames;
   const FileSet& CollectFrom;
+  RenameConflicts* Conflicts = nullptr;
   std::unordered_set<const Decl*> Visited;
+  // (scope, new name) -> the declaration that claimed it first.
+  std::map<std::pair<const DeclContext*, std::string>, const NamedDecl*>
+      Claimed;
 };
 
 // ---------------------------------------------------------------------------
@@ -674,7 +745,8 @@ class RenameVariablesConsumer : public ASTConsumer {
                           OutputMode Mode = OutputMode::DryRun,
                           LintReport* Report = nullptr, std::string RuleId = "",
                           DependentResolutions* DepRes = nullptr,
-                          EditReport* Edits = nullptr)
+                          EditReport* Edits = nullptr,
+                          RenameConflicts* Conflicts = nullptr)
       : RW(RW),
         CB(std::move(CB)),
         Scope(Scope),
@@ -683,7 +755,8 @@ class RenameVariablesConsumer : public ASTConsumer {
         Report(Report),
         RuleId(std::move(RuleId)),
         DepRes(DepRes),
-        Edits(Edits) {}
+        Edits(Edits),
+        Conflicts(Conflicts) {}
 
   void HandleTranslationUnit(ASTContext& Ctx) override {
     SourceManager& SM = Ctx.getSourceManager();
@@ -716,7 +789,7 @@ class RenameVariablesConsumer : public ASTConsumer {
     }
 
     runRenameRuleOnAST(Ctx, RW, CB, Scope, CollectFrom, Report, RuleId, DepRes,
-                       Edits);
+                       Edits, Conflicts);
   }
 
  private:
@@ -729,6 +802,7 @@ class RenameVariablesConsumer : public ASTConsumer {
   std::string RuleId;
   DependentResolutions* DepRes;  // null when the feature is disabled
   EditReport* Edits;             // non-null in Emit mode
+  RenameConflicts* Conflicts;    // non-null when collecting
 };
 
 // ---------------------------------------------------------------------------
@@ -747,7 +821,7 @@ class RenameVariablesAction : public ASTFrontendAction {
                         OutputMode Mode, const FileSet& CollectFrom,
                         PendingRewrites* Pending, LintReport* Report,
                         std::string RuleId, DependentResolutions* DepRes,
-                        EditReport* Edits)
+                        EditReport* Edits, RenameConflicts* Conflicts)
       : CB(std::move(CB)),
         Scope(Scope),
         Mode(Mode),
@@ -756,7 +830,8 @@ class RenameVariablesAction : public ASTFrontendAction {
         Report(Report),
         RuleId(std::move(RuleId)),
         DepRes(DepRes),
-        Edits(Edits) {}
+        Edits(Edits),
+        Conflicts(Conflicts) {}
 
   void EndSourceFileAction() override {
     SourceManager& SM = TheRewriter.getSourceMgr();
@@ -782,9 +857,9 @@ class RenameVariablesAction : public ASTFrontendAction {
   auto CreateASTConsumer(CompilerInstance& CI, StringRef)
       -> std::unique_ptr<ASTConsumer> override {
     TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
-    return std::make_unique<RenameVariablesConsumer>(TheRewriter, CB, Scope,
-                                                     CollectFrom, Mode, Report,
-                                                     RuleId, DepRes, Edits);
+    return std::make_unique<RenameVariablesConsumer>(
+        TheRewriter, CB, Scope, CollectFrom, Mode, Report, RuleId, DepRes,
+        Edits, Conflicts);
   }
 
  private:
@@ -797,6 +872,7 @@ class RenameVariablesAction : public ASTFrontendAction {
   std::string RuleId;
   DependentResolutions* DepRes;
   EditReport* Edits;
+  RenameConflicts* Conflicts;
   Rewriter TheRewriter;
 };
 
@@ -837,6 +913,27 @@ class CaptureAction : public ASTFrontendAction {
 }  // namespace
 
 // ---------------------------------------------------------------------------
+// reportRenameConflicts (public)
+// ---------------------------------------------------------------------------
+
+void reportRenameConflicts(const RenameConflicts& Conflicts, bool Verbose,
+                           llvm::raw_ostream& OS) {
+  if (Conflicts.empty()) return;
+  // One declaration is seen once per TU that includes it, so collapse.
+  std::set<std::tuple<std::string, unsigned, unsigned, std::string>> Seen;
+  for (const RenameConflict& C : Conflicts) {
+    if (!Seen.emplace(C.File, C.Line, C.Column, C.NewName).second) continue;
+    if (Verbose)
+      OS << relativizeToCwd(C.File) << ":" << C.Line << ":" << C.Column
+         << ": skipped rename '" << C.OldName << "' -> '" << C.NewName
+         << "': " << C.Reason << "\n";
+  }
+  OS << Seen.size() << " rename(s) skipped to avoid a name collision"
+     << (Verbose ? "" : " (pass --report-rename-conflicts for the sites)")
+     << "\n";
+}
+
+// ---------------------------------------------------------------------------
 // runRenameRuleOnAST (public)
 // ---------------------------------------------------------------------------
 
@@ -844,12 +941,13 @@ void runRenameRuleOnAST(ASTContext& Ctx, Rewriter& RW,
                         const VariableRenameCallback& CB, VariableScope Scope,
                         const FileSet& CollectFrom, LintReport* Report,
                         llvm::StringRef RuleId, DependentResolutions* DepRes,
-                        EditReport* Edits) {
+                        EditReport* Edits, RenameConflicts* Conflicts) {
   SourceManager& SM = Ctx.getSourceManager();
   Decl* TU = Ctx.getTranslationUnitDecl();
 
   RenameMap Renames;
-  CollectRenamesVisitor Collector(SM, CB, Scope, Renames, CollectFrom);
+  CollectRenamesVisitor Collector(SM, CB, Scope, Renames, CollectFrom,
+                                  Conflicts);
   Collector.TraverseDecl(TU);
 
   // Template-dependent member tokens (e.g. `x.val` where x is a template
@@ -902,7 +1000,7 @@ RenameActionFactory::RenameActionFactory(VariableRenameCallback CB,
 auto RenameActionFactory::create() -> std::unique_ptr<clang::FrontendAction> {
   return std::make_unique<RenameVariablesAction>(
       CB, Scope, Mode, CollectFrom, &Pending, Report, RuleId, &DepRes,
-      Mode == OutputMode::Emit ? &Edits : nullptr);
+      Mode == OutputMode::Emit ? &Edits : nullptr, &Conflicts);
 }
 
 void RenameActionFactory::emitEdits(llvm::raw_ostream& OS) {

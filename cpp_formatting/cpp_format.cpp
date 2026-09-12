@@ -119,6 +119,13 @@ static cl::opt<std::string> OwnedFilesOpt(
              "time but must rewrite uses of a dependency's declarations."),
     cl::init(""), cl::cat(CppFormatCategory));
 
+static cl::opt<bool> ReportRenameConflictsOpt(
+    "report-rename-conflicts",
+    cl::desc("List every rename that was skipped because its new name was "
+             "already taken in the same scope. A one-line count is printed "
+             "either way."),
+    cl::init(false), cl::cat(CppFormatCategory));
+
 // ---------------------------------------------------------------------------
 // Helpers shared across passes
 // ---------------------------------------------------------------------------
@@ -373,6 +380,11 @@ auto main(int argc, const char** argv) -> int {
                                  std::move(Files));
   if (Lint) Factory.setLintReport(&Report);
   if (int rc = Tool.run(&Factory)) return rc;
+
+  // Renames whose new name was already taken are skipped rather than applied:
+  // renaming into an occupied name does not compile, or silently rebinds uses.
+  reportRenameConflicts(Factory.conflicts(), ReportRenameConflictsOpt,
+                        llvm::errs());
 
   if (Emit) {
     std::error_code EC;

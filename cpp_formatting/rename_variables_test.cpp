@@ -748,3 +748,85 @@ TEST(RenameMemberFunctions, StaticCoroutineMethod) {
   EXPECT_EQ(rewriteMethod(code.c_str(), renameOne("makeTask", "create")),
             expected);
 }
+
+// ---------------------------------------------------------------------------
+// Collision handling: a rename whose new name is already taken in the same
+// scope is skipped entirely -- declaration and uses -- rather than applied.
+// ---------------------------------------------------------------------------
+
+TEST(RenameCollisions, MemberClashingWithMethodIsSkipped) {
+  // googletest's RE has both `pattern_` and `pattern()`; renaming the member to
+  // `pattern` would redeclare the method's name in the same class.
+  const char* code =
+      "struct RE {\n"
+      "  const char* pattern() const { return pattern_; }\n"
+      "  const char* pattern_;\n"
+      "};\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("pattern_", "pattern")), code);
+}
+
+TEST(RenameCollisions, MemberClashingWithMemberIsSkipped) {
+  const char* code =
+      "struct S {\n"
+      "  int count;\n"
+      "  int countCache;\n"
+      "};\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("countCache", "count")), code);
+}
+
+TEST(RenameCollisions, TwoMembersRenamingToTheSameNameKeepsOne) {
+  // First one through claims the name; the second is left alone, so the result
+  // still compiles.
+  const char* code =
+      "struct S {\n"
+      "  int fooBar;\n"
+      "  int foo_bar_;\n"
+      "};\n";
+  auto cb = [](llvm::StringRef name, std::string& newName) {
+    if (name == "fooBar" || name == "foo_bar_") {
+      newName = "foo_bar";
+      return true;
+    }
+    return false;
+  };
+  EXPECT_EQ(rewriteMember(code, cb),
+            "struct S {\n"
+            "  int foo_bar;\n"
+            "  int foo_bar_;\n"
+            "};\n");
+}
+
+TEST(RenameCollisions, ShadowingAnInheritedNameIsAllowed) {
+  // Not a collision: a derived member may legally shadow a base member, so the
+  // guard must not over-reach and skip it.
+  EXPECT_EQ(rewriteMember("struct B {\n"
+                          "  int value;\n"
+                          "};\n"
+                          "struct D : B {\n"
+                          "  int valueCache;\n"
+                          "};\n",
+                          renameOne("valueCache", "value")),
+            "struct B {\n"
+            "  int value;\n"
+            "};\n"
+            "struct D : B {\n"
+            "  int value;\n"
+            "};\n");
+}
+
+TEST(RenameCollisions, UnrelatedScopesDoNotCollide) {
+  // Same name in a different class is not a clash.
+  EXPECT_EQ(rewriteMember("struct A {\n"
+                          "  int value;\n"
+                          "};\n"
+                          "struct B {\n"
+                          "  int valueCache;\n"
+                          "};\n",
+                          renameOne("valueCache", "value")),
+            "struct A {\n"
+            "  int value;\n"
+            "};\n"
+            "struct B {\n"
+            "  int value;\n"
+            "};\n");
+}

@@ -129,6 +129,26 @@ enum class VariableScope {
 ///   int rc = Tool.run(F.get());
 ///   F->flush();   // write all changed files to disk atomically
 ///   return rc;
+/// A rename that was *not* applied because the new name is already taken in
+/// the same scope.  Renaming anyway would either be a redeclaration error or,
+/// worse, silently rebind existing uses to a different entity -- so the
+/// declaration and all its uses are left alone and the site is reported.
+struct RenameConflict {
+  std::string File;
+  unsigned Line = 0;
+  unsigned Column = 0;
+  std::string OldName;
+  std::string NewName;
+  std::string Reason;  ///< what the new name would have clashed with
+};
+using RenameConflicts = std::vector<RenameConflict>;
+
+/// Reports renames that were skipped to avoid a collision.  Always prints a
+/// one-line summary; with \p Verbose also prints every site.  Duplicates (the
+/// same declaration seen from several translation units) are collapsed.
+void reportRenameConflicts(const RenameConflicts& Conflicts, bool Verbose,
+                           llvm::raw_ostream& OS);
+
 class RenameActionFactory : public clang::tooling::FrontendActionFactory {
  public:
   RenameActionFactory(VariableRenameCallback CB, VariableScope Scope,
@@ -157,13 +177,18 @@ class RenameActionFactory : public clang::tooling::FrontendActionFactory {
   /// after ClangTool::run() completes.
   void emitEdits(llvm::raw_ostream& OS);
 
+  /// Renames that were skipped because the new name was already taken in the
+  /// same scope.  Empty unless such a clash was found.
+  auto conflicts() const -> const RenameConflicts& { return Conflicts; }
+
  private:
   VariableRenameCallback CB;
   VariableScope Scope;
   OutputMode Mode;
   FileSet CollectFrom;
   PendingRewrites Pending;
-  EditReport Edits;  // populated in Emit mode
+  EditReport Edits;           // populated in Emit mode
+  RenameConflicts Conflicts;  // renames skipped because the name was taken
   // Template-dependent member tokens resolved across TUs; persists for the
   // whole ClangTool::run() so a header TU can consume resolutions recorded by
   // earlier .cpp TUs.  See DependentResolutions above.
@@ -195,7 +220,8 @@ void runRenameRuleOnAST(clang::ASTContext& Ctx, clang::Rewriter& RW,
                         LintReport* Report = nullptr,
                         llvm::StringRef RuleId = "",
                         DependentResolutions* DepRes = nullptr,
-                        EditReport* Edits = nullptr);
+                        EditReport* Edits = nullptr,
+                        RenameConflicts* Conflicts = nullptr);
 
 // ---------------------------------------------------------------------------
 // Convenience factories

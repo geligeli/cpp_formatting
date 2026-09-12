@@ -369,6 +369,25 @@ bazel run //cpp_formatting:cpp_format -- \
 
 ---
 
+### Name collisions
+
+A rename whose new name is already taken in the same scope is **skipped** —
+the declaration and all of its uses are left alone — rather than applied.
+Renaming into an occupied name does not compile, or silently rebinds uses to
+the other entity. Shadowing an inherited or outer-scope name is legal C++ and
+is still allowed, and two functions may share a name (an overload set) unless
+their signatures match.
+
+A one-line count of skipped renames is printed to stderr; pass
+`--report-rename-conflicts` to list every site:
+
+```
+src/re.h:3:15: skipped rename 'pattern_' -> 'pattern': existing CXXMethod 'pattern'
+1 rename(s) skipped to avoid a name collision
+```
+
+---
+
 ## Lint mode (CI/CD)
 
 All three binaries support a lint mode that reports what *would* change without modifying any files:

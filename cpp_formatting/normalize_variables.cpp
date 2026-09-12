@@ -52,6 +52,13 @@ static cl::opt<std::string> FormatOpt(
              "A non-default value implies --lint."),
     cl::init("text"), cl::cat(NormalizeVarsCategory));
 
+static cl::opt<bool> ReportRenameConflictsOpt(
+    "report-rename-conflicts",
+    cl::desc("List every rename that was skipped because its new name was "
+             "already taken in the same scope. A one-line count is printed "
+             "either way."),
+    cl::init(false), cl::cat(NormalizeVarsCategory));
+
 static cl::opt<std::string> EmitEditsOpt(
     "emit-edits",
     cl::desc("Emit structured edit records (+ a template-dependent-token "
@@ -220,6 +227,8 @@ auto main(int argc, const char** argv) -> int {
                                         ScopeOpt.getValue() + "/" +
                                         StyleOpt.getValue());
   int rc = Tool.run(factory.get());
+  reportRenameConflicts(factory->conflicts(), ReportRenameConflictsOpt,
+                        llvm::errs());
   if (Emit) {
     if (rc != 0) return rc;
     std::error_code EC;

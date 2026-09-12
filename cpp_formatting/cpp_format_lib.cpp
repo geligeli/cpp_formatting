@@ -25,7 +25,7 @@ class CppFormatConsumer : public ASTConsumer {
                     bool TrailingReturnTypes, const std::string& TrailingRuleId,
                     const FileSet& CollectFrom, LintReport* Report,
                     std::vector<DependentResolutions>* DepResPerRule,
-                    EditReport* Edits)
+                    EditReport* Edits, RenameConflicts* Conflicts)
       : RW(RW),
         Rules(Rules),
         TrailingReturnTypes(TrailingReturnTypes),
@@ -33,13 +33,15 @@ class CppFormatConsumer : public ASTConsumer {
         CollectFrom(CollectFrom),
         Report(Report),
         DepResPerRule(DepResPerRule),
-        Edits(Edits) {}
+        Edits(Edits),
+        Conflicts(Conflicts) {}
 
   void HandleTranslationUnit(ASTContext& Ctx) override {
     for (size_t I = 0; I < Rules.size(); ++I)
       runRenameRuleOnAST(Ctx, RW, Rules[I].CB, Rules[I].Scope, CollectFrom,
                          Report, Rules[I].RuleId,
-                         DepResPerRule ? &(*DepResPerRule)[I] : nullptr, Edits);
+                         DepResPerRule ? &(*DepResPerRule)[I] : nullptr, Edits,
+                         Conflicts);
 
     if (TrailingReturnTypes) {
       // MatchFinder::matchAST runs the matchers on the already-parsed AST —
@@ -63,6 +65,7 @@ class CppFormatConsumer : public ASTConsumer {
   LintReport* Report;  // null outside Lint mode
   std::vector<DependentResolutions>* DepResPerRule;
   EditReport* Edits;  // non-null in Emit mode
+  RenameConflicts* Conflicts;
 };
 
 // ---------------------------------------------------------------------------
@@ -81,7 +84,7 @@ class CppFormatAction : public ASTFrontendAction {
                   OutputMode Mode, const FileSet& CollectFrom,
                   PendingRewrites* Pending, LintReport* Report,
                   std::vector<DependentResolutions>* DepResPerRule,
-                  EditReport* Edits)
+                  EditReport* Edits, RenameConflicts* Conflicts)
       : Rules(Rules),
         TrailingReturnTypes(TrailingReturnTypes),
         TrailingRuleId(TrailingRuleId),
@@ -90,7 +93,8 @@ class CppFormatAction : public ASTFrontendAction {
         Pending(Pending),
         Report(Report),
         DepResPerRule(DepResPerRule),
-        Edits(Edits) {}
+        Edits(Edits),
+        Conflicts(Conflicts) {}
 
   void EndSourceFileAction() override {
     SourceManager& SM = TheRewriter.getSourceMgr();
@@ -118,7 +122,7 @@ class CppFormatAction : public ASTFrontendAction {
     TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
     return std::make_unique<CppFormatConsumer>(
         TheRewriter, Rules, TrailingReturnTypes, TrailingRuleId, CollectFrom,
-        Report, DepResPerRule, Edits);
+        Report, DepResPerRule, Edits, Conflicts);
   }
 
  private:
@@ -131,6 +135,7 @@ class CppFormatAction : public ASTFrontendAction {
   LintReport* Report;
   std::vector<DependentResolutions>* DepResPerRule;
   EditReport* Edits;
+  RenameConflicts* Conflicts;
   Rewriter TheRewriter;
 };
 
@@ -156,7 +161,8 @@ auto CppFormatActionFactory::create()
     -> std::unique_ptr<clang::FrontendAction> {
   return std::make_unique<CppFormatAction>(
       Rules, TrailingReturnTypes, TrailingRuleId, Mode, CollectFrom, &Pending,
-      Report, &DepResPerRule, Mode == OutputMode::Emit ? &Edits : nullptr);
+      Report, &DepResPerRule, Mode == OutputMode::Emit ? &Edits : nullptr,
+      &Conflicts);
 }
 
 void CppFormatActionFactory::emitEdits(llvm::raw_ostream& OS) {

@@ -58,6 +58,10 @@ class CppFormatActionFactory : public clang::tooling::FrontendActionFactory {
   /// as JSON to \p OS.  Call after ClangTool::run() completes.
   void emitEdits(llvm::raw_ostream& OS);
 
+  /// Renames skipped because the new name was already taken in the same
+  /// scope.  Empty unless such a clash was found.
+  auto conflicts() const -> const RenameConflicts& { return Conflicts; }
+
  private:
   std::vector<NormalizeRule> Rules;
   bool TrailingReturnTypes;
@@ -66,6 +70,7 @@ class CppFormatActionFactory : public clang::tooling::FrontendActionFactory {
   FileSet CollectFrom;
   PendingRewrites Pending;
   EditReport Edits;  // populated in Emit mode (all rules + trailing-return)
+  RenameConflicts Conflicts;  // renames skipped because the name was taken
   // One cross-TU dependent-token resolution map per rule (see
   // DependentResolutions).  Persists for the whole ClangTool::run() so a header
   // TU can consume resolutions recorded by earlier .cpp TUs.  Kept per-rule so
