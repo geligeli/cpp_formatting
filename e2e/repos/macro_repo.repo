@@ -1,0 +1,7 @@
+# A deterministic, seconds-long reproduction of the macro limitation: a member
+# referenced only from inside a macro body. Gives that documented caveat a fast
+# regression test, rather than relying on finding it inside abseil.
+REPO_KIND=local
+REPO_PATH=e2e/testdata/macro_repo
+TARGET_PATTERN='//...'
+RUN_TESTS=0

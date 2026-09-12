@@ -1,0 +1,4 @@
+# Renames member functions, including whole virtual override families.
+normalize_variables:
+  - scope: method
+    style: snake_case

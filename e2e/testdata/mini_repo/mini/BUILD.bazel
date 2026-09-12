@@ -1,0 +1,41 @@
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+
+# Three targets in a dependency chain, so a rename of a `shapes` member has to
+# reach use sites in `geometry`, `demo` and `shapes_test` -- the cross-target
+# path that --owned-files exists for.
+# shapes.h is listed in BOTH srcs and hdrs -- which is what googletest's globs
+# do in practice -- so the aspect's source-list deduplication is exercised on
+# every run. (Duplicate parsing of a header on its own yields *identical*
+# records, which merge cleanly; googletest is what exposes the case where the
+# two passes disagree.)
+cc_library(
+    name = "shapes",
+    srcs = [
+        "shapes.cpp",
+        "shapes.h",
+    ],
+    hdrs = ["shapes.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "geometry",
+    srcs = ["geometry.cpp"],
+    hdrs = ["geometry.h"],
+    visibility = ["//visibility:public"],
+    deps = [":shapes"],
+)
+
+cc_binary(
+    name = "demo",
+    srcs = ["demo.cpp"],
+    deps = [":geometry"],
+)
+
+cc_test(
+    name = "shapes_test",
+    srcs = ["shapes_test.cpp"],
+    deps = [":geometry"],
+)

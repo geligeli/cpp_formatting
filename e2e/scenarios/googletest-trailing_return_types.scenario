@@ -1,0 +1,3 @@
+REPO=googletest
+RULESET=trailing_return_types
+EXPECT=pass

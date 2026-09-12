@@ -1,0 +1,3 @@
+# The safest transformation: purely syntactic, touches no names, and is a
+# fixpoint by construction (the matcher excludes hasTrailingReturn()).
+trailing_return_types: true

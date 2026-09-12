@@ -3,3 +3,5 @@ compile_commands.json
 **/.nfs*
 .bazelrc.local
 .claude/settings.local.json
+.e2e/
+

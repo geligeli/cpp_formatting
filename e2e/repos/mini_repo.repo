@@ -1,0 +1,7 @@
+# A tiny checked-in fixture: three cc_* targets in a dependency chain plus a
+# test. Runs the identical harness code path as the big repos in about a
+# minute, with no network, so it doubles as the harness's own test.
+REPO_KIND=local
+REPO_PATH=e2e/testdata/mini_repo
+TARGET_PATTERN='//...'
+RUN_TESTS=1

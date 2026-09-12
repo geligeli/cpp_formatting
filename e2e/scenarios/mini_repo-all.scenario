@@ -1,0 +1,5 @@
+# The harness's own test: both passes over a fixture built to exercise
+# cross-target renames and a template-dependent token.
+REPO=mini_repo
+RULESET=all
+EXPECT=pass

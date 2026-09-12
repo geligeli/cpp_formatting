@@ -147,6 +147,42 @@ All three binaries link the Clang built-in headers (`stddef.h`, `__stddef_max_al
   3. `--aggregate --apply` rewrites the files on disk; re-emitting against the fixed sources and re-checking exits 0.
   4. `--owned-files` (the cross-target rename path): a second fixture emitted the way the aspect does it — one invocation per "target" — asserts that a dependent parsing only its own source emits nothing for a dep's member, emits the use-site edit once the dep's header is passed as owned, and still emits no edits for the dep's own files.
 
+### End-to-end corpus tests ([e2e/](e2e/))
+
+Not part of `bazel test //...`, and **not a Bazel target** — `e2e/run_e2e.sh`
+drives `bazel` inside a *second* workspace, which a Bazel action cannot do
+(nesting a server inside a running one deadlocks on the workspace lock, the same
+constraint that keeps `bazel/integration/cpp_format.sh` a plain script). CI runs
+it nightly / on dispatch via [.github/workflows/e2e.yml](.github/workflows/e2e.yml).
+
+Each scenario pairs a pinned repo ([e2e/repos/](e2e/repos/)) with a ruleset
+([e2e/rulesets/](e2e/rulesets/)) and runs twelve phases: build the unmodified
+repo, run the transform over all of it, build it again. The load-bearing
+assertions are `rebuild` (still compiles — a missed reference surfaces here),
+`check` (edits > 0, so a vacuous ruleset cannot pass), `applied` (the files that
+changed on disk are exactly those reported — `flush()` writes with
+`std::ofstream` and never checks the failbit, so an unwritable file is otherwise
+skipped with exit 0), and `converge` (the transform is a fixpoint).
+
+**The target repo must be the root module of its own Bazel invocation** — the
+aspect emits nothing for `workspace_name != ""`, so a repo pulled in as a
+`bazel_dep` can never be formatted. The harness therefore materializes the repo
+into a work dir, vendors `bazel/integration/` into it as
+`third_party/cpp_format/`, and injects the locally built binary through the
+kit's own `release()` tag class with a `file://` base URL. The staged `version`
+string encodes the binary's sha256 — repo attrs are the refetch key, so a stable
+version would silently test a stale binary.
+
+Scenarios declare their expected outcome; an unexpected **pass** fails as XPASS,
+so a fixed limitation gets reported rather than absorbed.
+`macro_repo-member_snake_case` is a deterministic, seconds-long reproduction of
+the macro limitation (a member referenced only from inside a macro body).
+
+Each scenario gets its **own** Bazel disk cache: edit records hold absolute
+paths, and the devcontainer sets a machine-wide `--disk_cache`, so two
+workspaces sharing one can restore each other's records. [.bazelignore](.bazelignore)
+keeps `e2e/testdata` (self-contained workspaces) and `.e2e` out of `//...`.
+
 ### Build files
 
 - [cpp_formatting/BUILD](cpp_formatting/BUILD) — Defines all `cc_library`, `cc_binary`, `cc_test`, and `sh_test` targets, plus the `clang_include_headers` `pkg_tar` and the `clang_include_headers_embed_cc` `genrule` that embeds the headers into every binary.

@@ -1,0 +1,2 @@
+# Root package. The harness appends the ruleset export here when it wires the
+# repo up, since the aspect reads the config as the root module's config.

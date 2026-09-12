@@ -1,0 +1,11 @@
+# The stress test: large, extremely macro-heavy, and a user of textual_hdrs --
+# both of which the tool has documented limits around. Has no root BUILD file,
+# so the harness creates one for the ruleset export.
+#
+# //absl/... is the whole library including its tests; narrow it (e.g.
+# //absl/strings/...) for a faster signal while iterating.
+REPO_KIND=git
+REPO_URL=https://github.com/abseil/abseil-cpp.git
+REPO_REV=2065f4ded0558c6f89fee67c8e5228feb4eb960e   # LTS 20260817.0
+TARGET_PATTERN='//absl/...'
+RUN_TESTS=0

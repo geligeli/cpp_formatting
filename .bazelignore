@@ -1,0 +1,8 @@
+# The e2e corpus fixtures are self-contained Bazel workspaces (each has its own
+# MODULE.bazel) that the harness copies out and builds on its own. They must not
+# be swept into this repo's //... .
+e2e/testdata
+
+# Where the harness materializes target repos when E2E_WORK_DIR points inside
+# the workspace, as CI sets it.
+.e2e

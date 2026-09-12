@@ -1,0 +1,99 @@
+# End-to-end corpus tests: build a real Bazel C++ repo, run a cpp_format
+# transformation over all of it, and build it again.
+#
+# Deliberately separate from ci.yml: a from-source LLVM build plus two builds of
+# abseil is far outside a per-PR budget. This runs nightly and on demand.
+name: E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: "Scenario name, or 'all'"
+        default: all
+      tool:
+        description: "source | release:<tag>"
+        default: source
+  schedule:
+    - cron: "0 5 * * *"
+
+concurrency:
+  group: e2e
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep in sync with e2e/scenarios/*.scenario. Add an entry only once
+        # the scenario has been run locally and its EXPECT value recorded.
+        scenario:
+          - mini_repo-all
+          - macro_repo-member_snake_case
+          - googletest-trailing_return_types
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # A from-source LLVM plus two abseil output bases does not fit in the
+      # stock ~14 GB of free space on a hosted runner.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+
+      # Restore the LLVM/cpp_format objects ci.yml already built: same key
+      # prefix, so the nightly inherits a warm cache rather than rebuilding
+      # Clang from scratch.
+      - name: Cache Bazel disk cache
+        uses: actions/cache@v4
+        with:
+          path: .disk_cache
+          key: bazel-disk-cache-e2e-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            bazel-disk-cache-e2e-${{ runner.os }}-
+            bazel-disk-cache-ci-${{ runner.os }}-
+
+      - name: Cache Bazel repository cache
+        uses: actions/cache@v4
+        with:
+          path: .bazel_cache
+          key: bazel-repo-cache-e2e-${{ runner.os }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            bazel-repo-cache-e2e-${{ runner.os }}-
+            bazel-repo-cache-ci-${{ runner.os }}-
+
+      - name: Run scenario
+        uses: devcontainers/ci@v0.3
+        with:
+          runCmd: |
+            export E2E_WORK_DIR=/workspace/.e2e
+            export E2E_TOOL_BAZEL_FLAGS="--disk_cache=/workspace/.disk_cache --repository_cache=/workspace/.bazel_cache"
+            scenario='${{ github.event.inputs.scenario || 'all' }}'
+            # On a dispatch naming one scenario, the other matrix entries no-op.
+            if [ "$scenario" != all ] && [ "$scenario" != "${{ matrix.scenario }}" ]; then
+              echo "skipping ${{ matrix.scenario }} (dispatch selected $scenario)"
+              exit 0
+            fi
+            # Default (fastbuild) tool build on purpose: it reuses the disk
+            # cache ci.yml already populated, where an -c opt build would have
+            # to compile LLVM from scratch. Pass --tool-config=opt if the
+            # aspect phase, rather than the tool build, is the bottleneck.
+            e2e/run_e2e.sh --tool='${{ github.event.inputs.tool || 'source' }}' \
+                           "${{ matrix.scenario }}"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-${{ matrix.scenario }}
+          path: .e2e/artifacts/**
+          if-no-files-found: warn
+          retention-days: 14

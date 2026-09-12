@@ -564,6 +564,32 @@ Clang builtin headers from `@llvm-project` (see
 bazel test //...
 ```
 
+### End-to-end corpus tests
+
+`bazel test //...` covers the tool against unit tests and small fixtures. The
+corpus tests cover the question those cannot answer: **does a whole-repo
+transform leave a real codebase compiling?** Each scenario builds a pinned
+open-source Bazel repo, runs a ruleset over all of it, and builds it again — a
+missed reference shows up as a compile error, exactly as it would for a user.
+
+```sh
+e2e/run_e2e.sh --list                     # what is in the corpus
+e2e/run_e2e.sh mini_repo-all              # the fast local fixture (~10s)
+e2e/run_e2e.sh                            # everything (googletest, abseil, ...)
+```
+
+This is **not** a Bazel target and cannot be one: it drives `bazel` inside a
+second workspace, and nesting a Bazel server inside a running one deadlocks —
+the same reason [bazel/integration/cpp_format.sh](bazel/integration/cpp_format.sh)
+is a plain script. CI runs it nightly and on demand from
+[.github/workflows/e2e.yml](.github/workflows/e2e.yml), never on the per-PR path.
+
+Scenarios that are *expected* to fail declare so (`EXPECT=known_fail` plus the
+phase and the reason), and a scenario that unexpectedly passes fails as an
+XPASS — so a limitation that gets fixed is reported rather than silently
+absorbed. See [e2e/README.md](e2e/README.md) for the phase list, how to add a
+repo or ruleset, and how to triage a failure.
+
 ---
 
 ## Project structure

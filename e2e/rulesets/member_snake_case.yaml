@@ -1,0 +1,6 @@
+# Renames data members. This is the transformation with real cross-file and
+# cross-target reach -- and the one exposed to the macro limitation, since
+# renameAt() skips any reference whose location is a macro expansion.
+normalize_variables:
+  - scope: member
+    style: snake_case

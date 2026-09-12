@@ -1,0 +1,6 @@
+# Moderate size, bzlmod-native, has a root BUILD.bazel already.
+REPO_KIND=git
+REPO_URL=https://github.com/google/googletest.git
+REPO_REV=52eb8108c5bdec04579160ae17225d66034bd723   # v1.17.0
+TARGET_PATTERN='//...'
+RUN_TESTS=0

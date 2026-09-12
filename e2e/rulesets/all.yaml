@@ -1,0 +1,7 @@
+# Both passes in one run, which additionally exercises their overlap: a member
+# renamed inside a decltype(...) return type that trailing_return_types also
+# rewrites.
+normalize_variables:
+  - scope: member
+    style: snake_case
+trailing_return_types: true
