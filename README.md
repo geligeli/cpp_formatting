@@ -108,7 +108,12 @@ enough.
 > referenced by the kit. Prefer to keep everything local? Copy
 > [bazel/integration/](bazel/integration/) into your repo instead of the
 > `archive_override`, load it as `//third_party/cpp_format:…`, and drop the
-> `CPP_FORMAT_ASPECT` export (the vendored default matches). To build the tool
+> `CPP_FORMAT_ASPECT` export (the vendored default matches). Vendoring also
+> needs `bazel_dep(name = "rules_cc", …)` in your `MODULE.bazel` **even if you
+> already get it transitively**: the copied `.bzl` now lives in your root
+> module, so its `load("@rules_cc//…")` resolves through *your* repo mapping.
+> (Importing by URL does not need this — there it resolves through
+> cpp_formatting's own deps.) To build the tool
 > from source rather than download it, set `CPP_FORMAT_BIN_LABEL` /
 > `CPP_FORMAT_ASPECT` (see the top of `cpp_format.sh`) to the in-repo
 > [bazel/cpp_format.bzl](bazel/cpp_format.bzl) aspect and `//cpp_formatting:cpp_format`.
