@@ -16,5 +16,25 @@
         }
     },
     "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
-    "workspaceFolder": "/workspace"
+    "workspaceFolder": "/workspace",
+    "remoteUser": "ubuntu",
+
+    // Bazel caches.  The two bind mounts are the host's shared caches (override
+    // the host paths with BAZEL_DISK_CACHE / BAZEL_REPO_CACHE); /etc/bazel.bazelrc
+    // in the image points --disk_cache / --repository_cache at them.  The named
+    // volume keeps Bazel's output base (and its ~320 MB install base) across
+    // container rebuilds, so a rebuild does not re-analyse from scratch.
+    "mounts": [
+        "source=${localEnv:BAZEL_DISK_CACHE:/large_nfs/bazel-cache/disk},target=/bazel-cache/disk,type=bind",
+        "source=${localEnv:BAZEL_REPO_CACHE:/large_nfs/bazel-cache/repo},target=/bazel-cache/repo,type=bind",
+        "source=cpp-formatting-bazel-output,target=/home/ubuntu/.cache/bazel,type=volume"
+    ],
+
+    // Docker creates a missing bind source as root, and a named volume can come
+    // back root-owned too; claim the mount points (never recursively -- the disk
+    // cache is large and lives on NFS) so the container user can write them.
+    // /home/ubuntu/.cache is in the list because mounting the volume *inside* it
+    // recreates the parent as root, which otherwise breaks every other tool that
+    // wants a ~/.cache subdirectory of its own (pre-commit, pip, ...).
+    "postCreateCommand": "for d in /bazel-cache/disk /bazel-cache/repo /home/ubuntu/.cache /home/ubuntu/.cache/bazel; do [ -w \"$d\" ] || sudo chown \"$(id -u):$(id -g)\" \"$d\"; done"
 }

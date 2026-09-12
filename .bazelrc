@@ -1,3 +1,19 @@
+# Bazel caches
+#
+# The devcontainer bind-mounts the host's shared caches at /bazel-cache/disk and
+# /bazel-cache/repo (see .devcontainer/devcontainer.json) and points
+# --disk_cache / --repository_cache at them from /etc/bazel.bazelrc inside the
+# image.  Those paths are deliberately *not* set here: this file is also read by
+# native Linux/macOS/Windows builds, where /bazel-cache does not exist and Bazel
+# would fail trying to create it.  Command-line flags (CI passes its own
+# --disk_cache=/--repository_cache=) override the container defaults.
+#
+# To point Bazel at a cache of your own, put the flags in .bazelrc.local
+# (gitignored, imported at the bottom of this file):
+#
+#   build --disk_cache=/path/to/disk
+#   common --repository_cache=/path/to/repo
+
 build --spawn_strategy=local
 
 # Pick up build:linux / build:macos / build:windows sections below based on
@@ -48,3 +64,7 @@ build:minify --platform_suffix=-minify
 # (e.g. `bazel build --config=lint //bazel/testdata:demo`) for inspection/CI.
 build:lint --aspects=//bazel:cpp_format.bzl%cpp_format_aspect
 build:lint --output_groups=+cpp_format_edits
+
+# Personal, machine-local overrides.  Last import wins, so anything in here
+# takes precedence over the settings above.
+try-import %workspace%/.bazelrc.local
