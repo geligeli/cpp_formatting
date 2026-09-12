@@ -1,6 +1,7 @@
 #include "cpp_formatting/trailing_return_types_lib.h"
 
 #include <algorithm>
+#include <optional>
 #include <string>
 
 #include "clang/AST/RecursiveASTVisitor.h"
@@ -311,6 +312,42 @@ void TrailingReturnCallback::runToTrailing(const FunctionDecl& Func,
   // already refuses these; this is the same rule for the forward one.
   if (ReturnRange.getBegin().isMacroID() || ReturnRange.getEnd().isMacroID())
     return;
+
+  // Whatever follows the cv/ref/noexcept qualifiers has to be something the
+  // trailing return type may legitimately precede.  An attribute-specifier-seq
+  // there is part of `parameters-and-qualifiers`, so `-> T` belongs *after* it
+  // ([dcl.fct]) -- but FunctionTypeLoc::getLocalRangeEnd() stops at the last
+  // qualifier, so inserting at that point puts the arrow on the wrong side.
+  // abseil's `pointer data() noexcept ABSL_ATTRIBUTE_LIFETIME_BOUND` came out
+  // as `auto data() noexcept -> pointer ABSL_ATTRIBUTE_LIFETIME_BOUND`, which
+  // Clang rejects; gcc accepts it, so it survives a rebuild and only surfaces
+  // on the next parse.  The attribute is usually a macro, so rather than work
+  // out where it ends, refuse the declaration.
+  {
+    const LangOptions& LO = Func.getASTContext().getLangOpts();
+    std::optional<Token> Next =
+        Lexer::findNextToken(FTL.getLocalRangeEnd(), SM, LO);
+    if (!Next) return;
+    switch (Next->getKind()) {
+      case tok::l_brace:  // definition
+      case tok::semi:     // declaration
+      case tok::equal:    // = 0 / = default / = delete
+      case tok::arrow:  // already trailing (excluded earlier, belt and braces)
+      case tok::comma:  // another declarator
+      case tok::r_paren:
+        break;
+      case tok::identifier: {
+        // `override` and `final` come after the declarator, so the arrow still
+        // precedes them; anything else here is an attribute macro.
+        const IdentifierInfo* II = Next->getIdentifierInfo();
+        if (!II || (II->getName() != "override" && II->getName() != "final"))
+          return;
+        break;
+      }
+      default:
+        return;  // `[[...]]`, `requires`, or anything else unexpected
+    }
+  }
 
   // Pointer/reference TypeLocs (e.g. LValueReferenceTypeLoc for `T &`) only
   // report their sigil as their local begin; the base type lives in the next

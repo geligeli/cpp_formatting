@@ -7,6 +7,10 @@ on:
 jobs:
   build:
     strategy:
+      # One platform failing should not hide the state of the others: the
+      # publish job still needs every asset, but a red matrix is far easier to
+      # diagnose when each cell reports its own result.
+      fail-fast: false
       matrix:
         include:
           - runs-on: ubuntu-latest

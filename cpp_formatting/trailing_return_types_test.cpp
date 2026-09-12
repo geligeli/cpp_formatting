@@ -776,3 +776,22 @@ TEST(TrailingReturnTypes, MacroElsewhereStillRewritten) {
             "#define ZERO 0\n"
             "auto value(int n) -> int { return n + ZERO; }\n");
 }
+
+TEST(TrailingReturnTypes, TrailingAttributeNotRewritten) {
+  // abseil's `pointer data() noexcept ABSL_ATTRIBUTE_LIFETIME_BOUND;`. The
+  // attribute is part of parameters-and-qualifiers, so `-> pointer` would have
+  // to follow it; inserting at the qualifier end puts it on the wrong side.
+  const char* code =
+      "#define LB [[clang::lifetimebound]]\n"
+      "struct S {\n"
+      "  int* data() noexcept LB;\n"
+      "};\n";
+  EXPECT_EQ(rewrite(code), code);
+}
+
+TEST(TrailingReturnTypes, LeadingAttributeStillRewritten) {
+  // An attribute *before* the declaration is unaffected by where the arrow
+  // goes, so it must still be rewritten.
+  EXPECT_EQ(rewrite("[[nodiscard]] int value();\n"),
+            "[[nodiscard]] auto value() -> int;\n");
+}
