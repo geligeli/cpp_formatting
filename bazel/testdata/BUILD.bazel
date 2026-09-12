@@ -1,5 +1,13 @@
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("//bazel/integration:cpp_format.bzl", "cpp_format_targets")
+
+# Uses the in-repo, built-from-source rules (not the prebuilt-binary kit under
+# bazel/integration/), so this demo — and the `//bazel/testdata:format.check`
+# gate that CI runs — always exercises the tool exactly as it is in this tree.
+# The kit tracks a pinned published binary, which necessarily lags in-tree
+# aspect changes (e.g. --owned-files); re-point at the kit once a release that
+# carries the current flag set is published.
+load("//bazel:cpp_format.bzl", "cpp_format_targets")
 
 # A small first-party cc_library used to exercise the cpp_format Bazel
 # integration end to end: a member the `member -> snake_case` rule renames
@@ -12,9 +20,22 @@ cc_library(
     includes = ["."],
 )
 
+# A dependent target that only *uses* Widget::item_count.  Exercises the
+# cross-target path: the aspect runs one action per target, so this action must
+# be told (via --owned-files) that the dep's headers are renameable, or the use
+# site here would be left behind when the member is renamed.
+cc_binary(
+    name = "demo_main",
+    srcs = ["demo_main.cpp"],
+    deps = [":demo"],
+)
+
 # Generates :format.check (test / lint gate), :format.diff and :format.fix
-# (bazel run) over //bazel/testdata:demo.
+# (bazel run) over the demo targets.
 cpp_format_targets(
     name = "format",
-    deps = [":demo"],
+    deps = [
+        ":demo",
+        ":demo_main",
+    ],
 )

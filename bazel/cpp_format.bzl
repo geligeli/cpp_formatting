@@ -23,20 +23,37 @@ load("@rules_cc//cc:action_names.bzl", "CPP_COMPILE_ACTION_NAME")
 load("@rules_cc//cc:find_cc_toolchain.bzl", "find_cc_toolchain", "use_cc_toolchain")
 
 CppFormatEditsInfo = provider(
-    doc = "Transitive set of per-target cpp_format edit-record JSON files.",
-    fields = {"records": "depset of .cpp_format.json files"},
+    doc = "Transitive cpp_format state: per-target edit-record JSON files, and " +
+          "the first-party headers the dep closure owns (see `_owned_headers`).",
+    fields = {
+        "records": "depset of .cpp_format.json files",
+        "headers": "depset of first-party header source files in the dep closure",
+    },
 )
 
-_SRC_EXTS = ["cc", "cpp", "cxx", "c++", "h", "hh", "hpp", "hxx", "h++", "inc", "ipp"]
+_HDR_EXTS = ["h", "hh", "hpp", "hxx", "h++", "inc", "ipp"]
+_SRC_EXTS = ["cc", "cpp", "cxx", "c++"] + _HDR_EXTS
 
-def _own_sources(ctx):
+def _own_files(ctx, exts):
     out = []
     for attr in ("srcs", "hdrs"):
         for t in getattr(ctx.rule.attr, attr, []):
             for f in t.files.to_list():
-                if f.is_source and f.extension in _SRC_EXTS:
+                if f.is_source and f.extension in exts:
                     out.append(f)
     return out
+
+def _own_sources(ctx):
+    return _own_files(ctx, _SRC_EXTS)
+
+# Headers this target owns, propagated to dependents as `--owned-files`.  A
+# target's action parses only its own sources, so without this a declaration in
+# a dependency's header is invisible to the file set and its *uses* in this
+# target go unrenamed while the declaration itself is renamed by the dep's own
+# action — a half-applied rename that breaks the build.  Only headers are
+# propagated: a dep's .cpp is never reachable from this TU.
+def _owned_headers(ctx):
+    return _own_files(ctx, _HDR_EXTS)
 
 def _resource_dir(builtin_headers):
     # The staged Clang builtin headers live under ".../staging/include"; the
@@ -72,19 +89,31 @@ def _compile_flags(ctx, cc_toolchain, cc_ctx):
     )
 
 def _aspect_impl(target, ctx):
-    transitive = [
-        d[CppFormatEditsInfo].records
+    dep_infos = [
+        d[CppFormatEditsInfo]
         for d in getattr(ctx.rule.attr, "deps", [])
         if CppFormatEditsInfo in d
     ]
+    transitive = [i.records for i in dep_infos]
+    dep_headers = depset(transitive = [i.headers for i in dep_infos])
 
     # First-party cc_* targets only. The aspect still propagates into external
-    # deps (e.g. @llvm-project) but produces nothing there.
-    if ctx.label.workspace_name != "" or CcInfo not in target:
-        return [CppFormatEditsInfo(records = depset(transitive = transitive))]
+    # deps (e.g. @llvm-project) but produces nothing there.  A `no-cpp-format`
+    # target contributes no owned headers either: its declarations are never
+    # renamed, so a dependent must not rename their uses.
+    if ("no-cpp-format" in getattr(ctx.rule.attr, "tags", []) or
+        ctx.label.workspace_name != "" or CcInfo not in target):
+        return [CppFormatEditsInfo(
+            records = depset(transitive = transitive),
+            headers = dep_headers,
+        )]
     srcs = _own_sources(ctx)
+    mine_headers = depset(direct = _owned_headers(ctx), transitive = [dep_headers])
     if not srcs:
-        return [CppFormatEditsInfo(records = depset(transitive = transitive))]
+        return [CppFormatEditsInfo(
+            records = depset(transitive = transitive),
+            headers = mine_headers,
+        )]
 
     cc_toolchain = find_cc_toolchain(ctx)
     cc_ctx = target[CcInfo].compilation_context
@@ -97,18 +126,30 @@ def _aspect_impl(target, ctx):
     args.add("--config", ctx.file._config)
     args.add("--emit-edits", records)
     args.add_all(srcs)
-    args.add("--")
+
+    # The dep closure's headers are renameable here even though they are not
+    # parsed as TUs, so uses of their declarations get rewritten in this
+    # target's sources.  Written to a param file: the closure can be large
+    # enough to blow the command-line limit.  Must precede the `--` below, or it
+    # would be handed to the parser as a compile flag.
+    owned = ctx.actions.args()
+    owned.add_all(dep_headers)
+    owned.use_param_file("--owned-files=%s", use_always = True)
+    owned.set_param_file_format("multiline")
+
     # Force C++ so headers (.h) parse as C++ rather than C, and carry the
     # derived compile command.  cpp_format itself drops -fno-canonical-system-headers.
-    args.add("-x")
-    args.add("c++")
-    args.add_all(flags)
+    compile_args = ctx.actions.args()
+    compile_args.add("--")
+    compile_args.add("-x")
+    compile_args.add("c++")
+    compile_args.add_all(flags)
     if res_dir:
-        args.add("-resource-dir=" + res_dir)
+        compile_args.add("-resource-dir=" + res_dir)
 
     ctx.actions.run(
         executable = ctx.executable._cpp_format,
-        arguments = [args],
+        arguments = [args, owned, compile_args],
         inputs = depset(
             direct = srcs + [ctx.file._config] + builtin,
             transitive = [cc_ctx.headers, cc_toolchain.all_files],
@@ -119,7 +160,7 @@ def _aspect_impl(target, ctx):
     )
     mine = depset(direct = [records], transitive = transitive)
     return [
-        CppFormatEditsInfo(records = mine),
+        CppFormatEditsInfo(records = mine, headers = mine_headers),
         OutputGroupInfo(cpp_format_edits = mine),
     ]
 

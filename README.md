@@ -506,6 +506,17 @@ flags from `CcInfo.compilation_context` + the toolchain
 action inputs — that declaration is what makes headers reachable under
 sandboxing. Each action is parallel and cached; first-party targets only.
 
+**Renaming across targets.** An action parses only its own target's sources, but
+a rename must reach *every* use of a declaration — including uses in targets
+that merely depend on the header declaring it. So the aspect also passes the dep
+closure's first-party headers as `--owned-files`: those files are renameable but
+are **not** parsed as extra translation units, so each file is still rewritten by
+exactly one action (the target that lists it) while its uses are rewritten
+wherever they appear. Without this a `cc_binary`'s use of a `cc_library` member
+would be left behind when the member is renamed, breaking the build. Headers of
+a `no-cpp-format` target are excluded, so an unformatted target's declarations
+are never renamed at their use sites either.
+
 **Records, not diffs.** Each emit action writes offset-level **edit records**
 (`{file, offset, length, old, new}`) plus a template-dependent-token resolution
 sidecar — never a rendered diff, which cannot be merged because hunk offsets

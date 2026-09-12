@@ -102,4 +102,73 @@ grep -q 'w.item_count = 3;' widget.cpp || fail "apply: use not renamed on disk"
   || fail "check: clean tree should exit 0"
 echo "PASS: cpp_format --aggregate --apply rewrites files; re-check is clean"
 
+# ---------------------------------------------------------------------------
+# Test 4 — --owned-files: a dependent target renames uses of a dep's declaration
+#
+# Mirrors how the Bazel aspect works: one emit action per target, each parsing
+# only its own sources.  main.cpp uses a member declared in the library's
+# header, so its action must be told that header is renameable — otherwise the
+# member gets renamed in the library and the use site here is left behind.
+# ---------------------------------------------------------------------------
+mkdir -p "$tmpdir/xtarget"
+cd "$tmpdir/xtarget"
+cp ../cpp_format.yaml .
+
+cat > lib.h <<'EOF'
+#ifndef LIB_H_
+#define LIB_H_
+struct Gadget {
+  int partCount;
+};
+#endif
+EOF
+cat > lib.cpp <<'EOF'
+#include "lib.h"
+int lib_use() {
+  Gadget g;
+  g.partCount = 1;
+  return g.partCount;
+}
+EOF
+cat > main.cpp <<'EOF'
+#include "lib.h"
+int main() {
+  Gadget g;
+  g.partCount = 2;
+  return g.partCount;
+}
+EOF
+
+# The library's action: owns both its own files.
+"$cpp_format" --config=cpp_format.yaml --emit-edits=lib.json \
+  lib.cpp lib.h -- -x c++ -std=c++17 -I.
+
+# The dependent's action *without* the dep's headers: nothing to rename here,
+# which is exactly the half-applied rename this flag exists to prevent.
+"$cpp_format" --config=cpp_format.yaml --emit-edits=main_unowned.json \
+  main.cpp -- -x c++ -std=c++17 -I.
+if grep -q 'partCount' main_unowned.json; then
+  fail "owned-files: expected no edits without the dep's headers"
+fi
+
+# The dependent's action *with* them, as the aspect passes them.
+realpath lib.h > owned.txt
+"$cpp_format" --config=cpp_format.yaml --owned-files=owned.txt \
+  --emit-edits=main.json main.cpp -- -x c++ -std=c++17 -I.
+grep -q 'partCount' main.json \
+  || fail "owned-files: dep member use not renamed in the dependent's records"
+
+# The dependent must not re-emit edits for the dep's own files: each TU rewrites
+# only its main file, so the merged result has no duplicate/conflicting edits.
+if grep -q 'lib\.h' main.json; then
+  fail "owned-files: dependent re-emitted edits for the dep's header"
+fi
+
+"$cpp_format" --aggregate --apply --root="$tmpdir/xtarget" lib.json main.json
+grep -q 'int part_count;' lib.h || fail "owned-files: decl not renamed on disk"
+grep -q 'g.part_count = 1;' lib.cpp || fail "owned-files: dep use not renamed on disk"
+grep -q 'g.part_count = 2;' main.cpp \
+  || fail "owned-files: dependent use not renamed on disk"
+echo "PASS: --owned-files renames uses of a dependency's declarations"
+
 echo "All aggregate integration tests passed."

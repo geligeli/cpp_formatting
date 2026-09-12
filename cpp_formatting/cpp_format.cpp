@@ -109,6 +109,16 @@ static cl::opt<std::string> EmitEditsOpt(
              "aggregation. Modifies no source files."),
     cl::init(""), cl::cat(CppFormatCategory));
 
+static cl::opt<std::string> OwnedFilesOpt(
+    "owned-files",
+    cl::desc("File holding newline-separated paths that this invocation owns "
+             "in addition to the source paths. The listed files are not parsed "
+             "as translation units; they only extend the file set, so a "
+             "declaration in a dependency's header is renamed at its use sites "
+             "here. Used by the Bazel aspect, which formats one target at a "
+             "time but must rewrite uses of a dependency's declarations."),
+    cl::init(""), cl::cat(CppFormatCategory));
+
 // ---------------------------------------------------------------------------
 // Helpers shared across passes
 // ---------------------------------------------------------------------------
@@ -157,16 +167,39 @@ auto runAggregate(int argc, const char** argv) -> int {
   return runEditAggregation(Inputs, Root, Apply, Check);
 }
 
+void insertRealPath(FileSet& FS, const std::string& P) {
+  SmallString<256> Real;
+  if (!sys::fs::real_path(P, Real))
+    FS.insert(Real.str().str());
+  else
+    FS.insert(P);
+}
+
 FileSet buildFileSet(const std::vector<std::string>& SourcePaths) {
   FileSet FS;
-  for (const auto& P : SourcePaths) {
-    SmallString<256> Real;
-    if (!sys::fs::real_path(P, Real))
-      FS.insert(Real.str().str());
-    else
-      FS.insert(P);
-  }
+  for (const auto& P : SourcePaths) insertRealPath(FS, P);
   return FS;
+}
+
+// Adds every non-blank line of \p ListFile to \p FS.  Returns false (after
+// printing a diagnostic) when the file cannot be read.  A path that does not
+// resolve is kept verbatim, which simply never matches a real file — the same
+// benign outcome as listing a file this TU does not include.
+bool addOwnedFilesFrom(StringRef ListFile, FileSet& FS) {
+  auto BufOrErr = MemoryBuffer::getFile(ListFile);
+  if (!BufOrErr) {
+    llvm::errs() << "Cannot open owned-files list '" << ListFile
+                 << "': " << BufOrErr.getError().message() << "\n";
+    return false;
+  }
+  SmallVector<StringRef, 64> Lines;
+  (*BufOrErr)->getBuffer().split(Lines, '\n', /*MaxSplit=*/-1,
+                                 /*KeepEmpty=*/false);
+  for (StringRef Line : Lines) {
+    StringRef P = Line.trim();
+    if (!P.empty()) insertRealPath(FS, P.str());
+  }
+  return true;
 }
 
 void applyArgumentAdjusters(ClangTool& Tool, const std::string& ResourceDir) {
@@ -322,13 +355,22 @@ auto main(int argc, const char** argv) -> int {
          "normalize_variables/" + rule.scope + "/" + rule.style});
   }
 
+  // The file set decides which declarations may be renamed; the source list
+  // decides which files are parsed as translation units.  --owned-files widens
+  // the former without widening the latter, so a use of a dependency's
+  // declaration is rewritten here while the declaration itself is rewritten by
+  // whichever invocation actually owns (and parses) that file.
+  FileSet Files = buildFileSet(SourcePaths);
+  if (!OwnedFilesOpt.empty() && !addOwnedFilesFrom(OwnedFilesOpt, Files))
+    return 1;
+
   ClangTool Tool(OptionsParser.getCompilations(),
                  orderSourcesForRename(SourcePaths));
   applyArgumentAdjusters(Tool, ResourceDir);
 
   CppFormatActionFactory Factory(std::move(Rules), cfg.trailing_return_types,
                                  "trailing_return_types", mode,
-                                 buildFileSet(SourcePaths));
+                                 std::move(Files));
   if (Lint) Factory.setLintReport(&Report);
   if (int rc = Tool.run(&Factory)) return rc;
 
