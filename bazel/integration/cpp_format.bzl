@@ -35,7 +35,15 @@ CppFormatEditsInfo = provider(
     },
 )
 
-_HDR_EXTS = ["h", "hh", "hpp", "hxx", "h++", "inc", "ipp"]
+# .inc / .ipp are deliberately absent. They are textual fragments -- #include'd
+# into the middle of another file -- so they do not parse as translation units
+# of their own: abseil's spinlock_posix.inc references declarations from its
+# includer, and spinlock_win32.inc includes <windows.h>. Passing them as sources
+# fails the whole emit action. They are not propagated as owned headers either:
+# a file the tool never rewrites must not have its declarations renamed at use
+# sites, which would half-apply the rename. The cost is that declarations
+# living in a textual fragment are not formatted.
+_HDR_EXTS = ["h", "hh", "hpp", "hxx", "h++"]
 _SRC_EXTS = ["cc", "cpp", "cxx", "c++"] + _HDR_EXTS
 
 def _own_files(ctx, exts):

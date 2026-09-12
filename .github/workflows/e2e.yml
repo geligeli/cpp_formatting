@@ -34,6 +34,7 @@ jobs:
           - mini_repo-all
           - macro_repo-member_snake_case
           - googletest-trailing_return_types
+          - googletest-member_snake_case
 
     steps:
       - uses: actions/checkout@v4

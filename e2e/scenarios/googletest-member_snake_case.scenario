@@ -1,0 +1,5 @@
+REPO=googletest
+RULESET=member_snake_case
+EXPECT=known_fail
+EXPECT_FAIL_PHASE=rebuild
+EXPECT_FAIL_REASON="Two independent causes. (1) Macro sites: renameAt() (rename_variables_lib.cpp:376) returns early on isMacroID(), so uses like GTEST_CHECK_POSIX_SUCCESS_(pthread_join(thread_, ...)) keep the old name while the declaration is renamed. (2) Name collisions: the rename has no collision check, so RE::pattern_ becomes `pattern`, which clashes with the existing RE::pattern() method in the same class."
