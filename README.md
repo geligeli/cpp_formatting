@@ -122,7 +122,7 @@ enough.
 
 | Tool | Description |
 |---|---|
-| `trailing_return_types` | Converts functions from leading to trailing return type syntax |
+| `trailing_return_types` | Converts functions from leading to trailing return type syntax (or back, with `return_types: leading`) |
 | `normalize_variables` | Renames variables to a consistent naming convention |
 | `cpp_format` | Combined tool — runs any combination of the above, driven by a YAML config |
 
@@ -199,6 +199,44 @@ The `--` separates the tool's own flags from the Clang compilation flags. At min
 | `auto foo() { return 42; }` | no | deduced `auto` — rewriting would be redundant |
 | `decltype(auto) foo()` | no | same deduced-auto check |
 | `operator bool()` (conversion) | no | `cxxConversionDecl()` excluded by matcher |
+
+### The reverse direction (`--reverse`)
+
+`--reverse` moves trailing return types back to leading position:
+
+```sh
+bazel run //cpp_formatting:trailing_return_types -- --reverse -i path/to/file.cpp -- -std=c++17
+```
+
+```cpp
+// Before
+auto add(int a, int b) -> int { return a + b; }
+
+// After
+int add(int a, int b) { return a + b; }
+```
+
+It is deliberately much more selective than the forward direction: a trailing
+return type can say things that leading position cannot express, so anything
+that would not mean the same thing after the move is left alone rather than
+rewritten. A declaration the tool skips keeps compiling exactly as it did.
+
+| Input | Rewritten? | Notes |
+|---|---|---|
+| `auto foo() -> int` | yes | |
+| `auto foo() const noexcept -> int` | yes | qualifiers stay where they are |
+| `static constexpr auto foo() -> int` | yes | the placeholder is replaced in place, so specifiers keep their order |
+| `auto Foo::bar() -> std::string` | yes | a name written qualified resolves the same from either position |
+| `auto f(T a) -> decltype(a.size())` | no | parameters are not in scope before the declarator-id |
+| `auto make() -> int (*)(bool)` | no | leading position needs a restructured declarator (`int (*make())(bool)`), not the same text moved |
+| `auto get() -> int (&)[4]` | no | same |
+| `auto Foo::bar() -> Inner` | no | `Inner` is found in class scope only *after* the declarator-id |
+| `auto foo() -> auto` / `-> decltype(auto)` | no | a placeholder has no type to move |
+| `[]() -> int {}` | no | a lambda has no declarator-id to put a return type on |
+| `auto foo() -> INT_T` (macro) | no | the rewrite never edits through a macro expansion |
+
+Both directions are fixpoints, so either is safe to run repeatedly, and both
+are available through `cpp_format` as `return_types: trailing` / `leading`.
 
 ### Tests
 
@@ -311,8 +349,11 @@ Create a YAML file describing which passes to run:
 ```yaml
 # cpp_format.yaml
 
-# Rewrite functions to trailing return type syntax.
-trailing_return_types: true
+# Return type style: `trailing` rewrites `int f()` to `auto f() -> int`,
+# `leading` rewrites it back.  The two cannot be combined.
+# `trailing_return_types: true` is the older spelling of `return_types: trailing`
+# and still works.
+return_types: trailing
 
 # Rename variables — multiple rules are applied in order.
 # Supported scopes: member, local, global,
@@ -358,14 +399,15 @@ bazel run //cpp_formatting:cpp_format -- \
 | Flag | Description |
 |---|---|
 | `--config=<file>` | YAML configuration file (takes precedence over per-pass flags) |
-| `--trailing-return-types` | Enable the trailing-return-type pass |
+| `--trailing-return-types` | Enable the trailing-return-type pass (same as `--return-types=trailing`) |
+| `--return-types=<style>` | Return type style: `trailing` or `leading`. Cannot be combined with `--trailing-return-types`. |
 | `--normalize-variables-scope=<scope>` | One of `member`, `local`, `global`, `static_member`, `const_member`, `static_global`, `const_global`, `method` |
 | `--normalize-variables-style=<style>` | Target naming style |
 | `--in-place` / `-i` | Overwrite files on disk (default: dry-run) |
 | `--lint` | Analyze only — report violations, modify nothing, exit 1 if any are found |
 | `--format=<fmt>` | Output format for `--lint`: `text` (default), `sarif`, or `diff` |
 
-**Pass ordering:** `normalize_variables` rules are applied first (in the order listed in the config), then `trailing_return_types`. For in-place mode each pass reads the output of the previous one from disk.
+**Pass ordering:** `normalize_variables` rules are applied first (in the order listed in the config), then the `return_types` pass. For in-place mode each pass reads the output of the previous one from disk.
 
 ---
 

@@ -16,6 +16,13 @@ static cl::opt<bool> InPlace("in-place",
 static cl::alias InPlaceAlias("i", cl::desc("Alias for -in-place"),
                               cl::aliasopt(InPlace));
 
+static cl::opt<bool> Reverse(
+    "reverse",
+    cl::desc("Rewrite the other way: move trailing return types back to "
+             "leading ones (`auto f() -> int` becomes `int f()`).  Many "
+             "declarations cannot move and are left alone."),
+    cl::cat(TrailingReturnTypesCategory));
+
 static cl::opt<bool> LintOpt(
     "lint",
     cl::desc("Analyze only: report violations without modifying any files. "
@@ -85,14 +92,17 @@ auto main(int argc, const char** argv) -> int {
   const OutputMode Mode =
       Lint ? OutputMode::Lint
            : (InPlace ? OutputMode::InPlace : OutputMode::DryRun);
-  TrailingReturnActionFactory Factory(Mode);
+  const ReturnTypeStyle Style =
+      Reverse ? ReturnTypeStyle::Leading : ReturnTypeStyle::Trailing;
+  const char* RuleId =
+      Reverse ? "leading_return_types" : "trailing_return_types";
+  TrailingReturnActionFactory Factory(Mode, Style);
   LintReport Report;
-  if (Lint) Factory.setLintReport(&Report, "trailing_return_types");
+  if (Lint) Factory.setLintReport(&Report, RuleId);
   int rc = Tool.run(&Factory);
   if (Lint) {
     if (rc != 0) return rc;
-    return emitLintResults(Report, Factory.rewrites(), FormatOpt,
-                           "trailing_return_types");
+    return emitLintResults(Report, Factory.rewrites(), FormatOpt, RuleId);
   }
   return rc;
 }

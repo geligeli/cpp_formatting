@@ -10,6 +10,8 @@
 #   3. In-place on two files in one invocation — both files are modified.
 #   4. In-place on a file with system #includes — validates that the binary
 #      auto-detects the Clang resource dir so built-in headers resolve.
+#   5. In-place --reverse — the other direction reaches disk through the same
+#      path, and running it over its own output changes nothing.
 
 set -euo pipefail
 
@@ -76,3 +78,36 @@ INPLACE3="$TMP/inplace_system_headers.cpp"
 cp "$INPUT3" "$INPLACE3"
 "$BINARY" -i "$INPLACE3" -- -std=c++17 >/dev/null 2>&1
 assert_equal "in-place file with system headers" "$INPLACE3" "$EXPECTED3"
+
+# ---------------------------------------------------------------------------
+# Test 5: in-place --reverse — the trailing form goes back to leading through
+# the same overwriteChangedFiles() path, and a second pass is a no-op.
+# ---------------------------------------------------------------------------
+REVERSE="$TMP/reverse.cpp"
+cp "$EXPECTED1" "$REVERSE"
+"$BINARY" --reverse -i "$REVERSE" -- -std=c++17 >/dev/null 2>&1
+
+# Everything in the fixture that can move is back in leading position; a
+# deduced `auto` has no trailing return type to move, so it stays as written.
+REVERSE_EXPECTED="$TMP/reverse_expected.cpp"
+cat > "$REVERSE_EXPECTED" <<'EOF'
+int add(int a, int b) { return a + b; }
+
+double scale(double x) { return x * 2.0; }
+
+const int* sentinel() {
+  static int val = -1;
+  return &val;
+}
+
+void reset(int& x) { x = 0; }
+
+bool alreadyTrailing() { return true; }
+
+auto deduced() { return 42; }
+EOF
+assert_equal "in-place --reverse" "$REVERSE" "$REVERSE_EXPECTED"
+
+cp "$REVERSE" "$TMP/reverse_again.cpp"
+"$BINARY" --reverse -i "$TMP/reverse_again.cpp" -- -std=c++17 >/dev/null 2>&1
+assert_equal "--reverse is a fixpoint" "$TMP/reverse_again.cpp" "$REVERSE_EXPECTED"

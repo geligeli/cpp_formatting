@@ -71,16 +71,17 @@ bazel run //cpp_formatting:cpp_format -- --config=cpp_format.yaml --format=sarif
 
 All source files live under [cpp_formatting/](cpp_formatting/).
 
-#### `trailing_return_types` — rewrite functions to trailing return syntax
+#### `trailing_return_types` — move return types between leading and trailing syntax
 
-- [cpp_formatting/trailing_return_types.cpp](cpp_formatting/trailing_return_types.cpp) — `main()`: CLI option parsing (including `--lint`/`--format`), drives `TrailingReturnActionFactory`.
+- [cpp_formatting/trailing_return_types.cpp](cpp_formatting/trailing_return_types.cpp) — `main()`: CLI option parsing (including `--reverse` and `--lint`/`--format`), drives `TrailingReturnActionFactory`.
 - [cpp_formatting/trailing_return_types_lib.h](cpp_formatting/trailing_return_types_lib.h) — Public API:
-  - `TrailingReturnCallback` — AST match callback that performs the rewrite (records lint diagnostics via `setLintReport()`)
-  - `registerTrailingReturnMatchers()` — single authoritative place for the matcher predicate
+  - `ReturnTypeStyle` — `Trailing` (`int f()` → `auto f() -> int`) | `Leading` (the reverse). One value rather than two booleans, so "both directions at once" is unrepresentable.
+  - `TrailingReturnCallback` — AST match callback that performs the rewrite in either direction (records lint diagnostics via `setLintReport()`, edit records via `setEmitReport()`)
+  - `registerTrailingReturnMatchers()` — single authoritative place for both matcher predicates
   - `TrailingReturnTypesAction` — frontend action (dry-run, in-place, or lint via `OutputMode`)
   - `TrailingReturnActionFactory` — factory for `ClangTool::run()`; buffers per-file rewrites and lint diagnostics
-  - `rewriteToTrailingReturnTypes()` — test helper that rewrites an in-memory string
-- [cpp_formatting/trailing_return_types_lib.cpp](cpp_formatting/trailing_return_types_lib.cpp) — Implementation plus the private `CaptureAction` used by the test helper.
+  - `rewriteToTrailingReturnTypes()` / `rewriteToLeadingReturnTypes()` — test helpers that rewrite an in-memory string
+- [cpp_formatting/trailing_return_types_lib.cpp](cpp_formatting/trailing_return_types_lib.cpp) — Implementation: `runToTrailing()` and `runToLeading()` behind one `run()`, the guard helpers the Leading direction needs (`isMovableTypeShape`, `rangeMentionsName`, `LookupEscapeChecker`), plus the private `CaptureAction` used by the test helpers.
 
 #### `normalize_variables` — rename variables and member functions to a consistent naming convention
 
@@ -100,7 +101,7 @@ All source files live under [cpp_formatting/](cpp_formatting/).
 #### `cpp_format` — combined tool with YAML config
 
 - [cpp_formatting/cpp_format.cpp](cpp_formatting/cpp_format.cpp) — `main()`: parses CLI options or a YAML config file, then runs every `normalize_variables` rule plus `trailing_return_types` in a **single** `ClangTool` pass via `CppFormatActionFactory` (each TU is parsed exactly once, regardless of how many rules are configured). Also hosts the `--emit-edits=<file>` mode (writes per-TU edit records for Bazel aggregation), the `--owned-files=<list>` mode (newline-separated paths added to the `FileSet` but *not* to the source list, so a dependency's declarations are renameable at their use sites here without being re-parsed — see the Bazel integration below), and the `--aggregate` mode (merges those records; dispatched before `CommonOptionsParser`, delegates to `lint_lib`'s `runEditAggregation`).
-- [cpp_formatting/cpp_format_lib.h](cpp_formatting/cpp_format_lib.h) — `NormalizeRule` (scope + rename callback + lint rule id) and `CppFormatActionFactory`: buffers rewritten content in `PendingRewrites` like `RenameActionFactory` and commits it via `flush()` after `ClangTool::run()`.
+- [cpp_formatting/cpp_format_lib.h](cpp_formatting/cpp_format_lib.h) — `NormalizeRule` (scope + rename callback + lint rule id) and `CppFormatActionFactory`: buffers rewritten content in `PendingRewrites` like `RenameActionFactory` and commits it via `flush()` after `ClangTool::run()`. The return-type pass is carried as a `std::optional<ReturnTypeStyle>` — `nullopt` skips it.
 - [cpp_formatting/cpp_format_lib.cpp](cpp_formatting/cpp_format_lib.cpp) — Implementation: per TU, `runRenameRuleOnAST()` (from `rename_variables_lib`) runs each rule's collect+apply visitors, then the trailing-return `MatchFinder` runs via `matchAST()` on the same AST, all sharing one `Rewriter`. Return-type text is extracted via `Rewriter::getRewrittenText()`, so a rename that landed inside a return type (e.g. a member in `decltype(count_)`) is carried into the moved `-> decltype(m_count)` text instead of being clobbered by the wholesale `auto` replacement.
 
 #### Lint support (CI/CD)
@@ -118,12 +119,13 @@ All three binaries link the Clang built-in headers (`stddef.h`, `__stddef_max_al
 
 ### Tests
 
-- [cpp_formatting/trailing_return_types_test.cpp](cpp_formatting/trailing_return_types_test.cpp) — gtest unit tests for `trailing_return_types_lib`, including a `TrailingReturnTypesDeducingThis` suite covering C++23 explicit object parameters (P0847, run with `-std=c++23`).
+- [cpp_formatting/trailing_return_types_test.cpp](cpp_formatting/trailing_return_types_test.cpp) — gtest unit tests for `trailing_return_types_lib`, including a `TrailingReturnTypesDeducingThis` suite covering C++23 explicit object parameters (P0847, run with `-std=c++23`) and a `LeadingReturnTypes` suite for the reverse direction (every guard gets a "left unchanged" case, plus a leading→trailing→leading round trip and a fixpoint check).
 - [cpp_formatting/integration_test.sh](cpp_formatting/integration_test.sh) — Shell integration tests for `trailing_return_types`:
   1. Dry-run on a single file — rewritten source goes to stdout.
   2. In-place on a single file — file is modified on disk.
   3. In-place on two files in one invocation — both files are modified.
   4. In-place on a file with system `#include`s — validates the embedded Clang resource directory works (no system Clang required).
+  5. In-place `--reverse` — the Leading direction reaches disk through the same `overwriteChangedFiles()` path, and a second pass over its own output changes nothing.
 - [cpp_formatting/naming_convention_test.cpp](cpp_formatting/naming_convention_test.cpp) — gtest unit tests for `naming_convention`: `splitIntoWords`, `formatName`, `renameToStyle`.
 - [cpp_formatting/rename_variables_test.cpp](cpp_formatting/rename_variables_test.cpp) — gtest unit tests for `rename_variables_lib` (member, local, global, static data members, const members, static globals, const globals, member functions, templates, template-dependent member tokens resolved through instantiations, cross-file, constructor initializers, C++23 explicit object parameters / "deducing this").
 - [cpp_formatting/normalize_variables_integration_test.sh](cpp_formatting/normalize_variables_integration_test.sh) — Shell integration tests for `normalize_variables`:
@@ -141,6 +143,7 @@ All three binaries link the Clang built-in headers (`stddef.h`, `__stddef_max_al
   4. Clean file — exit 0, no diagnostics.
   5. `trailing_return_types` lint — text and diff round-trip.
   6. `cpp_format` lint — multi-pass run aggregates both rule ids into one SARIF report.
+  7. `--reverse` lint — `leading_return_types` diagnostics, a diff that `git apply`s to the expected leading form, a second pass that reports nothing (fixpoint), the same direction through `cpp_format --return-types=leading`, and the error when both directions are requested at once.
 - [cpp_formatting/aggregate_integration_test.sh](cpp_formatting/aggregate_integration_test.sh) — Shell integration tests for the per-TU emit + aggregate pipeline (`cpp_format --emit-edits` then `cpp_format --aggregate`), on a two-file fixture whose header holds a template-dependent member token resolved from the instantiating `.cpp`:
   1. `--aggregate` diff is byte-identical to the standalone `aggregate_edits` binary and rewrites both the member decl and the cross-TU dependent token.
   2. `--aggregate --check` exits 1 with per-file edit counts.
@@ -178,6 +181,21 @@ so a fixed limitation gets reported rather than absorbed.
 `macro_repo-member_snake_case` is a deterministic, seconds-long reproduction of
 the macro limitation (a member referenced only from inside a macro body).
 
+**Two-pass scenarios (`RULESET_THEN`).** A scenario may name a second ruleset,
+which runs over the *output* of the first: `swap` commits pass 1 (so `applied`
+keeps measuring only what the current pass wrote) and drops the second ruleset
+in, then `check2 … converge2` reuse the same phase bodies. This is how the two
+return-type directions are tested against each other —
+`mini_repo-return_types_roundtrip` and `googletest-return_types_roundtrip` run
+trailing, rebuild, then leading, and rebuild again. The optional
+`EXPECT_ROUNDTRIP_IDENTICAL=1` adds a final `roundtrip` phase asserting the
+sources came back byte-identical to the pre-transform tree (diffed against the
+`e2e-wired` tag, excluding the ruleset itself). Only declare it where the
+second ruleset really does undo the first: the Leading direction's guards are
+strictly tighter than the Trailing ones, so on a large corpus some
+declarations are expected to stay in trailing form, and there `rebuild2` and
+`converge2` are the assertions that matter.
+
 Each scenario gets its **own** Bazel disk cache: edit records hold absolute
 paths, and the devcontainer sets a machine-wide `--disk_cache`, so two
 workspaces sharing one can restore each other's records. [.bazelignore](.bazelignore)
@@ -203,8 +221,11 @@ The BCR tops out at llvm-project 17.0.4, so to track a newer Clang (19.1.7, need
 ```yaml
 # All fields are optional; omit any section to skip that pass.
 
-# Rewrite functions to use trailing return type syntax.
-trailing_return_types: true
+# Return type style: `trailing` rewrites `int f()` to `auto f() -> int`;
+# `leading` rewrites it back.  `trailing_return_types: true` is the original
+# spelling of `return_types: trailing` and still works, but the two keys cannot
+# both be given.
+return_types: trailing
 
 # Rename variables in one or more scopes (applied in order).
 normalize_variables:
@@ -217,6 +238,8 @@ normalize_variables:
 ```
 
 Supported scopes: `member`, `local`, `global`, `static_member`, `const_member`, `static_global`, `const_global`, `method`.
+
+Supported return-type styles: `trailing`, `leading`.
 
 Supported styles: `snake_case`, `_leading`, `trailing_`, `m_prefix`, `camelCase`, `UpperCamelCase`, `UPPER_SNAKE_CASE`, `kConstant`.
 
@@ -264,6 +287,50 @@ A variant of the integration for external repos that want the lint/fix gate **wi
 | `int foo();` (declaration only) | yes | all declarations rewritten independently |
 | `int foo(); int foo() {...}` (both in same TU) | yes (both) | each declaration rewritten independently |
 | a template instantiated in the same TU | pattern only | an implicit instantiation carries the pattern's source locations, so matching it too would rewrite the same place twice (`unless(isTemplateInstantiation())`) |
+
+### `leading_return_types`: the reverse direction, and why it rejects more
+
+`ReturnTypeStyle::Leading` (`--reverse`, or `return_types: leading`) is the
+mirror rewrite, and the core of it is genuinely symmetric: for a
+trailing-return declarator the parser leaves both endpoints on the
+`FunctionTypeLoc` that `runToTrailing()` already uses — `getLocalRangeBegin()`
+is the `auto` placeholder and `getLocalRangeEnd()` is the `->`
+(`Parser::ParseFunctionDeclarator` sets `StartLoc` to the `TST_auto` decl-spec
+and `LocalEndLoc` to the arrow). Both are re-checked by spelling rather than
+trusted. Replacing the placeholder *in place* is what keeps `static` /
+`constexpr` / attributes in their original order for free.
+
+What is not symmetric is what may move. A trailing return type can say things
+leading position cannot express, so `runToLeading()` is mostly guards:
+
+| Input | Rewritten? | Reason |
+|---|---|---|
+| `auto foo() -> int` | yes | |
+| `auto foo() const noexcept -> int` | yes | the qualifiers sit before the arrow and never move |
+| `static constexpr auto foo() -> int` | yes | the placeholder is replaced in place |
+| `auto Foo::bar() -> std::string` | yes | a name written qualified resolves the same from either position |
+| `auto f(T a) -> decltype(a.size())` | no | parameters are not in scope before the declarator-id (`rangeMentionsName` on the parameter names — the dependent spellings carry no resolved `ParmVarDecl` to test against) |
+| `auto make() -> int (*)(bool)` | no | leading position needs a *restructured* declarator (`int (*make())(bool)`); `isMovableTypeShape` walks `getNextTypeLoc()` for a function/array component |
+| `auto get() -> int (&)[4]` | no | same |
+| `auto Foo::bar() -> Inner` | no | `Inner` is found in class scope only after the declarator-id (`LookupEscapeChecker`) |
+| `auto Foo::bar() -> ns::Vec<Inner>` | no | the *template argument* is unqualified even though the template name is not — `LookupEscapeChecker` traverses argument locs for exactly this |
+| `auto foo() -> auto` / `-> decltype(auto)` | no | a placeholder has no type to move (`isMovableTypeShape` again) |
+| `[]() -> int {}` | no | a lambda has no declarator-id to put a return type on. The Trailing direction never needed this guard: a lambda either has a trailing return (excluded by `unless(hasTrailingReturn())`) or a deduced one (excluded by its `AutoTypeLoc` check) |
+| `auto foo() -> INT_T` (macro) | no | the rewrite never edits through a macro expansion |
+
+`LookupEscapeChecker` only runs when `getLexicalDeclContext() !=
+getDeclContext()`. An in-class or in-namespace declaration is looked up in the
+same scope from either side of the declarator-id, so there is nothing to check
+— and running the check anyway would reject ordinary `using namespace` code.
+
+In `Emit` mode the direction mirrors the subsumption in `runToTrailing()`: a
+rename edit recorded *inside the trailing type* rode along in the text that
+moves to the placeholder (via `Rewriter::getRewrittenText()`), so those records
+are dropped before the two new ones are pushed. Forgetting that half is how
+the same offset ends up with conflicting edits after aggregation.
+
+Both directions are fixpoints, and each is a fixpoint on the other's output
+for everything it moved — see `mini_repo-return_types_roundtrip` below.
 
 ### `normalize_variables`: cross-file renaming
 

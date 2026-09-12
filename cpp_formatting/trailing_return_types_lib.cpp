@@ -3,11 +3,13 @@
 #include <algorithm>
 #include <string>
 
+#include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/ASTMatchers/ASTMatchers.h"
 #include "clang/Basic/FileEntry.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Lex/Lexer.h"
 #include "clang/Tooling/Tooling.h"
+#include "llvm/ADT/StringSet.h"
 
 using namespace clang;
 using namespace clang::ast_matchers;
@@ -82,12 +84,192 @@ static auto skipQualifiersBackward(SourceLocation Start, SourceManager& SM)
   return SM.getLocForStartOfFile(FID).getLocWithOffset(Pos);
 }
 
+/// Scan backwards from \p Start over whitespace only.  Deleting a trailing
+/// return type starts here so the space before the `->` goes with it, rather
+/// than leaving `auto foo() ` behind.
+static auto skipWhitespaceBackward(SourceLocation Start, SourceManager& SM)
+    -> SourceLocation {
+  bool Inv = false;
+  FileID FID = SM.getFileID(Start);
+  llvm::StringRef Buf = SM.getBufferData(FID, &Inv);
+  if (Inv) return Start;
+
+  unsigned Pos = SM.getFileOffset(Start);
+  const char* BP = Buf.data();
+  while (Pos > 0 && std::isspace(static_cast<unsigned char>(BP[Pos - 1])))
+    --Pos;
+  if (Pos == SM.getFileOffset(Start)) return Start;
+  return SM.getLocForStartOfFile(FID).getLocWithOffset(Pos);
+}
+
+/// True when the raw token spelled at \p Loc is \p Kind (and, for keywords,
+/// spells \p Text).  Raw lexing reports keywords as tok::raw_identifier, so
+/// `auto` is matched on its spelling.
+static auto rawTokenAtIs(SourceLocation Loc, tok::TokenKind Kind,
+                         llvm::StringRef Text, SourceManager& SM,
+                         const LangOptions& LangOpts) -> bool {
+  Token Tok;
+  if (Lexer::getRawToken(Loc, Tok, SM, LangOpts, /*IgnoreWhiteSpace=*/true))
+    return false;
+  if (Kind == tok::raw_identifier)
+    return Tok.is(tok::raw_identifier) && Tok.getRawIdentifier() == Text;
+  return Tok.is(Kind);
+}
+
+/// A written type can only be *moved* into leading position if it is a pure
+/// prefix declarator.  `auto f() -> int (*)()` in leading position is
+/// `int (*f())()` -- a restructured declarator, not the same text elsewhere --
+/// and a deduced placeholder (`-> auto`, `-> decltype(auto)`, `-> auto*`) has
+/// no type to move at all.  getNextTypeLoc() walks exactly the declarator
+/// components; template arguments are not part of that chain, so
+/// `-> std::function<int()>` stays eligible.
+static auto isMovableTypeShape(TypeLoc TL) -> bool {
+  for (TypeLoc Cur = TL; !Cur.isNull(); Cur = Cur.getNextTypeLoc()) {
+    switch (Cur.getTypeLocClass()) {
+      case TypeLoc::FunctionProto:
+      case TypeLoc::FunctionNoProto:
+      case TypeLoc::ConstantArray:
+      case TypeLoc::IncompleteArray:
+      case TypeLoc::VariableArray:
+      case TypeLoc::DependentSizedArray:
+      case TypeLoc::Auto:
+      case TypeLoc::DeducedTemplateSpecialization:
+        return false;
+      default:
+        break;
+    }
+  }
+  return true;
+}
+
+/// True when any identifier token in \p R spells one of \p Names.  Used for the
+/// parameter check: the dependent spellings of a parameter reference
+/// (DependentScopeDeclRefExpr and friends) carry no resolved ParmVarDecl to
+/// test against, so the token text is what there is to go on.  Errs towards
+/// "yes" whenever the range cannot be lexed.
+static auto rangeMentionsName(SourceRange R, const llvm::StringSet<>& Names,
+                              SourceManager& SM, const LangOptions& LangOpts)
+    -> bool {
+  SourceLocation Begin = R.getBegin();
+  SourceLocation End = Lexer::getLocForEndOfToken(R.getEnd(), 0, SM, LangOpts);
+  if (Begin.isInvalid() || End.isInvalid()) return true;
+  FileID FID = SM.getFileID(Begin);
+  if (FID != SM.getFileID(End)) return true;
+  unsigned BeginOff = SM.getFileOffset(Begin);
+  unsigned EndOff = SM.getFileOffset(End);
+  if (EndOff <= BeginOff) return true;
+
+  bool Inv = false;
+  llvm::StringRef Buf = SM.getBufferData(FID, &Inv);
+  if (Inv || EndOff > Buf.size()) return true;
+
+  // The raw lexer requires its end pointer to be the buffer's NUL terminator,
+  // so it runs to the end of the file and the range is enforced by offset.
+  Lexer Lex(SM.getLocForStartOfFile(FID), LangOpts, Buf.begin(),
+            Buf.begin() + BeginOff, Buf.end());
+  Token Tok;
+  while (true) {
+    bool AtEnd = Lex.LexFromRawLexer(Tok);
+    if (Tok.getLocation().isInvalid()) break;
+    if (SM.getFileOffset(Tok.getLocation()) >= EndOff) break;
+    if (Tok.is(tok::raw_identifier) && Names.contains(Tok.getRawIdentifier()))
+      return true;
+    if (AtEnd || Tok.is(tok::eof)) break;
+  }
+  return false;
+}
+
+/// The declaration a written type names, or null when the type names nothing
+/// that is looked up by scope (builtins, pointers, template parameters -- a
+/// template parameter is introduced by the parameter list, which precedes the
+/// declarator either way).
+static auto namedDeclForTypeLoc(TypeLoc TL) -> const NamedDecl* {
+  QualType T = TL.getType();
+  if (const auto* TT = T->getAs<TypedefType>()) return TT->getDecl();
+  if (const auto* TST = T->getAs<TemplateSpecializationType>())
+    return TST->getTemplateName().getAsTemplateDecl();
+  if (const TagDecl* TD = T->getAsTagDecl()) return TD;
+  return nullptr;
+}
+
+/// True when \p Outer is \p Inner or encloses it.
+static auto declContextEncloses(const DeclContext* Outer,
+                                const DeclContext* Inner) -> bool {
+  if (!Outer || !Inner) return false;
+  const DeclContext* O = Outer->getPrimaryContext();
+  for (const DeclContext* C = Inner; C; C = C->getParent())
+    if (C->getPrimaryContext() == O) return true;
+  return false;
+}
+
+namespace {
+
+/// Decides whether moving an out-of-line declaration's trailing return type
+/// into leading position would change what its names resolve to.
+///
+/// Unqualified names in a trailing return type are looked up in the *semantic*
+/// scope -- the class or namespace the declarator-id names -- because the
+/// trailing type is written after it.  In leading position they are looked up
+/// in the *lexical* scope the declaration sits in.  For `auto C::f() -> Inner`
+/// those differ and the moved text stops compiling, so any name that is not
+/// reachable from the lexical context vetoes the rewrite.
+class LookupEscapeChecker : public RecursiveASTVisitor<LookupEscapeChecker> {
+ public:
+  explicit LookupEscapeChecker(const DeclContext* LexicalDC)
+      : LexicalDC(LexicalDC) {}
+
+  /// A name written with a qualifier (`std::string`) resolves the same from
+  /// either position, so only its template arguments still need checking --
+  /// `std::vector<Inner>` is qualified but `Inner` inside it is not.
+  auto TraverseElaboratedTypeLoc(ElaboratedTypeLoc TL) -> bool {
+    if (!TL.getQualifierLoc())
+      return RecursiveASTVisitor::TraverseElaboratedTypeLoc(TL);
+    if (auto TSTL = TL.getNamedTypeLoc().getAs<TemplateSpecializationTypeLoc>())
+      for (unsigned I = 0, E = TSTL.getNumArgs(); I != E; ++I)
+        if (!TraverseTemplateArgumentLoc(TSTL.getArgLoc(I))) return false;
+    return true;
+  }
+
+  auto VisitTypeLoc(TypeLoc TL) -> bool {
+    switch (TL.getTypeLocClass()) {
+      case TypeLoc::Decltype:
+      case TypeLoc::TypeOf:
+      case TypeLoc::TypeOfExpr:
+        // The expression inside is resolved in the semantic scope as well
+        // (`-> decltype(member_)`).  Analysing it is not worth it for how
+        // rarely it appears on an out-of-line definition.
+        Escaped = true;
+        return false;
+      default:
+        break;
+    }
+    if (const NamedDecl* ND = namedDeclForTypeLoc(TL)) {
+      const DeclContext* DC = ND->getDeclContext();
+      if (DC && (DC->isRecord() || DC->isNamespace()) &&
+          !declContextEncloses(DC, LexicalDC)) {
+        Escaped = true;
+        return false;
+      }
+    }
+    return true;
+  }
+
+  auto escaped() const -> bool { return Escaped; }
+
+ private:
+  const DeclContext* LexicalDC;
+  bool Escaped = false;
+};
+
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // TrailingReturnCallback implementation
 // ---------------------------------------------------------------------------
 
-TrailingReturnCallback::TrailingReturnCallback(Rewriter& Rewrite)
-    : Rewrite(Rewrite) {}
+TrailingReturnCallback::TrailingReturnCallback(Rewriter& Rewrite,
+                                               ReturnTypeStyle Style)
+    : Rewrite(Rewrite), Style(Style) {}
 
 void TrailingReturnCallback::run(const MatchFinder::MatchResult& Result) {
   const FunctionDecl* Func = Result.Nodes.getNodeAs<FunctionDecl>("func");
@@ -103,6 +285,15 @@ void TrailingReturnCallback::run(const MatchFinder::MatchResult& Result) {
   FunctionTypeLoc FTL = TL.getAsAdjusted<FunctionTypeLoc>();
   if (!FTL) return;
 
+  if (Style == ReturnTypeStyle::Trailing)
+    runToTrailing(*Func, SM, FTL);
+  else
+    runToLeading(*Func, SM, FTL);
+}
+
+void TrailingReturnCallback::runToTrailing(const FunctionDecl& Func,
+                                           SourceManager& SM,
+                                           FunctionTypeLoc FTL) {
   TypeLoc ReturnLoc = FTL.getReturnLoc();
   SourceRange ReturnRange = ReturnLoc.getSourceRange();
 
@@ -125,7 +316,7 @@ void TrailingReturnCallback::run(const MatchFinder::MatchResult& Result) {
   // source range spans the whole declarator, name and parameters included.
   // Hoisting it would duplicate the whole declarator after the `->`.  Only
   // rewrite when the return type is written entirely before the name.
-  if (!SM.isBeforeInTranslationUnit(ReturnRange.getEnd(), Func->getLocation()))
+  if (!SM.isBeforeInTranslationUnit(ReturnRange.getEnd(), Func.getLocation()))
     return;
 
   // Extract the return-type text, accounting for edits already applied to
@@ -135,7 +326,7 @@ void TrailingReturnCallback::run(const MatchFinder::MatchResult& Result) {
   // moved after `->` stays consistent — the wholesale replace below would
   // otherwise silently clobber the nested edit.  With no prior edits this
   // returns the exact original source text, as before.
-  const LangOptions& LangOpts = Func->getASTContext().getLangOpts();
+  const LangOptions& LangOpts = Func.getASTContext().getLangOpts();
   std::string OriginalTypeStr =
       Rewrite.getRewrittenText(CharSourceRange::getTokenRange(FullReturnRange));
 
@@ -203,10 +394,151 @@ void TrailingReturnCallback::run(const MatchFinder::MatchResult& Result) {
   }
 
   if (Report) {
-    PresumedLoc PLoc = SM.getPresumedLoc(Func->getLocation());
+    PresumedLoc PLoc = SM.getPresumedLoc(Func.getLocation());
     Report->add({PLoc.isValid() ? PLoc.getFilename() : "", PLoc.getLine(),
                  PLoc.getColumn(), RuleId,
                  "function should use trailing return type"});
+  }
+}
+
+void TrailingReturnCallback::runToLeading(const FunctionDecl& Func,
+                                          SourceManager& SM,
+                                          FunctionTypeLoc FTL) {
+  // A lambda's call operator has a trailing return type and no leading return
+  // type to move it into -- `[]() -> int {}` has no declarator-id at all.  The
+  // Trailing direction never had to exclude lambdas (one written without a
+  // trailing return has a deduced `auto`, which its AutoTypeLoc check skips),
+  // so this guard exists only on this side.
+  if (const auto* MD = dyn_cast<CXXMethodDecl>(&Func))
+    if (MD->getParent() && MD->getParent()->isLambda()) return;
+
+  // For a trailing-return declarator the parser records both endpoints this
+  // rewrite needs on the FunctionTypeLoc: the local range *begins* at the
+  // `auto` placeholder and *ends* at the `->` (Parser::ParseFunctionDeclarator
+  // sets StartLoc to the TST_auto decl-spec and LocalEndLoc to the arrow).
+  // Both are verified by spelling below rather than trusted -- a declarator
+  // whose placeholder is not literally `auto` is left alone.
+  const LangOptions& LangOpts = Func.getASTContext().getLangOpts();
+  SourceLocation AutoLoc = FTL.getLocalRangeBegin();
+  SourceLocation ArrowLoc = FTL.getLocalRangeEnd();
+  if (AutoLoc.isInvalid() || ArrowLoc.isInvalid()) return;
+  if (AutoLoc.isMacroID() || ArrowLoc.isMacroID()) return;
+  if (!rawTokenAtIs(AutoLoc, tok::raw_identifier, "auto", SM, LangOpts)) return;
+  if (!rawTokenAtIs(ArrowLoc, tok::arrow, "", SM, LangOpts)) return;
+
+  TypeLoc ReturnLoc = FTL.getReturnLoc();
+  if (ReturnLoc.isNull()) return;
+  SourceRange ReturnRange = ReturnLoc.getSourceRange();
+  if (ReturnRange.getBegin().isInvalid() || ReturnRange.getEnd().isInvalid())
+    return;
+  if (ReturnRange.getBegin().isMacroID() || ReturnRange.getEnd().isMacroID())
+    return;
+
+  if (!isMovableTypeShape(ReturnLoc)) return;
+
+  // Same leftmost-begin and cv-qualifier treatment as the Trailing direction:
+  // `-> const int*` reports its range starting at `int`.  Scanning back for
+  // qualifiers is bounded by the `>` of the arrow, so it can never run past
+  // the type into the declarator's own `const` in `auto f() const -> int`.
+  SourceLocation TypeBegin = getTypeLocLeftmostBegin(ReturnLoc, SM);
+  SourceLocation ExtStart = skipQualifiersBackward(TypeBegin, SM);
+  SourceRange FullReturnRange(ExtStart, ReturnRange.getEnd());
+
+  // Parameters are not in scope before the declarator-id, so
+  // `auto f(T a) -> decltype(a.size())` has nowhere to move to.
+  llvm::StringSet<> ParamNames;
+  for (const ParmVarDecl* P : Func.parameters())
+    if (const IdentifierInfo* II = P->getIdentifier())
+      ParamNames.insert(II->getName());
+  if (!ParamNames.empty() &&
+      rangeMentionsName(FullReturnRange, ParamNames, SM, LangOpts))
+    return;
+
+  // An out-of-line declaration looks names up in two different scopes
+  // depending on which side of the declarator-id they are written on; see
+  // LookupEscapeChecker.  In-class and in-namespace declarations resolve the
+  // same either way and need no check.
+  if (Func.getLexicalDeclContext() != Func.getDeclContext()) {
+    LookupEscapeChecker Checker(Func.getLexicalDeclContext());
+    Checker.TraverseTypeLoc(ReturnLoc);
+    if (Checker.escaped()) return;
+  }
+
+  // Carry along any edit a rename rule already made inside the trailing type:
+  // that text moves to the placeholder, and the delete below would otherwise
+  // drop the rename entirely.  Mirrors the same call in runToTrailing().
+  std::string TypeStr =
+      Rewrite.getRewrittenText(CharSourceRange::getTokenRange(FullReturnRange));
+  if (TypeStr.empty()) return;
+
+  SourceLocation DeleteStart = skipWhitespaceBackward(ArrowLoc, SM);
+  SourceLocation TypeEnd =
+      Lexer::getLocForEndOfToken(ReturnRange.getEnd(), 0, SM, LangOpts);
+  if (TypeEnd.isInvalid()) return;
+  // Every offset below -- including the one the Emit purge measures the
+  // trailing type with -- has to come from the same file to mean anything.
+  FileID FID = SM.getFileID(AutoLoc);
+  if (SM.getFileID(DeleteStart) != FID || SM.getFileID(TypeEnd) != FID ||
+      SM.getFileID(ExtStart) != FID)
+    return;
+  unsigned AutoOff = SM.getFileOffset(AutoLoc);
+  unsigned DeleteOff = SM.getFileOffset(DeleteStart);
+  unsigned TypeBeginOff = SM.getFileOffset(ExtStart);
+  unsigned TypeEndOff = SM.getFileOffset(TypeEnd);
+  if (TypeEndOff <= DeleteOff || DeleteOff <= AutoOff ||
+      TypeBeginOff < DeleteOff)
+    return;
+
+  // How many bytes `-> type` occupies *now*.  Rewriter::RemoveText passes its
+  // length straight through to the edit buffer without mapping it, so the
+  // original byte count would be wrong as soon as a rename rule has changed
+  // the length of something inside the trailing type (`-> decltype(count_)`
+  // becoming `-> decltype(m_count)` would leave the `)` behind).  getRangeSize
+  // is the accessor that maps a range through the edits already made.
+  const int DeleteLen =
+      Rewrite.getRangeSize(CharSourceRange::getCharRange(DeleteStart, TypeEnd));
+  if (DeleteLen <= 0) return;
+
+  // Replace the placeholder in place -- which keeps `static`/`constexpr` and
+  // any attributes in front of it exactly where they were -- then delete the
+  // `-> type`.  A failed replace means the location is not rewritable; bailing
+  // before the delete leaves the declaration intact rather than stripping its
+  // only return type.
+  if (Rewrite.ReplaceText(AutoLoc, 4, TypeStr)) return;
+  Rewrite.RemoveText(DeleteStart, DeleteLen);
+
+  if (Emit) {
+    std::string Path;
+    if (const FileEntry* FE = SM.getFileEntryForID(FID)) {
+      StringRef RP = FE->tryGetRealPathName();
+      if (!RP.empty()) Path = relativizeToCwd(RP);
+    }
+    if (!Path.empty()) {
+      // Drop rename edits already recorded inside the trailing type: their
+      // text rode along in TypeStr (via getRewrittenText) and moves to the
+      // placeholder, so replaying them would double-apply / conflict.
+      auto& E = Emit->Edits;
+      E.erase(std::remove_if(E.begin(), E.end(),
+                             [&](const EditRecord& R) {
+                               return R.File == Path &&
+                                      R.Offset >= TypeBeginOff &&
+                                      R.Offset + R.Length <= TypeEndOff;
+                             }),
+              E.end());
+      E.push_back({Path, AutoOff, 4, "auto", TypeStr});
+      std::string Removed =
+          Lexer::getSourceText(
+              CharSourceRange::getCharRange(DeleteStart, TypeEnd), SM, LangOpts)
+              .str();
+      E.push_back({Path, DeleteOff, TypeEndOff - DeleteOff, Removed, ""});
+    }
+  }
+
+  if (Report) {
+    PresumedLoc PLoc = SM.getPresumedLoc(Func.getLocation());
+    Report->add({PLoc.isValid() ? PLoc.getFilename() : "", PLoc.getLine(),
+                 PLoc.getColumn(), RuleId,
+                 "function should use leading return type"});
   }
 }
 
@@ -215,7 +547,23 @@ void TrailingReturnCallback::run(const MatchFinder::MatchResult& Result) {
 // ---------------------------------------------------------------------------
 
 void registerTrailingReturnMatchers(MatchFinder& Finder,
-                                    TrailingReturnCallback& Callback) {
+                                    TrailingReturnCallback& Callback,
+                                    ReturnTypeStyle Style) {
+  if (Style == ReturnTypeStyle::Leading) {
+    // The mirror predicate.  `unless(isInstantiated())` is load-bearing for the
+    // same reason it is below, and every other exclusion the Trailing matcher
+    // needs is implied here: a conversion function, a constructor or a
+    // defaulted function cannot carry a trailing return type in the first
+    // place, and `-> void` is a perfectly good thing to move back.  The
+    // declaration-shape guards live in runToLeading(), which has the
+    // FunctionTypeLoc to inspect.
+    Finder.addMatcher(
+        functionDecl(hasTrailingReturn(), unless(isInstantiated()))
+            .bind("func"),
+        &Callback);
+    return;
+  }
+
   // `unless(isInstantiated())` is load-bearing: an instantiation carries the
   // *pattern's* source locations, so without it a template instantiated in the
   // same TU is rewritten a second time at the same place -- and by then the
@@ -246,8 +594,9 @@ void registerTrailingReturnMatchers(MatchFinder& Finder,
 TrailingReturnTypesAction::TrailingReturnTypesAction(OutputMode Mode,
                                                      PendingRewrites* Pending,
                                                      LintReport* Report,
-                                                     std::string RuleId)
-    : Mode(Mode), Pending(Pending), Callback(TheRewriter) {
+                                                     std::string RuleId,
+                                                     ReturnTypeStyle Style)
+    : Mode(Mode), Pending(Pending), Style(Style), Callback(TheRewriter, Style) {
   Callback.setLintReport(Report, std::move(RuleId));
 }
 
@@ -283,7 +632,7 @@ auto TrailingReturnTypesAction::CreateASTConsumer(CompilerInstance& CI,
                                                   StringRef /*File*/)
     -> std::unique_ptr<ASTConsumer> {
   TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
-  registerTrailingReturnMatchers(Finder, Callback);
+  registerTrailingReturnMatchers(Finder, Callback, Style);
   return Finder.newASTConsumer();
 }
 
@@ -296,8 +645,8 @@ namespace {
 
 class CaptureAction : public ASTFrontendAction {
  public:
-  explicit CaptureAction(std::string& Output)
-      : Callback(TheRewriter), Output(Output) {}
+  CaptureAction(std::string& Output, ReturnTypeStyle Style)
+      : Callback(TheRewriter, Style), Style(Style), Output(Output) {}
 
   void EndSourceFileAction() override {
     SourceManager& SM = TheRewriter.getSourceMgr();
@@ -308,13 +657,14 @@ class CaptureAction : public ASTFrontendAction {
   auto CreateASTConsumer(CompilerInstance& CI, StringRef /*File*/)
       -> std::unique_ptr<ASTConsumer> override {
     TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
-    registerTrailingReturnMatchers(Finder, Callback);
+    registerTrailingReturnMatchers(Finder, Callback, Style);
     return Finder.newASTConsumer();
   }
 
  private:
   Rewriter TheRewriter;
   TrailingReturnCallback Callback;  ///< must be declared after TheRewriter
+  ReturnTypeStyle Style;
   MatchFinder Finder;
   std::string& Output;
 };
@@ -325,12 +675,24 @@ class CaptureAction : public ASTFrontendAction {
 // Test helper
 // ---------------------------------------------------------------------------
 
+static auto rewriteReturnTypes(llvm::StringRef Code,
+                               const std::vector<std::string>& Args,
+                               ReturnTypeStyle Style) -> std::string {
+  std::string Output;
+  bool Success = runToolOnCodeWithArgs(
+      std::make_unique<CaptureAction>(Output, Style), Code, Args);
+  if (!Success || Output.empty()) return Code.str();
+  return Output;
+}
+
 auto rewriteToTrailingReturnTypes(llvm::StringRef Code,
                                   const std::vector<std::string>& Args)
     -> std::string {
-  std::string Output;
-  bool Success = runToolOnCodeWithArgs(std::make_unique<CaptureAction>(Output),
-                                       Code, Args);
-  if (!Success || Output.empty()) return Code.str();
-  return Output;
+  return rewriteReturnTypes(Code, Args, ReturnTypeStyle::Trailing);
+}
+
+auto rewriteToLeadingReturnTypes(llvm::StringRef Code,
+                                 const std::vector<std::string>& Args)
+    -> std::string {
+  return rewriteReturnTypes(Code, Args, ReturnTypeStyle::Leading);
 }

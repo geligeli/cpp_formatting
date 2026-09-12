@@ -1,3 +1,4 @@
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -27,7 +28,11 @@ struct NormalizeVarsRule {
 };
 
 struct Config {
+  // `trailing_return_types: true` is the original spelling of
+  // `return_types: trailing`, kept working because it appears in every config
+  // written before the reverse direction existed.
   bool trailing_return_types = false;
+  std::string return_types;  // "" | "trailing" | "leading"
   std::vector<NormalizeVarsRule> normalize_variables;
 };
 
@@ -48,6 +53,7 @@ template <>
 struct MappingTraits<Config> {
   static void mapping(IO& io, Config& c) {
     io.mapOptional("trailing_return_types", c.trailing_return_types, false);
+    io.mapOptional("return_types", c.return_types, std::string());
     io.mapOptional("normalize_variables", c.normalize_variables);
   }
 };
@@ -70,6 +76,13 @@ static cl::opt<bool> TrailingReturnOpt(
     "trailing-return-types",
     cl::desc("Convert functions to trailing return type syntax"),
     cl::cat(CppFormatCategory));
+
+static cl::opt<std::string> ReturnTypesOpt(
+    "return-types",
+    cl::desc("Return type style: trailing (`auto f() -> int`) or leading "
+             "(`int f()`).  The reverse of --trailing-return-types; the two "
+             "cannot be combined."),
+    cl::init(""), cl::cat(CppFormatCategory));
 
 static cl::opt<std::string> NormScopeOpt(
     "normalize-variables-scope",
@@ -269,6 +282,7 @@ auto main(int argc, const char** argv) -> int {
     }
   } else {
     cfg.trailing_return_types = TrailingReturnOpt.getValue();
+    cfg.return_types = ReturnTypesOpt.getValue();
     const bool hasScope = !NormScopeOpt.empty();
     const bool hasStyle = !NormStyleOpt.empty();
     if (hasScope && hasStyle) {
@@ -280,14 +294,43 @@ auto main(int argc, const char** argv) -> int {
              "must be specified together\n";
       return 1;
     }
-    if (!cfg.trailing_return_types && cfg.normalize_variables.empty()) {
+    if (!cfg.trailing_return_types && cfg.return_types.empty() &&
+        cfg.normalize_variables.empty()) {
       llvm::errs()
           << "Nothing to do. Provide --config=<file>, "
-             "--trailing-return-types, or both "
-             "--normalize-variables-scope and --normalize-variables-style.\n";
+             "--trailing-return-types, --return-types=<trailing|leading>, or "
+             "both --normalize-variables-scope and "
+             "--normalize-variables-style.\n";
       return 1;
     }
   }
+
+  // The two directions rewrite the same declarations against each other, so
+  // the config cannot ask for both.  Making the direction one value rather
+  // than two booleans is what keeps that unrepresentable.
+  std::optional<ReturnTypeStyle> ReturnStyle;
+  if (!cfg.return_types.empty()) {
+    if (cfg.trailing_return_types) {
+      llvm::errs() << "Set return_types or trailing_return_types, not both "
+                      "(trailing_return_types: true means return_types: "
+                      "trailing).\n";
+      return 1;
+    }
+    if (cfg.return_types == "trailing") {
+      ReturnStyle = ReturnTypeStyle::Trailing;
+    } else if (cfg.return_types == "leading") {
+      ReturnStyle = ReturnTypeStyle::Leading;
+    } else {
+      llvm::errs() << "Unknown return_types '" << cfg.return_types
+                   << "'. Valid values: trailing, leading\n";
+      return 1;
+    }
+  } else if (cfg.trailing_return_types) {
+    ReturnStyle = ReturnTypeStyle::Trailing;
+  }
+  const char* ReturnRuleId = ReturnStyle == ReturnTypeStyle::Leading
+                                 ? "leading_return_types"
+                                 : "trailing_return_types";
 
   const bool Lint = LintOpt || FormatOpt != "text";
   const bool Emit = !EmitEditsOpt.empty();
@@ -375,9 +418,8 @@ auto main(int argc, const char** argv) -> int {
                  orderSourcesForRename(SourcePaths));
   applyArgumentAdjusters(Tool, ResourceDir);
 
-  CppFormatActionFactory Factory(std::move(Rules), cfg.trailing_return_types,
-                                 "trailing_return_types", mode,
-                                 std::move(Files));
+  CppFormatActionFactory Factory(std::move(Rules), ReturnStyle, ReturnRuleId,
+                                 mode, std::move(Files));
   if (Lint) Factory.setLintReport(&Report);
   if (int rc = Tool.run(&Factory)) return rc;
 

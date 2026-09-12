@@ -508,3 +508,249 @@ TEST(TrailingReturnTypes, TypedefedFunctionPointerReturnIsRewritten) {
   EXPECT_EQ(rewrite("using fn_ptr = int (*)(bool);\nfn_ptr make(int);\n"),
             "using fn_ptr = int (*)(bool);\nauto make(int) -> fn_ptr;\n");
 }
+
+// ---------------------------------------------------------------------------
+// Leading return types -- the reverse direction
+// ---------------------------------------------------------------------------
+
+// Thin wrapper so tests read as: unwind("...") == "..."
+static auto unwind(const char* code) -> std::string {
+  return rewriteToLeadingReturnTypes(code, {"-std=c++20", "-xc++"});
+}
+
+TEST(LeadingReturnTypes, IntReturn) {
+  EXPECT_EQ(unwind("auto foo() -> int { return 42; }"),
+            "int foo() { return 42; }");
+}
+
+TEST(LeadingReturnTypes, VoidReturn) {
+  // Nothing excludes void on this side: `-> void` moves back like any type.
+  EXPECT_EQ(unwind("auto foo() -> void {}"), "void foo() {}");
+}
+
+TEST(LeadingReturnTypes, DeclarationOnly) {
+  EXPECT_EQ(unwind("auto foo() -> double;"), "double foo();");
+}
+
+TEST(LeadingReturnTypes, PointerReturn) {
+  EXPECT_EQ(unwind("auto foo() -> int* { return nullptr; }"),
+            "int* foo() { return nullptr; }");
+}
+
+TEST(LeadingReturnTypes, ConstQualifiedPointerReturn) {
+  // The cv-qualifier is not in the TypeLoc's range; the backwards scan has to
+  // pick it up here exactly as it does in the forward direction.
+  EXPECT_EQ(unwind("auto foo() -> const int* { return nullptr; }"),
+            "const int* foo() { return nullptr; }");
+}
+
+TEST(LeadingReturnTypes, ReferenceReturn) {
+  EXPECT_EQ(unwind("int g;\nauto foo() -> int& { return g; }\n"),
+            "int g;\nint& foo() { return g; }\n");
+}
+
+TEST(LeadingReturnTypes, MultiWordBuiltin) {
+  EXPECT_EQ(unwind("auto foo() -> unsigned long long { return 0; }"),
+            "unsigned long long foo() { return 0; }");
+}
+
+TEST(LeadingReturnTypes, SpecifiersKeepTheirPlace) {
+  // The placeholder is replaced in place, so everything written in front of it
+  // stays in front of it.
+  EXPECT_EQ(
+      unwind("struct S { static constexpr auto f() -> int { return 1; } };"),
+      "struct S { static constexpr int f() { return 1; } };");
+}
+
+TEST(LeadingReturnTypes, TrailingQualifiersStay) {
+  EXPECT_EQ(
+      unwind("struct S { auto f() const noexcept -> int { return 1; } };"),
+      "struct S { int f() const noexcept { return 1; } };");
+}
+
+TEST(LeadingReturnTypes, ArrowOnItsOwnLine) {
+  EXPECT_EQ(unwind("auto foo()\n    -> int { return 1; }"),
+            "int foo() { return 1; }");
+}
+
+TEST(LeadingReturnTypes, TemplatedReturnType) {
+  EXPECT_EQ(unwind("template <class T> struct V {};\n"
+                   "auto foo() -> V<int> { return {}; }\n"),
+            "template <class T> struct V {};\n"
+            "V<int> foo() { return {}; }\n");
+}
+
+TEST(LeadingReturnTypes, MemberFunctionInClass) {
+  // Declared in-class: the trailing type already resolves in class scope and
+  // so does the leading one, so a member type is fine here.
+  EXPECT_EQ(unwind("struct S {\n"
+                   "  struct Inner {};\n"
+                   "  auto f() -> Inner { return {}; }\n"
+                   "};\n"),
+            "struct S {\n"
+            "  struct Inner {};\n"
+            "  Inner f() { return {}; }\n"
+            "};\n");
+}
+
+TEST(LeadingReturnTypes, OperatorWithoutSpace) {
+  EXPECT_EQ(
+      unwind("struct S { auto operator=(const S&) -> S& { return *this; } };"),
+      "struct S { S& operator=(const S&) { return *this; } };");
+}
+
+// --- guards ----------------------------------------------------------------
+
+TEST(LeadingReturnTypes, LambdaNotRewritten) {
+  // A lambda has no declarator-id to put a leading return type on.
+  const char* code = "auto x = []() -> int { return 1; };";
+  EXPECT_EQ(unwind(code), code);
+}
+
+TEST(LeadingReturnTypes, FunctionPointerReturnNotRewritten) {
+  // `int (*)(bool)` before the name is `int (*make(int))(bool)` -- a different
+  // declarator, not the same text moved.
+  const char* code = "auto make(int) -> int (*)(bool);";
+  EXPECT_EQ(unwind(code), code);
+}
+
+TEST(LeadingReturnTypes, ArrayReferenceReturnNotRewritten) {
+  const char* code = "int a[4];\nauto get() -> int (&)[4] { return a; }\n";
+  EXPECT_EQ(unwind(code), code);
+}
+
+TEST(LeadingReturnTypes, TypedefedFunctionPointerReturnIsRewritten) {
+  // Through an alias it is a plain prefix again -- the shape guard must not
+  // over-reach.
+  EXPECT_EQ(
+      unwind("using fn_ptr = int (*)(bool);\nauto make(int) -> fn_ptr;\n"),
+      "using fn_ptr = int (*)(bool);\nfn_ptr make(int);\n");
+}
+
+TEST(LeadingReturnTypes, DeducedPlaceholderNotRewritten) {
+  const char* code = "auto foo() -> auto { return 1; }";
+  EXPECT_EQ(unwind(code), code);
+}
+
+TEST(LeadingReturnTypes, DecltypeAutoPlaceholderNotRewritten) {
+  const char* code = "auto foo() -> decltype(auto) { return 1; }";
+  EXPECT_EQ(unwind(code), code);
+}
+
+TEST(LeadingReturnTypes, ParameterReferenceNotRewritten) {
+  // `a` is not in scope before the declarator-id.
+  const char* code =
+      "struct B { int size() const { return 0; } };\n"
+      "auto f(const B& a) -> decltype(a.size()) { return a.size(); }\n";
+  EXPECT_EQ(unwind(code), code);
+}
+
+TEST(LeadingReturnTypes, DependentParameterReferenceNotRewritten) {
+  // The dependent spelling carries no resolved ParmVarDecl, which is why the
+  // guard works on token text.
+  const char* code =
+      "template <class T>\n"
+      "auto f(T& a) -> decltype(a.get()) { return a.get(); }\n";
+  EXPECT_EQ(unwind(code), code);
+}
+
+TEST(LeadingReturnTypes, OutOfLineMemberTypeNotRewritten) {
+  // `Inner` is found in class scope after the declarator-id, but not before it.
+  const char* code =
+      "struct S {\n"
+      "  struct Inner {};\n"
+      "  auto f() -> Inner;\n"
+      "};\n"
+      "auto S::f() -> Inner { return {}; }\n";
+  // The in-class declaration still moves; the out-of-line definition must not.
+  EXPECT_EQ(unwind(code),
+            "struct S {\n"
+            "  struct Inner {};\n"
+            "  Inner f();\n"
+            "};\n"
+            "auto S::f() -> Inner { return {}; }\n");
+}
+
+TEST(LeadingReturnTypes, OutOfLineMemberTypeInTemplateArgNotRewritten) {
+  // `std::vector` is written qualified and would be fine, but `Inner` inside
+  // its argument list is not -- template arguments have to be checked too.
+  const char* code =
+      "namespace ns { template <class T> struct Vec {}; }\n"
+      "struct S {\n"
+      "  struct Inner {};\n"
+      "  auto f() -> ns::Vec<Inner>;\n"
+      "};\n"
+      "auto S::f() -> ns::Vec<Inner> { return {}; }\n";
+  EXPECT_EQ(unwind(code),
+            "namespace ns { template <class T> struct Vec {}; }\n"
+            "struct S {\n"
+            "  struct Inner {};\n"
+            "  ns::Vec<Inner> f();\n"
+            "};\n"
+            "auto S::f() -> ns::Vec<Inner> { return {}; }\n");
+}
+
+TEST(LeadingReturnTypes, OutOfLineQualifiedTypeIsRewritten) {
+  // A name written qualified resolves the same from either position, so the
+  // out-of-line guard must not reject the common case.
+  EXPECT_EQ(unwind("namespace ns { struct T {}; }\n"
+                   "struct S { auto f() -> ns::T; };\n"
+                   "auto S::f() -> ns::T { return {}; }\n"),
+            "namespace ns { struct T {}; }\n"
+            "struct S { ns::T f(); };\n"
+            "ns::T S::f() { return {}; }\n");
+}
+
+TEST(LeadingReturnTypes, OutOfLineBuiltinIsRewritten) {
+  EXPECT_EQ(unwind("struct S { auto f() -> int; };\n"
+                   "auto S::f() -> int { return 1; }\n"),
+            "struct S { int f(); };\n"
+            "int S::f() { return 1; }\n");
+}
+
+TEST(LeadingReturnTypes, OutOfLineTemplateParameterIsRewritten) {
+  // A template parameter is introduced by the parameter list, which precedes
+  // the declarator either way.
+  EXPECT_EQ(unwind("template <class T> struct S { auto f() -> T; };\n"
+                   "template <class T> auto S<T>::f() -> T { return {}; }\n"),
+            "template <class T> struct S { T f(); };\n"
+            "template <class T> T S<T>::f() { return {}; }\n");
+}
+
+TEST(LeadingReturnTypes, TemplateInstantiationRewrittenOnce) {
+  // The pattern is rewritten; the instantiation points back at the same
+  // locations and must not be rewritten a second time.
+  EXPECT_EQ(unwind("template <class T> auto id(T v) -> T { return v; }\n"
+                   "inline void use() { id<int>(1); }\n"),
+            "template <class T> T id(T v) { return v; }\n"
+            "inline void use() { id<int>(1); }\n");
+}
+
+TEST(LeadingReturnTypes, MacroReturnTypeNotRewritten) {
+  const char* code = "#define INT_T int\nauto foo() -> INT_T { return 1; }\n";
+  EXPECT_EQ(unwind(code), code);
+}
+
+// --- round trip ------------------------------------------------------------
+
+TEST(LeadingReturnTypes, RoundTripsWithTrailingDirection) {
+  const char* original =
+      "struct S {\n"
+      "  static const int* get(const S& s);\n"
+      "  int value() const noexcept;\n"
+      "};\n";
+  std::string forward =
+      rewriteToTrailingReturnTypes(original, {"-std=c++20", "-xc++"});
+  EXPECT_EQ(forward,
+            "struct S {\n"
+            "  static auto get(const S& s) -> const int*;\n"
+            "  auto value() const noexcept -> int;\n"
+            "};\n");
+  EXPECT_EQ(rewriteToLeadingReturnTypes(forward, {"-std=c++20", "-xc++"}),
+            original);
+}
+
+TEST(LeadingReturnTypes, IsAFixpoint) {
+  const std::string once = unwind("auto foo() -> int { return 1; }");
+  EXPECT_EQ(unwind(once.c_str()), once);
+}

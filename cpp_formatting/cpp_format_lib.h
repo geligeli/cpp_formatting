@@ -2,6 +2,7 @@
 #define CPP_FORMATTING_CPP_FORMAT_LIB_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -9,6 +10,7 @@
 #include "cpp_formatting/lint_lib.h"
 #include "cpp_formatting/output_mode.h"
 #include "cpp_formatting/rename_variables_lib.h"
+#include "cpp_formatting/trailing_return_types_lib.h"
 
 // ---------------------------------------------------------------------------
 // NormalizeRule
@@ -27,7 +29,7 @@ struct NormalizeRule {
 // ---------------------------------------------------------------------------
 
 /// Factory for ClangTool::run() that applies every normalize_variables rule
-/// plus (optionally) the trailing-return-type rewrite in a single pass over
+/// plus (optionally) the return-type rewrite in a single pass over
 /// each translation unit, sharing one Rewriter.  This avoids re-parsing every
 /// TU once per pass: parses per TU drop from 1 + #rules to 1.
 ///
@@ -36,9 +38,11 @@ struct NormalizeRule {
 /// compiles against the original on-disk source.
 class CppFormatActionFactory : public clang::tooling::FrontendActionFactory {
  public:
+  /// \p ReturnStyle selects the return-type pass; nullopt skips it entirely.
   CppFormatActionFactory(std::vector<NormalizeRule> Rules,
-                         bool TrailingReturnTypes, std::string TrailingRuleId,
-                         OutputMode Mode, FileSet CollectFrom);
+                         std::optional<ReturnTypeStyle> ReturnStyle,
+                         std::string ReturnRuleId, OutputMode Mode,
+                         FileSet CollectFrom);
 
   auto create() -> std::unique_ptr<clang::FrontendAction> override;
 
@@ -64,8 +68,8 @@ class CppFormatActionFactory : public clang::tooling::FrontendActionFactory {
 
  private:
   std::vector<NormalizeRule> Rules;
-  bool TrailingReturnTypes;
-  std::string TrailingRuleId;
+  std::optional<ReturnTypeStyle> ReturnStyle;
+  std::string ReturnRuleId;
   OutputMode Mode;
   FileSet CollectFrom;
   PendingRewrites Pending;
