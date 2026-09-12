@@ -19,20 +19,29 @@
     "workspaceFolder": "/workspace",
     "remoteUser": "ubuntu",
 
-    // Bazel caches.  The two bind mounts are the host's shared caches (override
-    // the host paths with BAZEL_DISK_CACHE / BAZEL_REPO_CACHE); /etc/bazel.bazelrc
-    // in the image points --disk_cache / --repository_cache at them.  The named
+    // Bazel caches.  The two bind mounts default to directories in the
+    // workspace (created by initializeCommand -- a bind mount's source has to
+    // exist before the container is created, so a machine-specific default
+    // path is what keeps the container from starting elsewhere, CI included).
+    // Point BAZEL_DISK_CACHE / BAZEL_REPO_CACHE at a shared cache on the host
+    // to use that instead; /etc/bazel.bazelrc in the image points
+    // --disk_cache / --repository_cache at the mounts either way.  The named
     // volume keeps Bazel's output base (and its ~320 MB install base) across
     // container rebuilds, so a rebuild does not re-analyse from scratch.
+    "initializeCommand": [
+        "${localWorkspaceFolder}/.devcontainer/init-bazel-caches.sh",
+        "${localWorkspaceFolder}"
+    ],
     "mounts": [
-        "source=${localEnv:BAZEL_DISK_CACHE:/large_nfs/bazel-cache/disk},target=/bazel-cache/disk,type=bind",
-        "source=${localEnv:BAZEL_REPO_CACHE:/large_nfs/bazel-cache/repo},target=/bazel-cache/repo,type=bind",
+        "source=${localWorkspaceFolder}/.disk_cache,target=/bazel-cache/disk,type=bind",
+        "source=${localWorkspaceFolder}/.bazel_cache,target=/bazel-cache/repo,type=bind",
         "source=cpp-formatting-bazel-output,target=/home/ubuntu/.cache/bazel,type=volume"
     ],
 
-    // Docker creates a missing bind source as root, and a named volume can come
-    // back root-owned too; claim the mount points (never recursively -- the disk
-    // cache is large and lives on NFS) so the container user can write them.
+    // A named volume can come back root-owned, and so can a bind source that
+    // something other than initializeCommand created; claim the mount points
+    // (never recursively -- the disk cache is large and may live on NFS) so the
+    // container user can write them.
     // /home/ubuntu/.cache is in the list because mounting the volume *inside* it
     // recreates the parent as root, which otherwise breaks every other tool that
     // wants a ~/.cache subdirectory of its own (pre-commit, pip, ...).

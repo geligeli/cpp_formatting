@@ -6,3 +6,9 @@ e2e/testdata
 # Where the harness materializes target repos when E2E_WORK_DIR points inside
 # the workspace, as CI sets it.
 .e2e
+
+# The devcontainer's Bazel caches live here (see
+# .devcontainer/init-bazel-caches.sh), and CI persists them with actions/cache.
+# They hold BUILD files of their own, which //... must not sweep up.
+.disk_cache
+.bazel_cache
