@@ -36,10 +36,18 @@ _SRC_EXTS = ["cc", "cpp", "cxx", "c++"] + _HDR_EXTS
 
 def _own_files(ctx, exts):
     out = []
+    seen = {}
     for attr in ("srcs", "hdrs"):
         for t in getattr(ctx.rule.attr, attr, []):
             for f in t.files.to_list():
-                if f.is_source and f.extension in exts:
+                # Deduplicated: a glob can match the same header in both srcs
+                # and hdrs (googletest does exactly that), and listing a file
+                # twice makes cpp_format parse it as a main file twice.  The
+                # second pass then reads back the first pass's rewrite, so the
+                # target emits duplicate -- and mutually conflicting -- records
+                # for one source location.
+                if f.is_source and f.extension in exts and f.path not in seen:
+                    seen[f.path] = True
                     out.append(f)
     return out
 
@@ -175,8 +183,13 @@ cpp_format_aspect = aspect(
             executable = True,
             cfg = "exec",
         ),
+        # The *root module's* ruleset, like the prebuilt kit's aspect.  A bare
+        # `//:cpp_format.yaml` would resolve to cpp_formatting's own config when
+        # this .bzl is loaded from a consumer repo — silently the wrong ruleset.
+        # In-repo (//bazel/testdata) cpp_formatting is the root module, so the
+        # two spellings are equivalent there.
         "_config": attr.label(
-            default = Label("//:cpp_format.yaml"),
+            default = Label("@@//:cpp_format.yaml"),
             allow_single_file = True,
         ),
         "_builtin_headers": attr.label(
