@@ -356,6 +356,22 @@ struct F {
   // clang-format on
 }
 
+TEST(TrailingReturnTypes, NestedReturnTypeOutOfLineDefinition) {
+  // A member returning a type nested in its own class.  In the in-class
+  // declaration the trailing `-> V` needs no qualification; in the out-of-line
+  // definition the written type is already `S::V` and is moved across as-is.
+  EXPECT_EQ(rewrite("struct S {\n"
+                    "  struct V {};\n"
+                    "  V get();\n"
+                    "};\n"
+                    "S::V S::get() { return {}; }\n"),
+            "struct S {\n"
+            "  struct V {};\n"
+            "  auto get() -> V;\n"
+            "};\n"
+            "auto S::get() -> S::V { return {}; }\n");
+}
+
 // ---------------------------------------------------------------------------
 // C++23 explicit object parameters ("deducing this", P0847)
 //
