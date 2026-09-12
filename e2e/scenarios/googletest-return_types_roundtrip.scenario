@@ -1,0 +1,14 @@
+# The reverse direction over a real corpus.  googletest-trailing_return_types
+# already establishes that the forward pass rebuilds here, so what this adds is
+# the second leg: every trailing return type the forward pass produced -- plus
+# the ones googletest writes itself -- moved back, and the result rebuilt.
+#
+# No EXPECT_ROUNDTRIP_IDENTICAL: the guards on the Leading direction are
+# strictly tighter than the Trailing ones (a declarator that cannot be
+# restructured, a type that resolves in class scope), so a corpus this size is
+# expected to keep some declarations in trailing form.  Rebuild and converge
+# are the assertions that matter.
+REPO=googletest
+RULESET=trailing_return_types
+RULESET_THEN=leading_return_types
+EXPECT=pass

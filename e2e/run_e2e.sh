@@ -108,8 +108,9 @@ all_scenarios() {
 if [[ -n "$LIST" ]]; then
   for s in $(all_scenarios); do
     # shellcheck disable=SC1090
-    ( EXPECT=pass; source "$E2E_DIR/scenarios/$s.scenario"
-      printf '  %-40s %s -> %s  [%s]\n' "$s" "$REPO" "$RULESET" "$EXPECT" )
+    ( EXPECT=pass; RULESET_THEN=""; source "$E2E_DIR/scenarios/$s.scenario"
+      printf '  %-40s %s -> %s%s  [%s]\n' "$s" "$REPO" "$RULESET" \
+        "$([[ -n "$RULESET_THEN" ]] && printf ', then %s' "$RULESET_THEN")" "$EXPECT" )
   done
   exit 0
 fi
@@ -239,11 +240,11 @@ phase_check() {
 }
 
 phase_diff() {
-  local rc=0
-  _cpp_format_sh diff "$ARTDIR/fix.patch" "$LOGDIR/diff.err" || rc=$?
+  local rc=0 patch="$ARTDIR/$RULESET.patch"
+  _cpp_format_sh diff "$patch" "$LOGDIR/diff.err" || rc=$?
   [[ "$rc" -eq 0 ]] || { log_tail "$LOGDIR/diff.err"; fail "diff exited $rc"; return 1; }
-  [[ -s "$ARTDIR/fix.patch" ]] || { fail "diff produced an empty patch"; return 1; }
-  pass "$(wc -l < "$ARTDIR/fix.patch") line patch -> ${ARTDIR##*/}/fix.patch"
+  [[ -s "$patch" ]] || { fail "diff produced an empty patch"; return 1; }
+  pass "$(wc -l < "$patch") line patch -> ${ARTDIR##*/}/$RULESET.patch"
 }
 
 phase_fix() {
@@ -297,7 +298,47 @@ phase_converge() {
   pass "fixpoint reached"
 }
 
+# A scenario with RULESET_THEN runs the whole transform twice: the second pass
+# starts from the first one's *output*, which is how "forward, then back"
+# (trailing return types, then leading) gets a rebuild of its own.  Each leg
+# reuses the same phase bodies; only the ruleset in place differs.
+phase_swap() {
+  # Swap the ruleset first, then commit: the commit has to include the new
+  # cpp_format.yaml, or the second pass's `applied` check would see it as a
+  # file the tool changed but did not report.
+  cp "$E2E_DIR/rulesets/$RULESET_THEN.yaml" "$SRC/cpp_format.yaml"
+  git -C "$SRC" add -A
+  _git_commit "$SRC" "cpp_format e2e: after $RULESET"
+  RULESET="$RULESET_THEN"
+  pass "pass 1 committed; ruleset now $RULESET_THEN"
+}
+phase_check2() { phase_check; }
+phase_diff2() { phase_diff; }
+phase_fix2() { phase_fix; }
+phase_applied2() { phase_applied; }
+phase_rebuild2() { phase_rebuild; }
+phase_converge2() { phase_converge; }
+
+# Opt-in, for a corpus where the second ruleset is known to undo the first
+# exactly: the sources must come back byte-identical to what they were before
+# either pass ran.  A weaker round trip still rebuilds and converges, so this
+# is the assertion that catches the reverse quietly recovering *less* than the
+# forward direction moved.  e2e-wired is the commit wire() made, so the diff is
+# only ever the tool's own writes; the ruleset itself changed at swap.
+phase_roundtrip() {
+  local changed
+  changed="$(git -C "$SRC" diff --name-only e2e-wired -- \
+               . ':(exclude)cpp_format.yaml')"
+  if [[ -n "$changed" ]]; then
+    printf '%s\n' "$changed" | sed 's/^/  /' | head -20
+    fail "$(printf '%s\n' "$changed" | grep -c .) file(s) did not come back to their original content"
+    return 1
+  fi
+  pass "sources are byte-identical to the pre-transform tree"
+}
+
 PHASES=(tool materialize wire enumerate baseline check diff fix applied rebuild converge)
+SECOND_PASS_PHASES=(swap check2 diff2 fix2 applied2 rebuild2 converge2 roundtrip)
 # A failure in any of these says nothing about the tool -- the environment, the
 # pin or the injected flags are wrong.
 SETUP_PHASES=" tool materialize wire enumerate baseline "
@@ -308,8 +349,9 @@ run_scenario() {
   local scen="$1"
 
   # Defaults, reset per scenario so nothing leaks between them.
-  REPO=""; RULESET=""; EXPECT="pass"; EXPECT_FAIL_PHASE=""; EXPECT_FAIL_REASON=""
-  EXPECT_CONFLICTS=0; EXPECT_CONVERGES=1
+  REPO=""; RULESET=""; RULESET_THEN=""; EXPECT="pass"
+  EXPECT_FAIL_PHASE=""; EXPECT_FAIL_REASON=""
+  EXPECT_CONFLICTS=0; EXPECT_CONVERGES=1; EXPECT_ROUNDTRIP_IDENTICAL=0
   REPO_KIND="git"; REPO_URL=""; REPO_REV=""; REPO_PATH=""
   TARGET_PATTERN="//..."; RUN_TESTS=0; BAZELVERSION=""; BUILD_FLAGS=()
   REPORTED_FILES=(); EDITS_TOTAL=0; N_CONFLICTS=0; N_TARGETS=0; OUTSIDE_SRC=()
@@ -326,6 +368,8 @@ run_scenario() {
   source "$rfile"
   REPO_NAME="$REPO"
   [[ -f "$E2E_DIR/rulesets/$RULESET.yaml" ]] || die "$scen: no such ruleset: $RULESET"
+  [[ -z "$RULESET_THEN" || -f "$E2E_DIR/rulesets/$RULESET_THEN.yaml" ]] \
+    || die "$scen: no such ruleset: $RULESET_THEN"
   [[ -n "$BAZELVERSION" ]] || BAZELVERSION="$(cat "$REPO_ROOT/.bazelversion" 2>/dev/null || echo 8.6.0)"
   RULES_CC_VERSION="$(sed -n 's/.*bazel_dep(name = "rules_cc", version = "\([^"]*\)").*/\1/p' \
                         "$REPO_ROOT/MODULE.bazel" | head -1)"
@@ -333,6 +377,7 @@ run_scenario() {
   [[ "$EXPECT" != known_fail || -n "$EXPECT_FAIL_PHASE" ]] \
     || die "$scen: EXPECT=known_fail requires EXPECT_FAIL_PHASE"
 
+  FIRST_RULESET="$RULESET"
   SRC="$WORK/$scen/src"
   DISK_CACHE="$WORK/$scen/disk"
   LOGDIR="$OUT/$scen"
@@ -344,7 +389,7 @@ run_scenario() {
 
   if [[ -n "$DRY_RUN" ]]; then
     info "  repo      $REPO ($REPO_KIND ${REPO_REV:-$REPO_PATH})"
-    info "  ruleset   $RULESET"
+    info "  ruleset   $RULESET${RULESET_THEN:+, then $RULESET_THEN}"
     info "  pattern   $TARGET_PATTERN   tests=$RUN_TESTS   bazel=$BAZELVERSION"
     info "  src       $SRC"
     info "  disk      $DISK_CACHE"
@@ -356,9 +401,15 @@ run_scenario() {
 
   FAILED_PHASE=""; FAIL_MSG=""
   local ph
-  for ph in "${PHASES[@]}"; do
-    if [[ "$ph" == converge && "$EXPECT_CONVERGES" != 1 ]]; then
-      skip converge "EXPECT_CONVERGES=0"
+  local -a phases=("${PHASES[@]}")
+  [[ -n "$RULESET_THEN" ]] && phases+=("${SECOND_PASS_PHASES[@]}")
+  for ph in "${phases[@]}"; do
+    if [[ "$ph" == converge* && "$EXPECT_CONVERGES" != 1 ]]; then
+      skip "$ph" "EXPECT_CONVERGES=0"
+      continue
+    fi
+    if [[ "$ph" == roundtrip && "$EXPECT_ROUNDTRIP_IDENTICAL" != 1 ]]; then
+      skip "$ph" "EXPECT_ROUNDTRIP_IDENTICAL=0"
       continue
     fi
     begin_phase "$ph"
@@ -382,7 +433,8 @@ _write_summary() {
   {
     printf 'scenario:   %s\n' "$scen"
     printf 'repo:       %s @ %s\n' "$REPO" "${REPO_REV:-$REPO_PATH}"
-    printf 'ruleset:    %s\n' "$RULESET"
+    printf 'ruleset:    %s%s\n' "$FIRST_RULESET" \
+      "$([[ -n "$RULESET_THEN" ]] && printf ', then %s' "$RULESET_THEN")"
     printf 'tool:       %s %s\n' "$TOOL_SPEC" "${TOOL_VERSION:-}"
     printf 'targets:    %s\n' "$N_TARGETS"
     printf 'edits:      %s across %s file(s)\n' "$EDITS_TOTAL" "${#REPORTED_FILES[@]}"

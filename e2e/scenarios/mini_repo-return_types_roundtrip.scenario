@@ -1,0 +1,11 @@
+# Forward, then back: rewrite every eligible function to a trailing return type,
+# rebuild, then move them all back and rebuild again.  Both legs also have to
+# converge, so each direction is checked for being a fixpoint on the other's
+# output.
+REPO=mini_repo
+RULESET=trailing_return_types
+RULESET_THEN=leading_return_types
+EXPECT=pass
+# Everything this fixture writes in leading position can move to trailing and
+# back, so the two passes must cancel out exactly.
+EXPECT_ROUNDTRIP_IDENTICAL=1

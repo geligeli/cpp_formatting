@@ -1,0 +1,6 @@
+# The reverse of trailing_return_types.  Far more selective than the forward
+# direction -- a trailing return type that names a parameter, restructures the
+# declarator, or resolves in a scope the leading position cannot see is left
+# where it is -- so a scenario using this on its own needs a corpus that
+# already has trailing return types to move.
+return_types: leading

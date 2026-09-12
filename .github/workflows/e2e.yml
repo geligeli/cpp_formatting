@@ -32,6 +32,7 @@ jobs:
         # the scenario has been run locally and its EXPECT value recorded.
         scenario:
           - mini_repo-all
+          - mini_repo-return_types_roundtrip
           - macro_repo-member_snake_case
           - googletest-trailing_return_types
           - googletest-member_snake_case

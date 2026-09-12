@@ -52,6 +52,34 @@ Twelve phases, each timed and logged:
 | `converge` | a second pass has nothing left to do, i.e. the transform is a fixpoint |
 | `report` | summary + artifacts |
 
+### Two-pass scenarios
+
+A scenario may name a **second ruleset** to run over the first one's output:
+
+```bash
+RULESET=trailing_return_types
+RULESET_THEN=leading_return_types
+```
+
+`swap` commits pass 1 — so `applied` keeps measuring only what the *current*
+pass wrote — and drops the second ruleset in; then `check2 diff2 fix2 applied2
+rebuild2 converge2` repeat the same assertions for it. This is how the two
+return-type directions are tested against each other: rewrite every function to
+a trailing return type, rebuild, move them all back, rebuild again.
+
+Optionally:
+
+```bash
+EXPECT_ROUNDTRIP_IDENTICAL=1
+```
+
+adds a final `roundtrip` phase asserting the sources came back **byte-identical**
+to the pre-transform tree. Only declare it where the second ruleset really does
+undo the first — the `leading` direction rejects strictly more than `trailing`
+does, so on a large corpus some declarations are expected to stay where the
+first pass put them, and there `rebuild2` and `converge2` are the assertions
+that carry the weight.
+
 ## Expected outcomes
 
 Some transformations are *expected* to break some repos, and the corpus says so
@@ -87,14 +115,14 @@ BUILD_FLAGS=()                # extra flags for its builds
 **A ruleset** — `e2e/rulesets/<name>.yaml`, a literal `cpp_format.yaml`.
 
 **A scenario** — `e2e/scenarios/<repo>-<ruleset>.scenario`, pairing the two plus
-the expectation. Run it once locally before committing `EXPECT`: a wrong value
+the expectation (and optionally a second ruleset, see above). Run it once locally before committing `EXPECT`: a wrong value
 fails either way (normally, or via XPASS), so it cannot rot silently, but the
 first commit should be green.
 
 ## Triaging a failure
 
 Artifacts land in `$E2E_WORK_DIR/artifacts/<scenario>/` — `summary.txt`,
-`fix.patch`, and a log per phase. The target workspace is left in place at
+`<ruleset>.patch` (one per pass), and a log per phase. The target workspace is left in place at
 `$E2E_WORK_DIR/<scenario>/src`, so you can `cd` there and re-run `bazel build`
 or `./tools/cpp_format.sh diff` by hand.
 
