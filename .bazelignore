@@ -12,3 +12,7 @@ e2e/testdata
 # They hold BUILD files of their own, which //... must not sweep up.
 .disk_cache
 .bazel_cache
+
+# Worktrees created by EnterWorktree are separate checkouts (with their own
+# bazel-* output symlinks); they are not packages of this workspace.
+.claude

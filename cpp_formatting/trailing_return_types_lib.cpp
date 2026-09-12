@@ -302,6 +302,16 @@ void TrailingReturnCallback::runToTrailing(const FunctionDecl& Func,
   // produce `auto foo() -> auto { ... }` which is redundant noise.
   if (ReturnLoc.getAs<AutoTypeLoc>()) return;
 
+  // A return type whose spelling comes even partly from a macro expansion
+  // cannot be hoisted: its source range does not cover the text that was
+  // written.  abseil declares `const ElfW(Phdr)* GetPhdr(int) const;`, where
+  // ElfW is a macro -- getTypeLocLeftmostBegin() skips macro locations, so the
+  // range collapses onto the `*` alone and the rewrite produces
+  // `const ElfW(Phdr)auto GetPhdr(int) const -> *;`.  The reverse direction
+  // already refuses these; this is the same rule for the forward one.
+  if (ReturnRange.getBegin().isMacroID() || ReturnRange.getEnd().isMacroID())
+    return;
+
   // Pointer/reference TypeLocs (e.g. LValueReferenceTypeLoc for `T &`) only
   // report their sigil as their local begin; the base type lives in the next
   // TypeLoc in the chain.  Walk the chain to find the true leftmost location,

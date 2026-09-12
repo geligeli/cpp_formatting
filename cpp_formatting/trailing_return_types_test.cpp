@@ -754,3 +754,25 @@ TEST(LeadingReturnTypes, IsAFixpoint) {
   const std::string once = unwind("auto foo() -> int { return 1; }");
   EXPECT_EQ(unwind(once.c_str()), once);
 }
+
+TEST(TrailingReturnTypes, MacroInReturnTypeNotRewritten) {
+  // abseil's `const ElfW(Phdr)* GetPhdr(int) const;`. The type's spelling comes
+  // partly from a macro, so its source range does not cover the written text:
+  // hoisting it produced `const ElfW(Phdr)auto GetPhdr(int) const -> *;`.
+  const char* code =
+      "#define ELFW(x) Elf64_##x\n"
+      "struct Elf64_Phdr {};\n"
+      "struct S {\n"
+      "  const ELFW(Phdr) * GetPhdr(int index) const;\n"
+      "};\n";
+  EXPECT_EQ(rewrite(code), code);
+}
+
+TEST(TrailingReturnTypes, MacroElsewhereStillRewritten) {
+  // The guard must be about the *return type* only -- a macro in the body or
+  // the parameter list is no reason to skip.
+  EXPECT_EQ(rewrite("#define ZERO 0\n"
+                    "int value(int n) { return n + ZERO; }\n"),
+            "#define ZERO 0\n"
+            "auto value(int n) -> int { return n + ZERO; }\n");
+}
