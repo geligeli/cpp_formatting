@@ -710,7 +710,7 @@ Managed via Bzlmod ([MODULE.bazel](MODULE.bazel)):
 
 | Dependency | Version |
 |---|---|
-| `llvm-project` (Clang libraries + LLVM YAML + builtin headers) | 19.1.7 (built from source, see below) |
+| `llvm-project` (Clang libraries + LLVM YAML + builtin headers) | 21.1.8 (built from source, see below) |
 | `googletest` | 1.14.0.bcr.1 |
 | `rules_cc` | 0.2.17 |
 | `rules_shell` | 0.4.1 |

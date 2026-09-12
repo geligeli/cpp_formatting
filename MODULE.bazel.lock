@@ -178,7 +178,7 @@
     },
     "//third_party/llvm:extensions.bzl%llvm": {
       "general": {
-        "bzlTransitiveDigest": "flwE6Q4ZYNAD4IsV+4mEgnHQcFFyp60Z0/V2I3Qgb4E=",
+        "bzlTransitiveDigest": "642mz/T8anyK8nidr+XiOHtGZfm+linKtndHZhyCK04=",
         "usagesDigest": "CrcKKa5oBdOTLY3ZeaVBiY2x3U16aVNPJGOoRUUcsgs=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
@@ -196,10 +196,10 @@
                 "@@//patches:llvm_zlib_std_c11_msvc.patch",
                 "@@//patches:llvm_zstd_no_asm_on_windows.patch"
               ],
-              "sha256": "59abea1c22e64933fad4de1671a61cdb934098793c7a31b333ff58dc41bff36c",
-              "strip_prefix": "llvm-project-llvmorg-19.1.7",
+              "sha256": "7ba3f2a8d8fda88be18a31d011e8195d3b7f87f9fa92b20c94cba2d7f65b0e3f",
+              "strip_prefix": "llvm-project-llvmorg-21.1.8",
               "urls": [
-                "https://github.com/llvm/llvm-project/archive/refs/tags/llvmorg-19.1.7.tar.gz"
+                "https://github.com/llvm/llvm-project/archive/refs/tags/llvmorg-21.1.8.tar.gz"
               ]
             }
           },

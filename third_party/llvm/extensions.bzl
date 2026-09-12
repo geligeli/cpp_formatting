@@ -1,14 +1,14 @@
 # Bzlmod module extension that builds Clang/LLVM from source using LLVM's own
 # Bazel overlay (`utils/bazel`).  The Bazel Central Registry only publishes
-# llvm-project up to 17.0.4, so to track a newer Clang (19.1.7 here) we fetch
+# llvm-project up to 17.0.4, so to track a newer Clang (21.1.8 here) we fetch
 # the monorepo source archive and run the upstream `llvm_configure` overlay
 # rule, mirroring the WORKSPACE example in utils/bazel/examples/http_archive.
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 load("//third_party/llvm:configure.bzl", "llvm_configure")
 
 # Pin to a released tag so builds are reproducible.
-LLVM_VERSION = "19.1.7"
-LLVM_SHA256 = "59abea1c22e64933fad4de1671a61cdb934098793c7a31b333ff58dc41bff36c"
+LLVM_VERSION = "21.1.8"
+LLVM_SHA256 = "7ba3f2a8d8fda88be18a31d011e8195d3b7f87f9fa92b20c94cba2d7f65b0e3f"
 
 def _llvm_impl(_module_ctx):
     http_archive(

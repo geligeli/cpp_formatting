@@ -14,7 +14,7 @@ bazel_dep(name = "apple_support", version = "1.24.1", repo_name = "build_bazel_a
 
 # Clang/LLVM is built from source via LLVM's own Bazel overlay.  The Bazel
 # Central Registry only ships llvm-project up to 17.0.4, so newer Clang
-# releases (19.1.7 here) are pulled in through a local module extension that
+# releases (21.1.8 here) are pulled in through a local module extension that
 # fetches the monorepo source and runs the upstream `llvm_configure` rule.
 llvm = use_extension("//third_party/llvm:extensions.bzl", "llvm")
 use_repo(llvm, "llvm-project", "llvm-raw", "llvm_zlib", "llvm_zstd")
