@@ -188,6 +188,7 @@ The `--` separates the tool's own flags from the Clang compilation flags. At min
 | `int foo()` | yes | plain return type |
 | `const int* foo()` | yes | leading cv-qualifiers captured via backward scan |
 | `int foo();` (declaration only) | yes | forward declarations rewritten too |
+| a template instantiated in the same TU | pattern only | an implicit instantiation carries the pattern's source locations, so matching it too would rewrite the same place twice (`unless(isTemplateInstantiation())`) |
 | `void foo()` | no | `void` excluded by matcher |
 | `auto foo() -> int` | no | already has a trailing return |
 | `auto foo() { return 42; }` | no | deduced `auto` — rewriting would be redundant |

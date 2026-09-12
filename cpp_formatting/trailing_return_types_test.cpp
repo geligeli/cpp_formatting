@@ -431,3 +431,80 @@ TEST(TrailingReturnTypesDeducingThis, AutoDeducedNotRewritten) {
       "struct S { int v; auto get(this const S& self) { return self.v; } };";
   EXPECT_EQ(rewrite23(code), code);
 }
+
+TEST(TrailingReturnTypes, TemplateInstantiationRewrittenOnce) {
+  // An implicit instantiation shares the pattern's source locations. If it is
+  // matched too, the same declaration is rewritten twice -- the second time
+  // reading back the `auto` the first one wrote.
+  EXPECT_EQ(rewrite("class Message {\n"
+                    " public:\n"
+                    "  template <typename T>\n"
+                    "  Message& append(const T& v) {\n"
+                    "    (void)v;\n"
+                    "    return *this;\n"
+                    "  }\n"
+                    "};\n"
+                    "inline void use() {\n"
+                    "  Message m;\n"
+                    "  m.append(1);\n"
+                    "}\n"),
+            "class Message {\n"
+            " public:\n"
+            "  template <typename T>\n"
+            "  auto append(const T& v) -> Message& {\n"
+            "    (void)v;\n"
+            "    return *this;\n"
+            "  }\n"
+            "};\n"
+            "inline void use() {\n"
+            "  Message m;\n"
+            "  m.append(1);\n"
+            "}\n");
+}
+
+TEST(TrailingReturnTypes, MemberTemplateOfInstantiatedClassRewrittenOnce) {
+  // Instantiating a class template re-creates its member function *templates*
+  // as patterns: those keep TSK_Undeclared while still pointing back at the
+  // original source locations, so only the "inside an instantiation" arm of
+  // isInstantiated() keeps them from being rewritten a second time.
+  EXPECT_EQ(rewrite("template <typename U>\n"
+                    "class Box {\n"
+                    " public:\n"
+                    "  template <typename P>\n"
+                    "  static const int* get(const Box& b) {\n"
+                    "    (void)b;\n"
+                    "    return nullptr;\n"
+                    "  }\n"
+                    "};\n"
+                    "inline void use() {\n"
+                    "  Box<int> b;\n"
+                    "  Box<int>::get<char>(b);\n"
+                    "}\n"),
+            "template <typename U>\n"
+            "class Box {\n"
+            " public:\n"
+            "  template <typename P>\n"
+            "  static auto get(const Box& b) -> const int* {\n"
+            "    (void)b;\n"
+            "    return nullptr;\n"
+            "  }\n"
+            "};\n"
+            "inline void use() {\n"
+            "  Box<int> b;\n"
+            "  Box<int>::get<char>(b);\n"
+            "}\n");
+}
+
+TEST(TrailingReturnTypes, FunctionReturningFunctionPointerNotRewritten) {
+  // The return type's source range wraps the name and parameters here, so
+  // there is no prefix to hoist -- moving it would duplicate the declarator.
+  const char* code = "int (*make(int))(bool);";
+  EXPECT_EQ(rewrite(code), code);
+}
+
+TEST(TrailingReturnTypes, TypedefedFunctionPointerReturnIsRewritten) {
+  // Spelled through an alias the return type *is* a plain prefix, so it is
+  // rewritten as usual -- the guard above must not over-reach.
+  EXPECT_EQ(rewrite("using fn_ptr = int (*)(bool);\nfn_ptr make(int);\n"),
+            "using fn_ptr = int (*)(bool);\nauto make(int) -> fn_ptr;\n");
+}

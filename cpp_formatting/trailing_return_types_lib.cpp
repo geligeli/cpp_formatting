@@ -120,6 +120,14 @@ void TrailingReturnCallback::run(const MatchFinder::MatchResult& Result) {
   SourceLocation ExtStart = skipQualifiersBackward(TypeBegin, SM);
   SourceRange FullReturnRange(ExtStart, ReturnRange.getEnd());
 
+  // In a declarator whose return type *wraps* the function name -- a function
+  // returning a function pointer, `int (*f(int))(bool)` -- the return TypeLoc's
+  // source range spans the whole declarator, name and parameters included.
+  // Hoisting it would duplicate the whole declarator after the `->`.  Only
+  // rewrite when the return type is written entirely before the name.
+  if (!SM.isBeforeInTranslationUnit(ReturnRange.getEnd(), Func->getLocation()))
+    return;
+
   // Extract the return-type text, accounting for edits already applied to
   // this buffer.  In cpp_format's combined pass a rename rule may already
   // have rewritten an identifier inside the return type (e.g. a member in
@@ -208,9 +216,25 @@ void TrailingReturnCallback::run(const MatchFinder::MatchResult& Result) {
 
 void registerTrailingReturnMatchers(MatchFinder& Finder,
                                     TrailingReturnCallback& Callback) {
+  // `unless(isInstantiated())` is load-bearing: an instantiation carries the
+  // *pattern's* source locations, so without it a template instantiated in the
+  // same TU is rewritten a second time at the same place -- and by then the
+  // return type reads `auto`, so the second rewrite emits `-> auto`.  Under
+  // --emit-edits those land in one record file as conflicting edits at one
+  // offset (this is what googletest's matcher headers hit).
+  //
+  // isInstantiated() rather than the narrower isTemplateInstantiation():
+  // instantiating a class template re-creates its member function *templates*
+  // as patterns, which keep TSK_Undeclared while still pointing back at the
+  // original locations, so only the "has an instantiated ancestor" arm catches
+  // them.  Explicit specializations are written out in source and keep being
+  // rewritten (TSK_ExplicitSpecialization is not an instantiation).  The
+  // rename side takes the same stance, via
+  // shouldVisitTemplateInstantiations() == false.
   Finder.addMatcher(
       functionDecl(unless(hasTrailingReturn()), unless(returns(voidType())),
-                   unless(cxxConversionDecl()), unless(isDefaulted()))
+                   unless(cxxConversionDecl()), unless(isDefaulted()),
+                   unless(isInstantiated()))
           .bind("func"),
       &Callback);
 }

@@ -227,6 +227,7 @@ A variant of the integration for external repos that want the lint/fix gate **wi
 | `decltype(auto) foo()` | no | same `AutoTypeLoc` check |
 | `int foo();` (declaration only) | yes | all declarations rewritten independently |
 | `int foo(); int foo() {...}` (both in same TU) | yes (both) | each declaration rewritten independently |
+| a template instantiated in the same TU | pattern only | an implicit instantiation carries the pattern's source locations, so matching it too would rewrite the same place twice (`unless(isTemplateInstantiation())`) |
 
 ### `normalize_variables`: cross-file renaming
 
