@@ -52,7 +52,8 @@ CppFormatEditsInfo = provider(
 # sites, which would half-apply the rename. The cost is that declarations
 # living in a textual fragment are not formatted.
 _HDR_EXTS = ["h", "hh", "hpp", "hxx", "h++"]
-_SRC_EXTS = ["cc", "cpp", "cxx", "c++"] + _HDR_EXTS
+_TU_EXTS = ["cc", "cpp", "cxx", "c++"]
+_SRC_EXTS = _TU_EXTS + _HDR_EXTS
 
 def _own_files(ctx, exts):
     out = []
@@ -77,6 +78,19 @@ def _own_files(ctx, exts):
 
 def _own_sources(ctx):
     return _own_files(ctx, _SRC_EXTS)
+
+# The files that are actually translation units.  A header is not one: C++ has
+# no way to compile a header, only to include it, and parsing one standalone
+# assumes it is self-contained in *this* target's compilation context -- which
+# a build does not guarantee and Bazel does not check without layering_check.
+# protobuf is where that assumption breaks: arena_cleanup.h ends with
+# `#include "google/protobuf/port_def.inc"` while its target depends only on
+# abseil, because every TU that includes it has already pulled :port in; and
+# protobuf_headers globs every header with no deps at all.  So headers are
+# parsed where they are included, by the actions of the targets that include
+# them, and are reachable for rewriting through --owned-files.
+def _own_translation_units(ctx):
+    return _own_files(ctx, _TU_EXTS)
 
 def _record_path(ctx, src):
     # Under <name>.cpp_format/ so two targets' records never collide, and keyed
@@ -229,6 +243,25 @@ def _aspect_impl(target, ctx):
             OutputGroupInfo(cpp_format_compile_commands = cc_group),
         ]
     mine_headers = depset(direct = _owned_headers(ctx), transitive = [dep_headers])
+
+    # A target with no translation unit of its own -- a header-only library --
+    # emits no records.  Its headers are still propagated as owned, which is
+    # what makes their declarations renameable, and their uses rewritten, in
+    # every TU that includes them.  The one thing lost is a header that *no*
+    # TU in the formatted set includes: nothing parses it, so nothing renames
+    # it -- and nothing renames its members anywhere either, so the result is
+    # less reach, never a half-applied rename.
+    tus = _own_translation_units(ctx)
+    if not tus:
+        return [
+            CppFormatEditsInfo(
+                records = depset(transitive = transitive),
+                headers = mine_headers,
+                compile_commands = mine_cc,
+            ),
+            OutputGroupInfo(cpp_format_compile_commands = cc_group),
+        ]
+
     builtin = ctx.files._builtin_headers
     res_dir = _resource_dir(builtin)
 
@@ -264,7 +297,7 @@ def _aspect_impl(target, ctx):
         compile_args.add("-resource-dir=" + res_dir)
 
     records = []
-    for src in srcs:
+    for src in tus:
         rec = ctx.actions.declare_file(_record_path(ctx, src))
         args = ctx.actions.args()
         args.add("--config", ctx.file._config)

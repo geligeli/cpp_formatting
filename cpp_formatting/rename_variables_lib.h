@@ -38,7 +38,9 @@ class Rewriter;
 // in a .cpp even when the declaration lives in a header that is also in the
 // set. An empty FileSet falls back to the original behaviour (main-file-only
 // collection).
-using FileSet = std::unordered_set<std::string>;
+// FileSet lives in tu_driver.h: it is what an action may rewrite, which the
+// driver and every pass share.
+using ::FileSet;
 
 // ---------------------------------------------------------------------------
 // Rename callback

@@ -57,9 +57,15 @@ auto constStyleRuleId(ConstStyle Style) -> const char*;
 ///
 /// Exposed so cpp_format can run this pass on an AST it has already parsed,
 /// sharing one Rewriter with the other passes.
+/// \p Owned, when non-null, is the set of files this pass may rewrite (Emit
+/// mode).  Without it only the TU's own main file is rewritten, which is right
+/// for a direct run; in Emit mode a header has no action of its own, so it must
+/// be edited by the TUs that include it.  See isRewritableFile() in
+/// tu_driver.h.
 void runConstPlacementOnAST(clang::ASTContext& Ctx, clang::Rewriter& RW,
                             ConstStyle Style, LintReport* Report,
-                            llvm::StringRef RuleId, EditReport* Edits);
+                            llvm::StringRef RuleId, EditReport* Edits,
+                            const FileSet* Owned = nullptr);
 
 // ---------------------------------------------------------------------------
 // ConstPlacementAction

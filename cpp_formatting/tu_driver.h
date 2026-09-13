@@ -4,8 +4,10 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
+#include "clang/Basic/SourceManager.h"
 #include "clang/Frontend/FrontendAction.h"
 #include "clang/Tooling/ArgumentsAdjusters.h"
 #include "clang/Tooling/CompilationDatabase.h"
@@ -120,6 +122,28 @@ struct TUDriverOptions {
   int MaxFullPasses = 4;     ///< veto-driven re-runs of everything
   int MaxStaleRounds = 2;    ///< re-runs of stale TUs (one suffices)
 };
+
+// ---------------------------------------------------------------------------
+// What one action may rewrite
+// ---------------------------------------------------------------------------
+
+/// Real absolute paths of the files a run may rewrite.  The source list says
+/// which files are *parsed* as translation units; this says which may be
+/// *edited*, and the two differ: a header is edited wherever it is included.
+using FileSet = std::unordered_set<std::string>;
+
+/// True when \p Loc is spelled in a file this action may rewrite.
+///
+/// With an empty \p Owned -- a direct run -- that is the TU's own main file
+/// and nothing else, because a direct run merges whole rewritten *file
+/// contents* between TUs (PendingRewrites is path -> content, last writer
+/// wins), so two TUs rewriting one header would silently keep only one of
+/// their results.  In Emit mode the unit of merge is a *record*, which
+/// aggregation unions per file and dedups byte-identically, so every TU may
+/// edit every file it owns -- and must, because a header is not a translation
+/// unit and is never parsed on its own there.
+bool isRewritableFile(clang::SourceLocation Loc, clang::SourceManager& SM,
+                      const FileSet& Owned);
 
 /// True for .h/.hh/.hpp/.hxx/.h++ -- the files the driver runs after every
 /// other source, and the aspect's notion of a header.

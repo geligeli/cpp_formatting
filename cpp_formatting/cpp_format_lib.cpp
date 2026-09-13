@@ -61,9 +61,14 @@ class CppFormatConsumer : public ASTConsumer {
     // moved first rides along into `-> type` instead of being clobbered by the
     // wholesale `auto` replacement.  In Emit mode the same ordering lets
     // runToTrailing() subsume these records the way it subsumes rename ones.
+    // In Emit mode every pass may edit any owned file: a header is not a
+    // translation unit there and has no action of its own (see
+    // isRewritableFile in tu_driver.h).  A direct run keeps each file to its
+    // own TU, since it merges whole file contents rather than records.
+    const FileSet* Owned = Edits ? &CollectFrom : nullptr;
     if (ConstPlacement)
       runConstPlacementOnAST(Ctx, RW, *ConstPlacement, Report,
-                             constStyleRuleId(*ConstPlacement), Edits);
+                             constStyleRuleId(*ConstPlacement), Edits, Owned);
 
     if (ReturnStyle) {
       // MatchFinder::matchAST runs the matchers on the already-parsed AST —
@@ -73,6 +78,7 @@ class CppFormatConsumer : public ASTConsumer {
       TrailingReturnCallback Callback(RW, *ReturnStyle);
       if (Report) Callback.setLintReport(Report, ReturnRuleId);
       if (Edits) Callback.setEmitReport(Edits);
+      Callback.setOwnedFiles(Owned);
       registerTrailingReturnMatchers(Finder, Callback, *ReturnStyle);
       Finder.matchAST(Ctx);
     }

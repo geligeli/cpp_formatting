@@ -10,6 +10,7 @@
 
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/DiagnosticOptions.h"
+#include "clang/Basic/FileEntry.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/TextDiagnosticPrinter.h"
 #include "clang/Tooling/Tooling.h"
@@ -39,6 +40,17 @@ void TUSlot::clearOutputs() {
   Report.clear();
   Diagnostics.clear();
   Rc = 0;
+}
+
+bool isRewritableFile(SourceLocation Loc, SourceManager& SM,
+                      const FileSet& Owned) {
+  if (Loc.isInvalid()) return false;
+  const FileID FID = SM.getFileID(SM.getSpellingLoc(Loc));
+  if (Owned.empty()) return FID == SM.getMainFileID();
+  const FileEntry* FE = SM.getFileEntryForID(FID);
+  if (!FE) return false;  // scratch space, or a built-in buffer
+  const llvm::StringRef RealPath = FE->tryGetRealPathName();
+  return !RealPath.empty() && Owned.count(RealPath.str()) > 0;
 }
 
 // ---------------------------------------------------------------------------

@@ -1122,10 +1122,17 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
     return rewriteLocFor(Loc, SM);
   }
 
-  // Each file is rewritten by exactly one TU: its own.
+  // Which files this pass may rewrite.  In a direct run, only this TU's own
+  // main file -- the drivers merge whole rewritten file contents, so a second
+  // writer would lose one of them.  In Emit mode every owned file, because a
+  // header is not a translation unit there: it is parsed wherever it is
+  // included, and aggregation unions the records per file and dedups the
+  // identical ones.  See isRewritableFile() in tu_driver.h.
   auto owns(SourceLocation Loc) const -> bool {
     SourceLocation RL = rewriteLoc(Loc);
-    return RL.isValid() && SM.getFileID(RL) == SM.getMainFileID();
+    if (!RL.isValid()) return false;
+    if (Edits) return isRewritableFile(RL, SM, CollectFrom);
+    return SM.getFileID(RL) == SM.getMainFileID();
   }
 
   // Applies one rewrite and, in Lint mode, records the matching diagnostic; in
@@ -1316,9 +1323,39 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
   // knowing it existed.  Comments and string literals are not identifiers to
   // the raw lexer, so they cost nothing; a name spelled in a comment does not
   // decline anything.
-  void auditMainFileSpellings(const LangOptions& LangOpts) {
+  void auditSpellings(const LangOptions& LangOpts) {
     if (Mode != ApplyMode::Scan || !Vetoes || ByOldName.empty()) return;
-    const FileID FID = SM.getMainFileID();
+    // Every file of this TU that the rewrite pass may edit: the main file, and
+    // in Emit mode every owned file too, because a header has no action of its
+    // own there and the TUs that include it are the only chance to audit it.
+    // fileinfo_begin/end enumerates exactly the files this TU read,
+    // so a path in the owned set that this TU never included costs nothing.
+    // Sorted by FileID, so the vetoes a TU records do not depend on the
+    // iteration order of a DenseMap.
+    std::vector<FileID> Files;
+    for (auto It = SM.fileinfo_begin(), End = SM.fileinfo_end(); It != End;
+         ++It) {
+      const FileID FID = SM.translateFile(It->first);
+      if (FID.isInvalid()) continue;
+      // Only Emit mode looks past the main file, for the same reason owns()
+      // does: there a header has no action of its own.  A direct run parses
+      // every owned file as some TU's main file, so widening would only
+      // duplicate the work and change which of several true reasons is the
+      // one recorded first.
+      if (FID != SM.getMainFileID() &&
+          (!Edits ||
+           !isRewritableFile(SM.getLocForStartOfFile(FID), SM, CollectFrom)))
+        continue;
+      Files.push_back(FID);
+    }
+    std::sort(Files.begin(), Files.end(), [](FileID A, FileID B) {
+      return A.getHashValue() < B.getHashValue();
+    });
+    for (FileID FID : Files) auditOneFile(FID, LangOpts);
+  }
+
+ private:
+  void auditOneFile(FileID FID, const LangOptions& LangOpts) {
     Lexer Lex(FID, SM.getBufferOrFake(FID), SM, LangOpts);
     Token Tok;
     while (true) {
@@ -1341,6 +1378,7 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
     }
   }
 
+ public:
   // Template-dependent member access (e.g. `x.val` where x is a template
   // parameter).  The member is unresolved in this TU, so we rewrite it from the
   // cross-TU resolution recorded by the TUs that instantiate the template.
@@ -2042,7 +2080,7 @@ void runRenameRuleOnAST(ASTContext& Ctx, Rewriter& RW,
                                 Conflicts);
     Scanner.setPreprocessor(PP);
     Scanner.TraverseDecl(TU);
-    Scanner.auditMainFileSpellings(Ctx.getLangOpts());
+    Scanner.auditSpellings(Ctx.getLangOpts());
     if (Vetoes->size() != Before) PruneVetoed();
   }
 

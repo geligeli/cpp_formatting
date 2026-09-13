@@ -93,9 +93,15 @@ echo "PASS: cpp_format --aggregate diff matches aggregate_edits (incl. dependent
 # Each invocation parses exactly one file and is told via --owned-files that
 # every file of the target is renameable.  The records must merge to the same
 # change as one invocation over the whole target: the .cpp's records carry the
-# dependent-token resolution, the header's action rewrites the declaration, and
+# dependent-token resolution, both actions rewrite the declaration, and
 # aggregation joins them.  The list of records goes through --records-from,
 # which is how the rules pass a repository's worth of them.
+#
+# In Emit mode every action edits every file it owns, not just its own main
+# file, because a header is not a translation unit: the aspect gives it no
+# action of its own and it is parsed wherever it is included.  So the .cpp's
+# records cover the header as well, and aggregation dedups the byte-identical
+# duplicates -- which is what the final diff comparison below proves.
 # ---------------------------------------------------------------------------
 realpath widget.cpp > owned.txt
 realpath widget.h >> owned.txt
@@ -103,11 +109,14 @@ realpath widget.h >> owned.txt
   --emit-edits=pf_widget_cpp.json widget.cpp -- -x c++ -std=c++17 -I.
 "$cpp_format" --config=cpp_format.yaml --owned-files=owned.txt \
   --emit-edits=pf_widget_h.json widget.h -- -x c++ -std=c++17 -I.
-# The header's dependent token shows up in the .cpp's records only as a
-# resolution (the "resolutions" sidecar names the token's file), never as an
-# edit: each action rewrites its own file alone.
-if sed -n '/"edits"/,/"resolutions"/p' pf_widget_cpp.json | grep -q '"file": ".*widget\.h"'; then
-  fail "per-file: the .cpp's action emitted edits for the header"
+# The .cpp's action edits the header too -- it owns it, and nothing else would
+# rewrite it if the header had no action of its own.
+sed -n '/"edits"/,/"resolutions"/p' pf_widget_cpp.json | grep -q '"file": ".*widget\.h"' \
+  || fail "per-file: the .cpp's action did not edit the header it owns"
+# The dependent token is still carried as a *resolution*, not an edit: which
+# member it names is only known from an instantiation, so aggregation decides.
+if sed -n '/"edits"/,/"resolutions"/p' pf_widget_cpp.json | grep -q '"old": "val"'; then
+  fail "per-file: the dependent token was emitted as an edit, not a resolution"
 fi
 sed -n '/"resolutions"/,/"vetoes"/p' pf_widget_cpp.json | grep -q '"file": ".*widget\.h"' \
   || fail "per-file: the .cpp's action recorded no dependent-token resolution"
@@ -213,14 +222,15 @@ realpath lib.h > owned.txt
 grep -q 'partCount' main.json \
   || fail "owned-files: dep member use not renamed in the dependent's records"
 
-# The dependent must not re-emit edits for the dep's own files: each TU rewrites
-# only its main file, so the merged result has no duplicate/conflicting edits.
-# It *does* name lib.h as the edits' "owner_file" -- the declaration they belong
-# to -- which is how a veto raised in one target suppresses another's edits, so
-# match the edit target key exactly rather than the file name anywhere.
-if grep -q '"file": .*lib\.h' main.json; then
-  fail "owned-files: dependent re-emitted edits for the dep's header"
-fi
+# The dependent edits the dep's header too.  It has to: the dep may be a
+# header-only target, which has no translation unit and therefore no action of
+# its own, so its dependents are the only thing that ever rewrites it.  Several
+# dependents emitting the same edit is what aggregation's byte-identical dedup
+# is for -- the merged result below is the proof.
+grep -q '"file": .*lib\.h' main.json \
+  || fail "owned-files: dependent did not edit the dep's header it owns"
+# The edits still name lib.h as their "owner_file" -- the declaration they
+# belong to -- which is how a veto raised in one target suppresses another's.
 grep -q '"owner_file": .*lib\.h' main.json \
   || fail "owned-files: dependent's edits do not name the dep's decl as owner"
 
