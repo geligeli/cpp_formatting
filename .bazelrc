@@ -46,6 +46,11 @@ build:windows --cxxopt=/wd5105
 # (llvm/llvm-project#163865, where the source-level workaround was declined),
 # and it keeps the LLVM source unpatched.
 build:windows --cxxopt=/permissive-
+# LLVM is compiled in both configurations -- the target one for the binary, the
+# exec one for tablegen and the other build tools -- and --cxxopt reaches only
+# the former, so the exec build needs the flag spelled out separately. Without
+# this the same file fails again, just marked "[for tool]".
+build:windows --host_cxxopt=/permissive-
 
 # Silence the MSVC warnings LLVM headers trigger in volume (C4624 alone fired
 # ~10k times per build); LLVM's own CMake build suppresses the same set on
