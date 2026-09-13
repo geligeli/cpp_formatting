@@ -70,6 +70,19 @@ build:windows --host_cxxopt=/Zc:preprocessor
 # leaving a bare "Exit 1120" and nothing to act on.
 build:windows --experimental_ui_max_stdouterr_bytes=33554432
 
+# We link the Clang libraries statically, so tell them so.  clang/Support/
+# Compiler.h (new in LLVM 21) annotates exported entities with CLANG_ABI, which
+# on Windows expands to __declspec(dllimport) unless CLANG_BUILD_STATIC is
+# defined -- and ASTMatchersMacros.h puts CLANG_ABI on the `extern const`
+# declaration behind every AST matcher.  Statically linking against hundreds of
+# dllimport'd matchers is thousands of unresolved __imp_* externals (LNK1120).
+# LLVM's own half of this is already inert: LLVM_ABI is additionally gated on
+# LLVM_ENABLE_LLVM_EXPORT_ANNOTATIONS, which the Bazel overlay sets only in
+# posix_defines.  Clang's is gated on CLANG_BUILD_STATIC alone, and the overlay
+# never defines it.
+build:windows --cxxopt=/DCLANG_BUILD_STATIC
+build:windows --host_cxxopt=/DCLANG_BUILD_STATIC
+
 # Silence the MSVC warnings LLVM headers trigger in volume (C4624 alone fired
 # ~10k times per build); LLVM's own CMake build suppresses the same set on
 # MSVC. Kept to warnings actually observed in CI logs.
