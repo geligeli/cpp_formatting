@@ -12,6 +12,8 @@
 #      auto-detects the Clang resource dir so built-in headers resolve.
 #   5. In-place --reverse — the other direction reaches disk through the same
 #      path, and running it over its own output changes nothing.
+#   6. --jobs — two files parsed on two threads give the same in-place result,
+#      and the same dry-run output, as one thread.
 
 set -euo pipefail
 
@@ -111,3 +113,26 @@ assert_equal "in-place --reverse" "$REVERSE" "$REVERSE_EXPECTED"
 cp "$REVERSE" "$TMP/reverse_again.cpp"
 "$BINARY" --reverse -i "$TMP/reverse_again.cpp" -- -std=c++17 >/dev/null 2>&1
 assert_equal "--reverse is a fixpoint" "$TMP/reverse_again.cpp" "$REVERSE_EXPECTED"
+
+# ---------------------------------------------------------------------------
+# Test 6: --jobs — translation units parsed in parallel are buffered per TU and
+# committed in source order, so the result is the same as with one thread.
+# ---------------------------------------------------------------------------
+JOBS_A="$TMP/jobs_a.cpp"
+JOBS_B="$TMP/jobs_b.cpp"
+cp "$INPUT1" "$JOBS_A"
+cp "$INPUT2" "$JOBS_B"
+"$BINARY" -i --jobs=2 "$JOBS_A" "$JOBS_B" -- -std=c++17 >/dev/null 2>&1
+assert_equal "in-place --jobs=2 (file 1)" "$JOBS_A" "$EXPECTED1"
+assert_equal "in-place --jobs=2 (file 2)" "$JOBS_B" "$EXPECTED2"
+
+# A multi-file dry run prints every file behind a `=== path ===` header, in
+# source order, whatever the thread count.
+"$BINARY" --jobs=1 "$INPUT1" "$INPUT2" -- -std=c++17 2>/dev/null > "$TMP/dry_j1.txt"
+"$BINARY" --jobs=2 "$INPUT1" "$INPUT2" -- -std=c++17 2>/dev/null > "$TMP/dry_j2.txt"
+assert_equal "dry-run --jobs=2 matches --jobs=1" "$TMP/dry_j2.txt" "$TMP/dry_j1.txt"
+if [[ "$(grep -c '^=== .* ===$' "$TMP/dry_j1.txt")" -ne 2 ]]; then
+    echo "FAIL: multi-file dry run should print one header per file" >&2
+    exit 1
+fi
+echo "PASS: dry-run multi-file prints one section per file"

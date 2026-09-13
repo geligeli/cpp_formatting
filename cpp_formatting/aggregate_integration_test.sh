@@ -61,6 +61,16 @@ cd "$tmpdir"
 grep -q '"resolutions"' widget_cpp.json \
   || fail "emit: widget.cpp records missing resolutions sidecar"
 
+# Records are emitted per TU and merged in source order, so the file is byte
+# for byte the same whether the TUs were parsed on one thread or several.
+"$cpp_format" --config=cpp_format.yaml --emit-edits=widget_cpp_j1.json --jobs=1 \
+  widget.cpp widget.h -- -x c++ -std=c++17 -I.
+"$cpp_format" --config=cpp_format.yaml --emit-edits=widget_cpp_j4.json --jobs=4 \
+  widget.cpp widget.h -- -x c++ -std=c++17 -I.
+cmp widget_cpp_j1.json widget_cpp_j4.json \
+  || fail "emit: records differ between --jobs=1 and --jobs=4"
+echo "PASS: --emit-edits records are identical with --jobs=1 and --jobs=4"
+
 # ---------------------------------------------------------------------------
 # Test 1 — folded `cpp_format --aggregate` diff == standalone aggregate_edits
 # ---------------------------------------------------------------------------
@@ -224,6 +234,10 @@ grep -q '"old": "itemCount"' counter.json \
   || fail "veto: the library's action should emit the rename it cannot know is unsafe"
 grep -q '"vetoes": \[\]' counter.json \
   || fail "veto: the library's action has no expansion to veto from"
+"$cpp_format" --config=cpp_format.yaml --emit-edits=counter_j1.json --jobs=1 \
+  counter.cpp counter.h -- -x c++ -std=c++17 -I.
+cmp counter.json counter_j1.json \
+  || fail "veto: the library's records differ between --jobs=1 and the default"
 
 # The dependent's action: expands BUMP, so it vetoes instead of editing.
 realpath counter.h > owned.txt

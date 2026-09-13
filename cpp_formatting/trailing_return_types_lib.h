@@ -9,9 +9,9 @@
 #include "clang/ASTMatchers/ASTMatchFinder.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Rewrite/Core/Rewriter.h"
-#include "clang/Tooling/Tooling.h"
 #include "cpp_formatting/lint_lib.h"
 #include "cpp_formatting/output_mode.h"
+#include "cpp_formatting/tu_driver.h"
 #include "llvm/ADT/StringRef.h"
 
 namespace clang {
@@ -96,9 +96,11 @@ void registerTrailingReturnMatchers(
 /// source file to the configured return-type style.
 class TrailingReturnTypesAction : public clang::ASTFrontendAction {
  public:
-  /// \p Pending and \p Report are used in Lint mode only: rewritten content
-  /// is buffered into \p Pending (instead of being printed or written to
-  /// disk) and every rewrite records a diagnostic in \p Report.
+  /// Rewritten content is buffered into \p Pending -- the whole main file in
+  /// DryRun mode, only a main file that has edits otherwise -- and committed by
+  /// TrailingReturnActionFactory::flush() after every TU has run.  Nothing is
+  /// printed or written from inside a TU.  \p Report, when non-null (Lint
+  /// mode), records one diagnostic per rewrite.
   explicit TrailingReturnTypesAction(
       OutputMode Mode, PendingRewrites* Pending = nullptr,
       LintReport* Report = nullptr, std::string RuleId = "",
@@ -122,10 +124,11 @@ class TrailingReturnTypesAction : public clang::ASTFrontendAction {
 // TrailingReturnActionFactory
 // ---------------------------------------------------------------------------
 
-/// Factory for ClangTool::run().  Mirrors RenameActionFactory: buffers
-/// rewritten content per file and (in Lint mode) collects diagnostics.
-class TrailingReturnActionFactory
-    : public clang::tooling::FrontendActionFactory {
+/// The TU driver's client for the return-type rewrite.  Mirrors
+/// RenameActionFactory: buffers rewritten content per file and (in Lint mode)
+/// collects diagnostics, and commits the buffered content via flush() once
+/// every TU has run.
+class TrailingReturnActionFactory : public TUSlotClient {
  public:
   explicit TrailingReturnActionFactory(
       OutputMode Mode, ReturnTypeStyle Style = ReturnTypeStyle::Trailing)
@@ -136,17 +139,32 @@ class TrailingReturnActionFactory
     this->RuleId = std::move(RuleId);
   }
 
-  auto create() -> std::unique_ptr<clang::FrontendAction> override {
-    return std::make_unique<TrailingReturnTypesAction>(Mode, &Pending, Report,
-                                                       RuleId, Style);
+  // TUSlotClient.  The rewrite has no cross-TU state: nothing is seeded and
+  // nothing can veto.
+  auto ruleCount() const -> size_t override { return 0; }
+  auto createAction(TUSlot& Slot)
+      -> std::unique_ptr<clang::FrontendAction> override {
+    return std::make_unique<TrailingReturnTypesAction>(
+        Mode, &Slot.Pending, Report ? &Slot.Report : nullptr, RuleId, Style);
   }
+  auto shared() -> CrossTUState& override { return Shared; }
+  auto rerunNeededOnVeto() const -> bool override { return false; }
+  auto crossTUSeeding() const -> bool override { return false; }
+  void finish(std::vector<TUSlot>& Slots) override;
 
   auto rewrites() const -> const PendingRewrites& { return Pending; }
+
+  /// Commits the buffered content: prints it (DryRun -- one banner, then each
+  /// file, with a `=== path ===` header when there are several), writes it to
+  /// disk (InPlace), or drops it (Lint, where the main has already consumed
+  /// it).  Call once after every TU has run.
+  void flush();
 
  private:
   OutputMode Mode;
   ReturnTypeStyle Style;
-  PendingRewrites Pending;
+  PendingRewrites Pending;  // merged by finish()
+  CrossTUState Shared;      // always empty
   LintReport* Report = nullptr;
   std::string RuleId;
 };

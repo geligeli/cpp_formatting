@@ -1,6 +1,8 @@
 #include "cpp_formatting/trailing_return_types_lib.h"
 
 #include <algorithm>
+#include <fstream>
+#include <ios>
 #include <optional>
 #include <string>
 
@@ -648,31 +650,64 @@ TrailingReturnTypesAction::TrailingReturnTypesAction(OutputMode Mode,
 }
 
 void TrailingReturnTypesAction::EndSourceFileAction() {
+  // Nothing is printed or written here: several TUs may be running at once,
+  // and every TU must see the original on-disk sources.  The factory's flush()
+  // commits the buffered content after the last TU.
+  if (!Pending) return;
   SourceManager& SM = TheRewriter.getSourceMgr();
-  if (Mode == OutputMode::InPlace) {
-    TheRewriter.overwriteChangedFiles();
-    llvm::outs() << "Modifications written to disk.\n";
-  } else if (Mode == OutputMode::Lint) {
-    // Buffer the main file's content only if it actually has edits; the main
-    // consumes it (e.g. to emit a unified diff) after ClangTool::run().
-    FileID MainFID = SM.getMainFileID();
-    for (auto It = TheRewriter.buffer_begin(); It != TheRewriter.buffer_end();
-         ++It) {
-      if (It->first != MainFID) continue;
-      const FileEntry* FE = SM.getFileEntryForID(MainFID);
-      if (!FE) break;
-      std::string Path = FE->tryGetRealPathName().str();
-      if (Path.empty()) break;
-      std::string Content;
-      llvm::raw_string_ostream OS(Content);
-      It->second.write(OS);
-      (*Pending)[std::move(Path)] = std::move(Content);
-      break;
-    }
-  } else {
-    llvm::errs() << "** Rewritten Output (Dry Run): **\n";
-    TheRewriter.getEditBuffer(SM.getMainFileID()).write(llvm::outs());
+  const FileID MainFID = SM.getMainFileID();
+  const FileEntry* FE = SM.getFileEntryForID(MainFID);
+  if (!FE) return;
+  std::string Path = FE->tryGetRealPathName().str();
+  if (Path.empty()) return;
+
+  if (Mode == OutputMode::DryRun) {
+    // A dry run prints every file it was given, changed or not.
+    std::string Content;
+    llvm::raw_string_ostream OS(Content);
+    TheRewriter.getEditBuffer(MainFID).write(OS);
+    (*Pending)[std::move(Path)] = std::move(Content);
+    return;
   }
+
+  // InPlace / Lint: buffer the main file's content only if it has edits.  The
+  // matchers only rewrite declarations written in the main file, so this is
+  // the one buffer that can have any.
+  for (auto It = TheRewriter.buffer_begin(); It != TheRewriter.buffer_end();
+       ++It) {
+    if (It->first != MainFID) continue;
+    std::string Content;
+    llvm::raw_string_ostream OS(Content);
+    It->second.write(OS);
+    (*Pending)[std::move(Path)] = std::move(Content);
+    break;
+  }
+}
+
+void TrailingReturnActionFactory::finish(std::vector<TUSlot>& Slots) {
+  for (TUSlot& S : Slots) {
+    for (auto& [Path, Content] : S.Pending) Pending[Path] = std::move(Content);
+    if (Report)
+      for (const LintDiagnostic& D : S.Report.diagnostics()) Report->add(D);
+  }
+}
+
+void TrailingReturnActionFactory::flush() {
+  if (Mode == OutputMode::DryRun) {
+    llvm::errs() << "** Rewritten Output (Dry Run): **\n";
+    const bool MultiFile = Pending.size() > 1;
+    for (const auto& [Path, Content] : Pending) {
+      if (MultiFile) llvm::outs() << "=== " << Path << " ===\n";
+      llvm::outs() << Content;
+    }
+  } else if (Mode == OutputMode::InPlace) {
+    for (const auto& [Path, Content] : Pending) {
+      std::ofstream Out(Path, std::ios::trunc | std::ios::binary);
+      Out << Content;
+    }
+    if (!Pending.empty()) llvm::outs() << "Modifications written to disk.\n";
+  }
+  Pending.clear();
 }
 
 auto TrailingReturnTypesAction::CreateASTConsumer(CompilerInstance& CI,

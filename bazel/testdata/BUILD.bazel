@@ -5,7 +5,7 @@ load("@rules_cc//cc:cc_library.bzl", "cc_library")
 # bazel/integration/), so this demo — and the `//bazel/testdata:format.check`
 # gate that CI runs — always exercises the tool exactly as it is in this tree.
 # The kit tracks a pinned published binary, which necessarily lags in-tree
-# aspect changes (e.g. --owned-files); re-point at the kit once a release that
+# aspect changes (e.g. --owned-files, --jobs); re-point at the kit once a release that
 # carries the current flag set is published.
 load("//bazel:cpp_format.bzl", "cpp_format_targets")
 

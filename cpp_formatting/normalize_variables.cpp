@@ -1,9 +1,9 @@
 #include "clang/Tooling/CommonOptionsParser.h"
-#include "clang/Tooling/Tooling.h"
 #include "cpp_formatting/embedded_clang_resource.h"
 #include "cpp_formatting/lint_lib.h"
 #include "cpp_formatting/naming_convention.h"
 #include "cpp_formatting/rename_variables_lib.h"
+#include "cpp_formatting/tu_driver.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/raw_ostream.h"
@@ -65,6 +65,16 @@ static cl::opt<std::string> EmitEditsOpt(
              "resolution sidecar) as JSON to the given file, for cross-TU "
              "aggregation. Modifies no source files."),
     cl::init(""), cl::cat(NormalizeVarsCategory));
+
+static cl::opt<unsigned> JobsOpt(
+    "jobs",
+    cl::desc("Number of translation units to parse in parallel. 0 (the "
+             "default) uses every CPU; a larger value is capped at the CPU "
+             "count. The result does not depend on this value. --debug-trace "
+             "always runs serially."),
+    cl::init(0), cl::cat(NormalizeVarsCategory));
+static cl::alias JobsAlias("j", cl::desc("Alias for --jobs"), cl::Prefix,
+                           cl::aliasopt(JobsOpt));
 
 namespace {
 
@@ -162,29 +172,7 @@ auto main(int argc, const char** argv) -> int {
     return newName != name;
   };
 
-  ClangTool Tool(OptionsParser.getCompilations(),
-                 orderSourcesForRename(OptionsParser.getSourcePathList()));
-
-  Tool.appendArgumentsAdjuster(
-      [](const std::vector<std::string>& Args, StringRef) {
-        std::vector<std::string> Out;
-        for (const auto& Arg : Args)
-          if (Arg != "-fno-canonical-system-headers") Out.push_back(Arg);
-        return Out;
-      });
-
   const std::string ResourceDir = ensureClangResourceDir();
-  if (!ResourceDir.empty()) {
-    Tool.appendArgumentsAdjuster(
-        [ResourceDir](const std::vector<std::string>& Args, StringRef) {
-          for (const auto& Arg : Args)
-            if (StringRef(Arg).starts_with("-resource-dir")) return Args;
-          std::vector<std::string> Adjusted = Args;
-          Adjusted.insert(Adjusted.begin() + (Adjusted.empty() ? 0 : 1),
-                          "-resource-dir=" + ResourceDir);
-          return Adjusted;
-        });
-  }
 
   std::unique_ptr<RenameActionFactory> factory;
   switch (scope) {
@@ -226,7 +214,13 @@ auto main(int argc, const char** argv) -> int {
     factory->setLintReport(&Report, "normalize_variables/" +
                                         ScopeOpt.getValue() + "/" +
                                         StyleOpt.getValue());
-  int rc = runWithVetoRerun(Tool, *factory);
+  TUDriverOptions DriverOpts;
+  DriverOpts.Jobs = JobsOpt;
+  // The debug trace is printed from inside each TU; keep it readable.
+  DriverOpts.ForceSerial = mode == OutputMode::Debug;
+  int rc = runTranslationUnits(
+      OptionsParser.getCompilations(), OptionsParser.getSourcePathList(),
+      makeStandardArgumentsAdjuster(ResourceDir), DriverOpts, *factory);
   reportRenameConflicts(factory->conflicts(), ReportRenameConflictsOpt,
                         llvm::errs());
   if (Emit) {

@@ -40,8 +40,8 @@ class LintReport {
  public:
   void add(LintDiagnostic Diag);
 
-  // Discards every diagnostic recorded so far.  Used when a run is redone from
-  // scratch (see runWithVetoRerun), so the second pass does not append to the
+  // Discards every diagnostic recorded so far.  Used when a translation unit
+  // is run again (see tu_driver.h), so the second pass does not append to the
   // first pass's findings.
   void clear() { Diagnostics.clear(); }
 

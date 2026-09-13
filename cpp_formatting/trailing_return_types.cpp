@@ -1,8 +1,8 @@
 #include "clang/Tooling/CommonOptionsParser.h"
-#include "clang/Tooling/Tooling.h"
 #include "cpp_formatting/embedded_clang_resource.h"
 #include "cpp_formatting/lint_lib.h"
 #include "cpp_formatting/trailing_return_types_lib.h"
+#include "cpp_formatting/tu_driver.h"
 #include "llvm/Support/CommandLine.h"
 
 using namespace clang::tooling;
@@ -35,6 +35,15 @@ static cl::opt<std::string> FormatOpt(
              "A non-default value implies --lint."),
     cl::init("text"), cl::cat(TrailingReturnTypesCategory));
 
+static cl::opt<unsigned> JobsOpt(
+    "jobs",
+    cl::desc("Number of translation units to parse in parallel. 0 (the "
+             "default) uses every CPU; a larger value is capped at the CPU "
+             "count. The result does not depend on this value."),
+    cl::init(0), cl::cat(TrailingReturnTypesCategory));
+static cl::alias JobsAlias("j", cl::desc("Alias for --jobs"), cl::Prefix,
+                           cl::aliasopt(JobsOpt));
+
 auto main(int argc, const char** argv) -> int {
   auto ExpectedParser =
       CommonOptionsParser::create(argc, argv, TrailingReturnTypesCategory);
@@ -55,39 +64,10 @@ auto main(int argc, const char** argv) -> int {
     return 1;
   }
 
-  ClangTool Tool(OptionsParser.getCompilations(),
-                 OptionsParser.getSourcePathList());
-  Tool.appendArgumentsAdjuster(
-      [](const std::vector<std::string>& Args, StringRef Filename) {
-        std::vector<std::string> AdjustedArgs;
-        for (const auto& Arg : Args) {
-          // Strip the offending Bazel/GCC flag
-          if (Arg == "-fno-canonical-system-headers") {
-            continue;
-          }
-          AdjustedArgs.push_back(Arg);
-        }
-        return AdjustedArgs;
-      });
-  // Automatically supply the host Clang resource directory so the tool can
-  // find built-in headers (stddef.h etc.) without requiring the user to pass
-  // --extra-arg=-resource-dir=... manually.  Skip if the compilation database
-  // or the user already provides -resource-dir.
-  std::string ResourceDir = ensureClangResourceDir();
-  if (!ResourceDir.empty()) {
-    Tool.appendArgumentsAdjuster(
-        [ResourceDir](const std::vector<std::string>& Args, StringRef) {
-          for (const auto& Arg : Args)
-            if (StringRef(Arg).starts_with("-resource-dir"))
-              return Args;  // already present, don't override
-          // Insert after Args[0] (the compiler name), matching the convention
-          // used by getInsertArgumentAdjuster(..., BEGIN).
-          std::vector<std::string> Adjusted = Args;
-          Adjusted.insert(Adjusted.begin() + (Adjusted.empty() ? 0 : 1),
-                          "-resource-dir=" + ResourceDir);
-          return Adjusted;
-        });
-  }
+  // The embedded Clang resource directory supplies the built-in headers
+  // (stddef.h etc.) without a system Clang; makeStandardArgumentsAdjuster
+  // skips it when the compile command already names one.
+  const std::string ResourceDir = ensureClangResourceDir();
 
   const OutputMode Mode =
       Lint ? OutputMode::Lint
@@ -99,10 +79,17 @@ auto main(int argc, const char** argv) -> int {
   TrailingReturnActionFactory Factory(Mode, Style);
   LintReport Report;
   if (Lint) Factory.setLintReport(&Report, RuleId);
-  int rc = Tool.run(&Factory);
+  TUDriverOptions DriverOpts;
+  DriverOpts.Jobs = JobsOpt;
+  int rc = runTranslationUnits(
+      OptionsParser.getCompilations(), OptionsParser.getSourcePathList(),
+      makeStandardArgumentsAdjuster(ResourceDir), DriverOpts, Factory);
   if (Lint) {
     if (rc != 0) return rc;
     return emitLintResults(Report, Factory.rewrites(), FormatOpt, RuleId);
   }
+  // Commit whatever the TUs that parsed cleanly produced, as before: a TU
+  // that failed simply has nothing buffered.
+  Factory.flush();
   return rc;
 }

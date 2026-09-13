@@ -31,6 +31,65 @@ cc_test(
     ],
 )
 
+# The state a rename pass shares across translation units (dependent-token
+# resolutions, vetoes, reported conflicts) and the merge semantics the TU
+# driver relies on.  No Clang dependency.
+cc_library(
+    name = "rename_state",
+    srcs = ["rename_state.cpp"],
+    hdrs = ["rename_state.h"],
+    deps = [
+        ":lint_lib",
+        "@llvm-project//llvm:Support",
+    ],
+)
+
+cc_test(
+    name = "rename_state_test",
+    srcs = ["rename_state_test.cpp"],
+    copts = [
+        "-DGTEST_HAS_RTTI=0",
+    ],
+    deps = [
+        ":rename_state",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+# Runs a tool's per-TU action over every source on a pool of worker threads
+# (one ClangTool per TU), exchanging cross-TU state at barriers so the result
+# is deterministic and independent of the thread count.  Used by all three
+# binaries.
+cc_library(
+    name = "tu_driver",
+    srcs = ["tu_driver.cpp"],
+    hdrs = ["tu_driver.h"],
+    deps = [
+        ":lint_lib",
+        ":rename_state",
+        "@llvm-project//clang:basic",
+        "@llvm-project//clang:frontend",
+        "@llvm-project//clang:tooling",
+        "@llvm-project//llvm:Support",
+    ],
+)
+
+cc_test(
+    name = "tu_driver_test",
+    srcs = ["tu_driver_test.cpp"],
+    copts = [
+        "-DGTEST_HAS_RTTI=0",
+    ],
+    deps = [
+        ":tu_driver",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@llvm-project//clang:tooling",
+        "@llvm-project//llvm:Support",
+    ],
+)
+
 # Shared library: the rewrite callback + the test-friendly rewriteToTrailingReturnTypes() helper.
 cc_library(
     name = "trailing_return_types_lib",
@@ -39,6 +98,7 @@ cc_library(
     deps = [
         ":lint_lib",
         ":output_mode",
+        ":tu_driver",
         "@llvm-project//clang:ast_matchers",
         "@llvm-project//clang:frontend",
         "@llvm-project//clang:lex",
@@ -56,6 +116,7 @@ cc_binary(
         ":embedded_clang_resource",
         ":lint_lib",
         ":trailing_return_types_lib",
+        ":tu_driver",
         "@llvm-project//clang:ast_matchers",
         "@llvm-project//clang:frontend",
         "@llvm-project//clang:lex",
@@ -127,6 +188,8 @@ cc_library(
     deps = [
         ":lint_lib",
         ":output_mode",
+        ":rename_state",
+        ":tu_driver",
         "@llvm-project//clang:ast",
         "@llvm-project//clang:frontend",
         "@llvm-project//clang:rewrite",
@@ -144,6 +207,7 @@ cc_binary(
         ":lint_lib",
         ":naming_convention",
         ":rename_variables_lib",
+        ":tu_driver",
         "@llvm-project//clang:frontend",
         "@llvm-project//clang:tooling",
         "@llvm-project//llvm:Support",
@@ -227,6 +291,7 @@ cc_library(
         ":output_mode",
         ":rename_variables_lib",
         ":trailing_return_types_lib",
+        ":tu_driver",
         "@llvm-project//clang:ast_matchers",
         "@llvm-project//clang:frontend",
         "@llvm-project//clang:rewrite",
@@ -246,6 +311,7 @@ cc_binary(
         ":lint_lib",
         ":naming_convention",
         ":rename_variables_lib",
+        ":tu_driver",
         "@llvm-project//clang:frontend",
         "@llvm-project//clang:tooling",
         "@llvm-project//llvm:Support",

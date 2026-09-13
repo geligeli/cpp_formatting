@@ -1123,3 +1123,54 @@ TEST(RenameQualifiedDependentName, UninstantiatedLeftAlone) {
             "template <class T> struct Helper { static int dummy_value; };\n"
             "template <class H> int get() { return H::dummyValue; }\n");
 }
+
+// ---------------------------------------------------------------------------
+// Unsafe new names.  collides() asks whether the new name is already *taken* in
+// the declaration's own scope; these are three ways the new name ends up
+// meaning something other than the member without being taken there.
+// ---------------------------------------------------------------------------
+
+TEST(RenameUnsafeNewName, KeywordIsRefused) {
+  // googletest has `char char_;`, and snake_case would make that `char char;`.
+  const char* code = "struct S { int char_; };\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("char_", "char")), code);
+}
+
+TEST(RenameUnsafeNewName, MacroNameIsRefused) {
+  // The new name expands rather than naming the member.  googletest renames
+  // `errno_` to `errno`, which glibc defines.
+  const char* code =
+      "#define kThing 1\n"
+      "struct S { int thing_; };\n"
+      "int use(S& s) { return s.thing_; }\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("thing_", "kThing")), code);
+}
+
+TEST(RenameUnsafeNewName, ShadowedAtTheUseSiteIsRefused) {
+  // The member is not taken in the class, but at the use site a parameter of
+  // the new name is in scope, so the rewrite would rebind the use to it:
+  // `action_ = action` would become the self-assignment `action = action`.
+  const char* code =
+      "struct S {\n"
+      "  int action_;\n"
+      "  void WillByDefault(const int& action) { action_ = action; }\n"
+      "};\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("action_", "action")), code);
+}
+
+TEST(RenameUnsafeNewName, ShadowInAnUnrelatedFunctionDoesNotBlock) {
+  // The local only shadows where it is declared; a member used in a different
+  // function is still renamed.
+  EXPECT_EQ(
+      rewriteMember("struct S {\n"
+                    "  int action_;\n"
+                    "  void set(int v) { action_ = v; }\n"
+                    "};\n"
+                    "void elsewhere() { int action = 1; (void)action; }\n",
+                    renameOne("action_", "action")),
+      "struct S {\n"
+      "  int action;\n"
+      "  void set(int v) { action = v; }\n"
+      "};\n"
+      "void elsewhere() { int action = 1; (void)action; }\n");
+}

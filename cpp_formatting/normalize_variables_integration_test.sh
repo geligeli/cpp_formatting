@@ -21,7 +21,8 @@
 
 set -euo pipefail
 
-binary="$1"
+# Absolute: the --jobs tests below run the binary from inside their fixture dirs.
+binary="$(realpath "$1")"
 multi_h_in="$2"
 multi_cpp_in="$3"
 multi_h_exp="$4"
@@ -43,6 +44,11 @@ tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# Pristine copies of the generated fixtures, for the --jobs equivalence checks
+# at the end (the tests below rewrite their working copies in place).
+fixtures="$tmpdir/fixtures"
+mkdir -p "$fixtures"
 
 # ---------------------------------------------------------------------------
 # Test 1 — multi-file member rename (m_ prefix → snake_case)
@@ -168,6 +174,8 @@ struct B { int val; };
 int use_b() { B b; set_val(b); return b.val; }
 EOF
 
+cp -r "$depdir" "$fixtures/dep"
+
 "$binary" \
   --style=trailing_ --scope=member --in-place \
   "$depdir/dep_a.cpp" "$depdir/dep_b.cpp" "$depdir/dep.h" \
@@ -222,6 +230,7 @@ struct A { int val; };
 int use() { A a; set_val(a); Ext e; set_val(e); return a.val + e.val; }
 EOF
 cp "$vetodir/dep.h" "$vetodir/dep_before.h"
+cp -r "$vetodir" "$fixtures/veto"
 
 # Pass only dep_a.cpp and dep.h — ext.h is intentionally not owned.
 "$binary" \
@@ -275,6 +284,8 @@ int main() {
 }
 EOF
 
+cp -r "$macrodir" "$fixtures/macro"
+
 report="$("$binary" \
   --style=snake_case --scope=member --in-place --report-rename-conflicts \
   "$macrodir/counter.cpp" "$macrodir/main.cpp" "$macrodir/counter.h" \
@@ -314,3 +325,149 @@ grep -q 'FIELD(inner_count)' "$argdir/arg.cpp" \
 grep -q 'FWD(b.inner_count) + OUTER(b.inner_count)' "$argdir/arg.cpp" \
   || fail "macro arg test: macro-argument uses not renamed"
 echo "PASS: names written as macro arguments are renamed at the call site"
+
+# ---------------------------------------------------------------------------
+# Test 9 — a dependent token resolved only from another *header*
+#
+# `set_val`'s `x.val` in a.h is instantiated by `poke` in b.h, and no .cpp is
+# involved.  Whichever header is parsed first cannot know what the other will
+# record, so the tool re-runs the TU whose resolutions turned out stale.  The
+# outcome must not depend on the source order or on the thread count.
+# ---------------------------------------------------------------------------
+chaindir="$tmpdir/chain"
+mkdir -p "$chaindir"
+cat > "$chaindir/a.h" <<'EOF'
+#ifndef A_H
+#define A_H
+template <class T>
+void set_val(T& x) { x.val = 1; }
+#endif
+EOF
+cat > "$chaindir/b.h" <<'EOF'
+#ifndef B_H
+#define B_H
+#include "a.h"
+struct Bee { int val; };
+inline void poke(Bee& b) { set_val(b); }
+#endif
+EOF
+for order in "a.h b.h" "b.h a.h"; do
+  for jobs in 1 4; do
+    run="$chaindir/run"
+    rm -rf "$run" && mkdir -p "$run" && cp "$chaindir/a.h" "$chaindir/b.h" "$run/"
+    # shellcheck disable=SC2086
+    (cd "$run" && "$binary" --style=trailing_ --scope=member --in-place \
+      --jobs=$jobs $order -- -std=c++17 -xc++ -Wno-pragma-once-outside-header -I.) \
+      >/dev/null 2>&1
+    grep -q 'x.val_ = 1;' "$run/a.h" \
+      || fail "header chain ($order, --jobs=$jobs): a.h token not renamed"
+    grep -q 'int val_;' "$run/b.h" \
+      || fail "header chain ($order, --jobs=$jobs): Bee::val not renamed"
+  done
+done
+echo "PASS: a dependent token instantiated only from another header is renamed in every order"
+
+# ---------------------------------------------------------------------------
+# Test 10 — --debug-trace runs serially whatever --jobs says, so its per-TU
+# trace stays readable, and modifies nothing.
+# ---------------------------------------------------------------------------
+tracedir="$tmpdir/trace"
+mkdir -p "$tracedir"
+cp "$order_h_in" "$tracedir/normalize_order_input.h"
+cp "$order_impl_in" "$tracedir/normalize_order_impl_input.cpp"
+cp "$order_test_in" "$tracedir/normalize_order_test_input.cpp"
+trace="$(cd "$tracedir" && "$binary" --style=snake_case --scope=member \
+  --debug-trace --jobs=4 \
+  normalize_order_impl_input.cpp normalize_order_input.h normalize_order_test_input.cpp \
+  -- -std=c++17 -xc++ -Wno-pragma-once-outside-header -I. 2>&1)" \
+  || fail "debug trace: exit status $?"
+[[ "$(grep -c '^TU: ' <<<"$trace")" -eq 3 ]] \
+  || fail "debug trace: expected one trace per TU, got: $trace"
+diff -u "$order_h_in" "$tracedir/normalize_order_input.h" \
+  || fail "debug trace: modified a file"
+echo "PASS: --debug-trace prints every TU's trace and modifies nothing"
+
+# ---------------------------------------------------------------------------
+# Test 11 — --jobs equivalence: every scenario above gives byte-identical files
+# and the same conflict report with one thread and with four.
+# ---------------------------------------------------------------------------
+mkdir -p "$fixtures/multi" "$fixtures/order"
+cp "$multi_h_in"   "$fixtures/multi/normalize_multi_input.h"
+cp "$multi_cpp_in" "$fixtures/multi/normalize_multi_input.cpp"
+cp "$order_h_in"    "$fixtures/order/normalize_order_input.h"
+cp "$order_impl_in" "$fixtures/order/normalize_order_impl_input.cpp"
+cp "$order_test_in" "$fixtures/order/normalize_order_test_input.cpp"
+
+# jobs_equivalent <label> <style> <scope> <sources...>
+jobs_equivalent() {
+  local label="$1" style="$2" scope="$3"
+  shift 3
+  local d1="$tmpdir/jobs1_$label" d4="$tmpdir/jobs4_$label" out1 out4
+  rm -rf "$d1" "$d4"
+  cp -r "$fixtures/$label" "$d1"
+  cp -r "$fixtures/$label" "$d4"
+  out1="$(cd "$d1" && "$binary" --style="$style" --scope="$scope" --in-place \
+    --report-rename-conflicts --jobs=1 "$@" \
+    -- -std=c++17 -xc++ -Wno-pragma-once-outside-header -I. 2>&1 \
+    | { grep -v 'Processing file' || true; } | sort)"
+  out4="$(cd "$d4" && "$binary" --style="$style" --scope="$scope" --in-place \
+    --report-rename-conflicts --jobs=4 "$@" \
+    -- -std=c++17 -xc++ -Wno-pragma-once-outside-header -I. 2>&1 \
+    | { grep -v 'Processing file' || true; } | sort)"
+  diff -r "$d1" "$d4" \
+    || fail "jobs equivalence ($label): --jobs=1 and --jobs=4 rewrote differently"
+  [[ "$out1" == "$out4" ]] \
+    || fail "jobs equivalence ($label): reports differ:\n$out1\n---\n$out4"
+}
+jobs_equivalent multi snake_case member normalize_multi_input.cpp normalize_multi_input.h
+jobs_equivalent order snake_case member normalize_order_impl_input.cpp normalize_order_input.h normalize_order_test_input.cpp
+jobs_equivalent dep trailing_ member dep_a.cpp dep_b.cpp dep.h
+jobs_equivalent veto trailing_ member dep_a.cpp dep.h
+jobs_equivalent macro snake_case member counter.cpp main.cpp counter.h
+echo "PASS: --jobs=1 and --jobs=4 produce identical files and reports in every scenario"
+
+# ---------------------------------------------------------------------------
+# Test 12 — the project's own warning flags cannot fail the run.
+#
+# The compile command belongs to the project being formatted, and a project
+# that builds with -Werror hands us one.  Clang then counts its own warning as
+# an error, ClangTool::run reports a translation unit that parsed perfectly
+# well as failed, and the tool exits 1 -- failing the build (under the Bazel
+# aspect, the emit action) over a diagnostic it never reads.  The warning set
+# is not even the one the project compiles with: a different Clang version, and
+# per-target copts the aspect cannot recover.  A real error still fails, since
+# it does mean the AST cannot be trusted.
+# ---------------------------------------------------------------------------
+werrordir="$tmpdir/werror"
+mkdir -p "$werrordir"
+cat > "$werrordir/engine.cpp" <<'EOF'
+struct Engine {
+  int itemCount = 0;
+  void run() {
+    int index = 0;
+    for (int i = 0; i < 3; ++i) index = i;  // -Wunused-but-set-variable
+    itemCount += 1;
+  }
+};
+EOF
+
+werror_out="$("$binary" \
+  --style=snake_case --scope=member --in-place "$werrordir/engine.cpp" \
+  -- -std=c++17 -xc++ -Wall -Wextra -Werror 2>&1)" \
+  || fail "-Werror test: exited nonzero on a file that only warns: $werror_out"
+[ -z "$werror_out" ] \
+  || fail "-Werror test: the project's warnings were not silenced: $werror_out"
+grep -q 'int item_count = 0;' "$werrordir/engine.cpp" \
+  || fail "-Werror test: member not renamed"
+grep -q 'int index = 0;' "$werrordir/engine.cpp" \
+  || fail "-Werror test: the warned-about local should be left alone"
+
+cat > "$werrordir/broken.cpp" <<'EOF'
+struct Broken { int itemCount = ; };
+EOF
+if "$binary" \
+    --style=snake_case --scope=member --in-place "$werrordir/broken.cpp" \
+    -- -std=c++17 -xc++ >/dev/null 2>&1; then
+  fail "-Werror test: a real parse error must still fail the run"
+fi
+echo "PASS: the project's -Werror cannot fail the run, a real error still does"

@@ -1,6 +1,7 @@
 #include "cpp_formatting/cpp_format_lib.h"
 
 #include <fstream>
+#include <iterator>
 #include <utility>
 
 #include "clang/ASTMatchers/ASTMatchFinder.h"
@@ -165,26 +166,32 @@ CppFormatActionFactory::CppFormatActionFactory(
       ReturnStyle(ReturnStyle),
       ReturnRuleId(std::move(ReturnRuleId)),
       Mode(Mode),
-      CollectFrom(std::move(CollectFrom)),
-      DepResPerRule(this->Rules.size()) {}
+      CollectFrom(std::move(CollectFrom)) {}
 
-auto CppFormatActionFactory::create()
+auto CppFormatActionFactory::createAction(TUSlot& Slot)
     -> std::unique_ptr<clang::FrontendAction> {
+  // Runs on a worker thread: only the tool's immutable configuration and the
+  // slot's own members are touched.  A null Report stays null -- a non-null
+  // pointer is what switches the visitors' diagnostic recording on.
   return std::make_unique<CppFormatAction>(
-      Rules, ReturnStyle, ReturnRuleId, Mode, CollectFrom, &Pending, Report,
-      &DepResPerRule, Mode == OutputMode::Emit ? &Edits : nullptr, &Conflicts,
-      &Vetoes);
+      Rules, ReturnStyle, ReturnRuleId, Mode, CollectFrom, &Slot.Pending,
+      Report ? &Slot.Report : nullptr, &Slot.DepRes,
+      Mode == OutputMode::Emit ? &Slot.Edits : nullptr, &Slot.Conflicts,
+      &Slot.Vetoes);
 }
 
-void CppFormatActionFactory::resetForRerun() {
-  Pending.clear();
-  Edits = EditReport{};
-  Conflicts.clear();
-  for (DependentResolutions& Map : DepResPerRule) Map.clear();
-  // Lint diagnostics are recorded at the same choke point as the rewrites, so
-  // they have to be discarded with them or the second pass appends to them.
-  if (Report) Report->clear();
-  // Vetoes are deliberately kept: they are what the second run acts on.
+void CppFormatActionFactory::finish(std::vector<TUSlot>& Slots) {
+  for (TUSlot& S : Slots) {
+    for (auto& [Path, Content] : S.Pending) Pending[Path] = std::move(Content);
+    Edits.Edits.insert(Edits.Edits.end(),
+                       std::make_move_iterator(S.Edits.Edits.begin()),
+                       std::make_move_iterator(S.Edits.Edits.end()));
+    Conflicts.insert(Conflicts.end(),
+                     std::make_move_iterator(S.Conflicts.begin()),
+                     std::make_move_iterator(S.Conflicts.end()));
+    if (Report)
+      for (const LintDiagnostic& D : S.Report.diagnostics()) Report->add(D);
+  }
 }
 
 void CppFormatActionFactory::emitEdits(llvm::raw_ostream& OS) {
@@ -192,14 +199,14 @@ void CppFormatActionFactory::emitEdits(llvm::raw_ostream& OS) {
   // aggregation resolves them across all TUs before turning survivors into
   // edits.  Keys are relativized to cwd to match the edit records and be stable
   // across sandboxes.
-  for (const DependentResolutions& Map : DepResPerRule)
+  for (const DependentResolutions& Map : Shared.DepResPerRule)
     for (const auto& [Key, R] : Map) {
       if (!R.HasName && !R.Vetoed) continue;
       Edits.Resolutions.push_back({relativizeToCwd(Key.first), Key.second,
                                    R.Length, R.OldName, R.NewName, R.Vetoed,
                                    R.OwnerFile, R.OwnerOffset});
     }
-  for (const auto& [Key, V] : Vetoes) Edits.Vetoes.push_back(V);
+  for (const auto& [Key, V] : Shared.Vetoes) Edits.Vetoes.push_back(V);
   Edits.emitJSON(OS);
 }
 

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <set>
@@ -276,32 +277,18 @@ static std::pair<std::string, unsigned> renameOwnerKey(const Decl* D,
   return locKey(D->getLocation(), SM);
 }
 
-// ---------------------------------------------------------------------------
-// Dependent-token resolution map helpers
-// ---------------------------------------------------------------------------
-
-static void recordResolution(DependentResolutions& DepRes,
-                             const std::pair<std::string, unsigned>& Key,
-                             const std::string& NewName,
-                             llvm::StringRef OldName, unsigned Length,
-                             std::pair<std::string, unsigned> Owner) {
-  DependentResolution& R = DepRes[Key];
-  if (R.Vetoed) return;
-  if (R.HasName && R.NewName != NewName) {
-    R.Vetoed = true;  // instantiations disagree — leave the token alone.
-    return;
-  }
-  R.NewName = NewName;
-  R.HasName = true;
-  R.OldName = OldName.str();
-  R.Length = Length;
-  R.OwnerFile = std::move(Owner.first);
-  R.OwnerOffset = Owner.second;
-}
-
-static void vetoResolution(DependentResolutions& DepRes,
-                           const std::pair<std::string, unsigned>& Key) {
-  DepRes[Key].Vetoed = true;
+// Records a veto against renaming \p Key.  Returns true if this is the first
+// veto for that declaration, so the caller can report it once.
+static bool addRenameVeto(RenameVetoes* Vetoes, const Decl* Key,
+                          SourceManager& SM, llvm::StringRef OldName,
+                          const std::string& Reason) {
+  if (!Vetoes) return false;
+  std::pair<std::string, unsigned> Owner = renameOwnerKey(Key, SM);
+  std::string File = relativizeToCwd(Owner.first);
+  return Vetoes
+      ->try_emplace(std::make_pair(File, Owner.second),
+                    RenameVeto{File, Owner.second, OldName.str(), Reason})
+      .second;
 }
 
 // ---------------------------------------------------------------------------
@@ -317,7 +304,7 @@ class CollectRenamesVisitor
                         VariableScope Scope, RenameMap& Renames,
                         const FileSet& CollectFrom,
                         RenameConflicts* Conflicts = nullptr,
-                        const RenameVetoes* Vetoes = nullptr)
+                        RenameVetoes* Vetoes = nullptr)
       : SM(SM),
         CB(CB),
         Scope(Scope),
@@ -347,7 +334,9 @@ class CollectRenamesVisitor
     if (!Visited.insert(Key).second) return;
     std::string NewName;
     if (!CB(D->getName(), NewName) || NewName == D->getName().str()) return;
-    if (vetoed(D, Key, NewName) || collides(D, NewName)) return;
+    if (unusableNewName(D, Key, NewName) || vetoed(D, Key, NewName) ||
+        collides(D, NewName))
+      return;
     Renames[Key] = std::move(NewName);
   }
 
@@ -369,13 +358,39 @@ class CollectRenamesVisitor
     // One check for the whole family: renameOwnerKey() keys a virtual function
     // by the base-most declaration of its hierarchy, so a veto recorded against
     // any override is found from here.
-    if (vetoed(D, Key, NewName)) return;
+    if (unusableNewName(D, Key, NewName) || vetoed(D, Key, NewName)) return;
     // One check for the whole family: a clash anywhere in the hierarchy means
     // the rename cannot be applied consistently, so none of it is.
     for (const CXXMethodDecl* M : Family)
       if (collides(M, NewName)) return;
     for (const CXXMethodDecl* M : Family)
       Renames[M->getCanonicalDecl()] = NewName;
+  }
+
+  // True when the new name cannot name the declaration no matter what else is
+  // in scope: it is a keyword, or a macro is defined with that name.  Both slip
+  // past collides(), which only asks whether the name is *taken* in this
+  // DeclContext -- googletest renames `char_` to `char` and `errno_` to
+  // `errno`, giving `char char;` and an assignment to glibc's errno macro.
+  bool unusableNewName(const NamedDecl* D, const Decl* Key,
+                       llvm::StringRef NewName) {
+    ASTContext& Ctx = D->getASTContext();
+    const IdentifierInfo& II = Ctx.Idents.get(NewName);
+    if (II.isKeyword(Ctx.getLangOpts())) {
+      record(D, NewName, "'" + NewName.str() + "' is a keyword");
+      return true;
+    }
+    if (II.hasMacroDefinition() || II.hadMacroDefinition()) {
+      const std::string Reason =
+          "'" + NewName.str() + "' is defined as a macro";
+      // Whether a macro is visible depends on what this TU included, so a plain
+      // skip would let a TU that never sees the definition rename the
+      // declaration this one refuses to.  A veto is global; a skip is not.
+      addRenameVeto(Vetoes, Key, SM, D->getName(), Reason);
+      record(D, NewName, Reason);
+      return true;
+    }
+    return false;
   }
 
   // True when an earlier translation unit found a reference to this
@@ -455,8 +470,9 @@ class CollectRenamesVisitor
   RenameMap& Renames;
   const FileSet& CollectFrom;
   RenameConflicts* Conflicts = nullptr;
-  // Vetoes carried over from an earlier TU or an earlier pass of a re-run.
-  const RenameVetoes* Vetoes = nullptr;
+  // Vetoes carried over from an earlier TU or an earlier pass of a re-run,
+  // plus a place to record a macro clash found here for the other TUs.
+  RenameVetoes* Vetoes = nullptr;
   std::unordered_set<const Decl*> Visited;
   // (scope, new name) -> the declaration that claimed it first.
   std::map<std::pair<const DeclContext*, std::string>, const NamedDecl*>
@@ -619,6 +635,23 @@ class RecordDependentResolutionsVisitor
 
 enum class ApplyMode { Scan, Rewrite };
 
+// The names a function declares: parameters and local variables (ParmVarDecl is
+// a VarDecl, so one case covers both).  A rename onto one of these would be
+// captured by it at every use inside that function.
+class LocalNameCollector : public RecursiveASTVisitor<LocalNameCollector> {
+ public:
+  explicit LocalNameCollector(std::set<std::string>& Out) : Out(Out) {}
+
+  bool VisitVarDecl(VarDecl* D) {
+    if (D->getDeclName().isIdentifier() && !D->getName().empty())
+      Out.insert(D->getName().str());
+    return true;
+  }
+
+ private:
+  std::set<std::string>& Out;
+};
+
 class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
  public:
   ApplyRenamesVisitor(Rewriter& RW, SourceManager& SM, const RenameMap& Renames,
@@ -638,6 +671,23 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
         Mode(Mode),
         Vetoes(Vetoes),
         Conflicts(Conflicts) {}
+
+  // While scanning, every function pushes the names it declares (parameters and
+  // locals), so scan() can tell whether a rename would be captured by one.  The
+  // whole function is collected up front rather than tracked as the walk
+  // descends: that over-approximates -- a local in a sibling block does not
+  // really shadow -- and over-vetoing is the safe direction here, since the
+  // failure it prevents is silent.
+  bool TraverseDecl(Decl* D) {
+    using Base = RecursiveASTVisitor<ApplyRenamesVisitor>;
+    auto* FD = dyn_cast_or_null<FunctionDecl>(D);
+    if (Mode != ApplyMode::Scan || !FD) return Base::TraverseDecl(D);
+    LocalNames.emplace_back();
+    LocalNameCollector(LocalNames.back()).TraverseDecl(FD);
+    const bool Result = Base::TraverseDecl(D);
+    LocalNames.pop_back();
+    return Result;
+  }
 
   // Only while scanning.  A dependent token spelled in a macro body has no
   // MemberExpr in the pattern -- which member it names is known only in an
@@ -822,44 +872,59 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
     auto It = Renames.find(Key);
     if (It == Renames.end()) return;
     if (Mode == ApplyMode::Scan) {
-      scan(Loc, Key, OldName);
+      scan(Loc, Key, OldName, It->second);
       return;
     }
     if (!owns(Loc)) return;
     renameAt(Loc, Key, OldName, It->second);
   }
 
-  // A reference with no rewritable spelling vetoes the whole rename.  This
-  // deliberately ignores file ownership: a macro in a header we do not own that
-  // names one of our members is just as fatal, and just as unrewritable.
-  void scan(SourceLocation Loc, const Decl* Key, StringRef OldName) {
-    if (!Vetoes || rewriteLoc(Loc).isValid()) return;
-    SourceLocation Spelling = SM.getSpellingLoc(Loc);
-    std::string Reason;
-    if (!SM.getFileEntryForID(SM.getFileID(Spelling))) {
-      Reason = "the name is formed by token pasting";
-    } else {
-      PresumedLoc PLoc = SM.getPresumedLoc(Spelling);
-      Reason = "referenced from a macro body";
-      if (PLoc.isValid())
-        Reason += " at " + relativizeToCwd(PLoc.getFilename()) + ":" +
-                  std::to_string(PLoc.getLine());
-    }
-    std::pair<std::string, unsigned> Owner = ownerKey(Key);
-    std::string OwnerFile = relativizeToCwd(Owner.first);
-    if (!Vetoes
-             ->try_emplace(
-                 std::make_pair(OwnerFile, Owner.second),
-                 RenameVeto{OwnerFile, Owner.second, OldName.str(), Reason})
-             .second)
+  // Two ways a reference can make a rename unsafe.
+  void scan(SourceLocation Loc, const Decl* Key, StringRef OldName,
+            const std::string& NewName) {
+    if (!Vetoes) return;
+    // (a) No rewritable spelling, so the reference would keep the old name.
+    // This deliberately ignores file ownership: a macro in a header we do not
+    // own that names one of our members is just as fatal, and just as
+    // unrewritable.
+    if (!rewriteLoc(Loc).isValid()) {
+      SourceLocation Spelling = SM.getSpellingLoc(Loc);
+      std::string Reason;
+      if (!SM.getFileEntryForID(SM.getFileID(Spelling))) {
+        Reason = "the name is formed by token pasting";
+      } else {
+        PresumedLoc PLoc = SM.getPresumedLoc(Spelling);
+        Reason = "referenced from a macro body";
+        if (PLoc.isValid())
+          Reason += " at " + relativizeToCwd(PLoc.getFilename()) + ":" +
+                    std::to_string(PLoc.getLine());
+      }
+      veto(Key, OldName, NewName, Reason);
       return;
+    }
+    // (b) The token can be rewritten, but would no longer name the member: a
+    // local or parameter of that name is in scope here, so the rewrite silently
+    // rebinds the use.  googletest's OnCallSpec::action_ -> action, inside
+    // WillByDefault(const Action<F>& action), turns `action_ = action` into the
+    // self-assignment `action = action`.  Every enclosing function is checked,
+    // not just the innermost, since a lambda body can name either.
+    for (const std::set<std::string>& Frame : LocalNames) {
+      if (Frame.find(NewName) == Frame.end()) continue;
+      veto(Key, OldName, NewName,
+           "'" + NewName + "' is a local or parameter where it is used");
+      return;
+    }
+  }
+
+  void veto(const Decl* Key, StringRef OldName, const std::string& NewName,
+            const std::string& Reason) {
+    if (!addRenameVeto(Vetoes, Key, SM, OldName, Reason)) return;
     if (!Conflicts) return;
     const PresumedLoc PL =
         SM.getPresumedLoc(cast<NamedDecl>(Key)->getLocation());
     Conflicts->push_back(RenameConflict{
         PL.isValid() ? PL.getFilename() : "", PL.isValid() ? PL.getLine() : 0,
-        PL.isValid() ? PL.getColumn() : 0, OldName.str(),
-        Renames.find(Key)->second, Reason});
+        PL.isValid() ? PL.getColumn() : 0, OldName.str(), NewName, Reason});
   }
 
   auto ownerKey(const Decl* Key) -> std::pair<std::string, unsigned> {
@@ -882,6 +947,8 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
   RenameConflicts* Conflicts;  // where a veto is reported
   std::set<std::pair<FileID, unsigned>> Rewritten;
   std::map<const Decl*, std::pair<std::string, unsigned>> OwnerKeys;
+  // One frame per enclosing function, innermost last.  Scan mode only.
+  std::vector<std::set<std::string>> LocalNames;
 };
 
 // ---------------------------------------------------------------------------
@@ -1314,21 +1381,30 @@ RenameActionFactory::RenameActionFactory(VariableRenameCallback CB,
       Mode(Mode),
       CollectFrom(std::move(CollectFrom)) {}
 
-auto RenameActionFactory::create() -> std::unique_ptr<clang::FrontendAction> {
+auto RenameActionFactory::createAction(TUSlot& Slot)
+    -> std::unique_ptr<clang::FrontendAction> {
+  // Runs on a worker thread: only the tool's immutable configuration and the
+  // slot's own members are touched.  A null Report stays null -- a non-null
+  // pointer is what switches the visitors' diagnostic recording on.
   return std::make_unique<RenameVariablesAction>(
-      CB, Scope, Mode, CollectFrom, &Pending, Report, RuleId, &DepRes,
-      Mode == OutputMode::Emit ? &Edits : nullptr, &Conflicts, &Vetoes);
+      CB, Scope, Mode, CollectFrom, &Slot.Pending,
+      Report ? &Slot.Report : nullptr, RuleId, &Slot.DepRes[0],
+      Mode == OutputMode::Emit ? &Slot.Edits : nullptr, &Slot.Conflicts,
+      &Slot.Vetoes);
 }
 
-void RenameActionFactory::resetForRerun() {
-  Pending.clear();
-  Edits = EditReport{};
-  Conflicts.clear();
-  DepRes.clear();
-  // Lint diagnostics are recorded at the same choke point as the rewrites, so
-  // they have to be discarded with them or the second pass appends to them.
-  if (Report) Report->clear();
-  // Vetoes are deliberately kept: they are what the second run acts on.
+void RenameActionFactory::finish(std::vector<TUSlot>& Slots) {
+  for (TUSlot& S : Slots) {
+    for (auto& [Path, Content] : S.Pending) Pending[Path] = std::move(Content);
+    Edits.Edits.insert(Edits.Edits.end(),
+                       std::make_move_iterator(S.Edits.Edits.begin()),
+                       std::make_move_iterator(S.Edits.Edits.end()));
+    Conflicts.insert(Conflicts.end(),
+                     std::make_move_iterator(S.Conflicts.begin()),
+                     std::make_move_iterator(S.Conflicts.end()));
+    if (Report)
+      for (const LintDiagnostic& D : S.Report.diagnostics()) Report->add(D);
+  }
 }
 
 void RenameActionFactory::emitEdits(llvm::raw_ostream& OS) {
@@ -1336,13 +1412,14 @@ void RenameActionFactory::emitEdits(llvm::raw_ostream& OS) {
   // aggregation phase resolves them across all TUs before turning survivors
   // into edits.  Keys are relativized to cwd so they match the edit records and
   // are stable across sandboxes.
-  for (const auto& [Key, R] : DepRes) {
-    if (!R.HasName && !R.Vetoed) continue;
-    Edits.Resolutions.push_back({relativizeToCwd(Key.first), Key.second,
-                                 R.Length, R.OldName, R.NewName, R.Vetoed,
-                                 R.OwnerFile, R.OwnerOffset});
-  }
-  for (const auto& [Key, V] : Vetoes) Edits.Vetoes.push_back(V);
+  for (const DependentResolutions& Map : Shared.DepResPerRule)
+    for (const auto& [Key, R] : Map) {
+      if (!R.HasName && !R.Vetoed) continue;
+      Edits.Resolutions.push_back({relativizeToCwd(Key.first), Key.second,
+                                   R.Length, R.OldName, R.NewName, R.Vetoed,
+                                   R.OwnerFile, R.OwnerOffset});
+    }
+  for (const auto& [Key, V] : Shared.Vetoes) Edits.Vetoes.push_back(V);
   Edits.emitJSON(OS);
 }
 
@@ -1435,12 +1512,8 @@ auto RenameAllMemberFunctions(VariableRenameCallback CB, OutputMode Mode,
 auto orderSourcesForRename(const std::vector<std::string>& SourcePaths)
     -> std::vector<std::string> {
   std::vector<std::string> sources, headers;
-  for (const auto& P : SourcePaths) {
-    llvm::StringRef ext = llvm::StringRef(P).rsplit('.').second;
-    (ext == "h" || ext == "hh" || ext == "hpp" || ext == "hxx" ? headers
-                                                               : sources)
-        .push_back(P);
-  }
+  for (const auto& P : SourcePaths)
+    (isHeaderSource(P) ? headers : sources).push_back(P);
   sources.insert(sources.end(), headers.begin(), headers.end());
   return sources;
 }

@@ -3,12 +3,12 @@
 #include <vector>
 
 #include "clang/Tooling/CommonOptionsParser.h"
-#include "clang/Tooling/Tooling.h"
 #include "cpp_formatting/cpp_format_lib.h"
 #include "cpp_formatting/embedded_clang_resource.h"
 #include "cpp_formatting/lint_lib.h"
 #include "cpp_formatting/naming_convention.h"
 #include "cpp_formatting/rename_variables_lib.h"
+#include "cpp_formatting/tu_driver.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -139,6 +139,15 @@ static cl::opt<bool> ReportRenameConflictsOpt(
              "either way."),
     cl::init(false), cl::cat(CppFormatCategory));
 
+static cl::opt<unsigned> JobsOpt(
+    "jobs",
+    cl::desc("Number of translation units to parse in parallel. 0 (the "
+             "default) uses every CPU; a larger value is capped at the CPU "
+             "count. The result does not depend on this value."),
+    cl::init(0), cl::cat(CppFormatCategory));
+static cl::alias JobsAlias("j", cl::desc("Alias for --jobs"), cl::Prefix,
+                           cl::aliasopt(JobsOpt));
+
 // ---------------------------------------------------------------------------
 // Helpers shared across passes
 // ---------------------------------------------------------------------------
@@ -220,27 +229,6 @@ bool addOwnedFilesFrom(StringRef ListFile, FileSet& FS) {
     if (!P.empty()) insertRealPath(FS, P.str());
   }
   return true;
-}
-
-void applyArgumentAdjusters(ClangTool& Tool, const std::string& ResourceDir) {
-  Tool.appendArgumentsAdjuster(
-      [](const std::vector<std::string>& Args, StringRef) {
-        std::vector<std::string> Out;
-        for (const auto& Arg : Args)
-          if (Arg != "-fno-canonical-system-headers") Out.push_back(Arg);
-        return Out;
-      });
-  if (!ResourceDir.empty()) {
-    Tool.appendArgumentsAdjuster(
-        [ResourceDir](const std::vector<std::string>& Args, StringRef) {
-          for (const auto& Arg : Args)
-            if (StringRef(Arg).starts_with("-resource-dir")) return Args;
-          std::vector<std::string> Adjusted = Args;
-          Adjusted.insert(Adjusted.begin() + (Adjusted.empty() ? 0 : 1),
-                          "-resource-dir=" + ResourceDir);
-          return Adjusted;
-        });
-  }
 }
 
 }  // namespace
@@ -414,14 +402,15 @@ auto main(int argc, const char** argv) -> int {
   if (!OwnedFilesOpt.empty() && !addOwnedFilesFrom(OwnedFilesOpt, Files))
     return 1;
 
-  ClangTool Tool(OptionsParser.getCompilations(),
-                 orderSourcesForRename(SourcePaths));
-  applyArgumentAdjusters(Tool, ResourceDir);
-
   CppFormatActionFactory Factory(std::move(Rules), ReturnStyle, ReturnRuleId,
                                  mode, std::move(Files));
   if (Lint) Factory.setLintReport(&Report);
-  if (int rc = runWithVetoRerun(Tool, Factory)) return rc;
+  TUDriverOptions DriverOpts;
+  DriverOpts.Jobs = JobsOpt;
+  if (int rc = runTranslationUnits(OptionsParser.getCompilations(), SourcePaths,
+                                   makeStandardArgumentsAdjuster(ResourceDir),
+                                   DriverOpts, Factory))
+    return rc;
 
   // Renames whose new name was already taken are skipped rather than applied:
   // renaming into an occupied name does not compile, or silently rebinds uses.

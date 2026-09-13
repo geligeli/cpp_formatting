@@ -192,6 +192,8 @@ bazel run //cpp_formatting:trailing_return_types -- -i path/to/file.cpp -- -std=
 bazel run //cpp_formatting:trailing_return_types -- -i file1.cpp file2.cpp -- -std=c++17
 ```
 
+Several files are parsed in parallel, one translation unit per thread on every CPU by default; `--jobs=N` / `-jN` caps the thread count (see [Parallel parsing](#parallel-parsing)). A multi-file dry run prints each file behind a `=== path ===` header, in the order given.
+
 The `--` separates the tool's own flags from the Clang compilation flags. At minimum `-std=c++17` is required. The tool ships its own Clang built-in headers, so files using standard-library headers (`<cstddef>`, etc.) work out of the box without a system Clang.
 
 ### What gets rewritten
@@ -317,7 +319,8 @@ bazel run //cpp_formatting:normalize_variables -- \
 | `--in-place` / `-i` | Overwrite files on disk (default: dry-run to stdout) |
 | `--lint` | Analyze only — report violations, modify nothing, exit 1 if any are found (see [Lint mode (CI/CD)](#lint-mode-cicd)) |
 | `--format=<fmt>` | Output format for `--lint`: `text` (default), `sarif`, or `diff` |
-| `--debug-trace` | Print, per TU, every rename target and reference site found in the AST, and whether each would be rewritten. Makes no modifications. |
+| `--jobs=<N>` / `-j<N>` | Translation units to parse in parallel. `0` (default) uses every CPU; larger values are capped at the CPU count. The result does not depend on it (see [Parallel parsing](#parallel-parsing)). |
+| `--debug-trace` | Print, per TU, every rename target and reference site found in the AST, and whether each would be rewritten. Makes no modifications; always runs one TU at a time. |
 
 **Supported scopes:**
 
@@ -332,7 +335,7 @@ bazel run //cpp_formatting:normalize_variables -- \
 | `const_global` | file- and namespace-scope variables that are `const` or `constexpr` |
 | `method` | member functions, static and non-static (never constructors, destructors, conversion functions, or overloaded operators; a virtual function is renamed together with its whole override hierarchy — if any override is declared outside the listed files, the rename is skipped) |
 
-**Cross-file renaming:** list all files that share declarations — order does not matter. The tool auto-promotes header files to the end of the source list so each `.cpp` is parsed against the original on-disk header content; edits are buffered and committed atomically once every TU has been processed.
+**Cross-file renaming:** list all files that share declarations — order does not matter. The tool parses every non-header first and every header after them (each group in parallel), so each `.cpp` is parsed against the original on-disk header content and the header sees what the `.cpp` files instantiated; edits are buffered per TU and committed atomically once every TU has been processed.
 
 **Debugging missed renames:** if you suspect the tool isn't renaming everything you expected, run with `--debug-trace`. It prints the full rename map and every reference site found in each TU, with `main=Y/N`, `macro=Y/N`, and a marker per site: `WILL_RENAME` if it would be rewritten, `VETOES_RENAME` if it cannot be (see "Names spelled through macros" below), nothing if the site belongs to another TU. A site that never appears with `WILL_RENAME` in any TU is either vetoed or missing from the source list passed to the tool.
 
@@ -414,6 +417,7 @@ bazel run //cpp_formatting:cpp_format -- \
 | `--in-place` / `-i` | Overwrite files on disk (default: dry-run) |
 | `--lint` | Analyze only — report violations, modify nothing, exit 1 if any are found |
 | `--format=<fmt>` | Output format for `--lint`: `text` (default), `sarif`, or `diff` |
+| `--jobs=<N>` / `-j<N>` | Translation units to parse in parallel. `0` (default) uses every CPU; larger values are capped at the CPU count. The result does not depend on it (see [Parallel parsing](#parallel-parsing)). |
 
 **Pass ordering:** `normalize_variables` rules are applied first (in the order listed in the config), then the `return_types` pass. For in-place mode each pass reads the output of the previous one from disk.
 
@@ -529,6 +533,33 @@ cpp_format --config=cpp_format.yaml --lint --format=diff \
 
 ---
 
+## Parallel parsing
+
+All three binaries parse their translation units in parallel — one Clang
+instance per TU on a pool of worker threads sized to the machine's CPUs, the
+way `bazel build` sizes its own pool. `--jobs=N` (`-jN`) caps the pool; `0`,
+the default, means every CPU the process may use, and a larger request is
+capped at that. Memory is the trade-off: every thread holds one Clang AST, so
+on a small machine with heavy headers pass a smaller `-j`.
+
+**The result never depends on `-j`.** Each TU writes into its own buffer and
+the buffers are merged in source order, so `--in-place`, `--lint` (text,
+SARIF and diff), `--emit-edits` and the dry run are byte for byte what a
+single thread produces. Rename state that later TUs need — a veto found in one
+TU, a template-dependent token resolved by another TU's instantiations — is
+exchanged at barriers: every non-header runs before any header, a pass that
+discovers a new veto is discarded and run again with the veto known (as before),
+and a TU whose dependent tokens the rest of the run resolved differently is
+re-parsed on its own. That last rule also makes the cross-file rename
+independent of the source order in cases it previously was not, such as a
+template instantiated only from another header. Clang's diagnostics are
+buffered per TU and printed in source order.
+
+`normalize_variables --debug-trace` always runs one TU at a time, so its
+per-TU trace stays readable.
+
+---
+
 ## Using `cpp_format` as a pre-commit hook
 
 ### 1. Install the binary
@@ -628,6 +659,12 @@ flags from `CcInfo.compilation_context` + the toolchain
 --emit-edits`, declaring the target's sources **plus its transitive headers** as
 action inputs — that declaration is what makes headers reachable under
 sandboxing. Each action is parallel and cached; first-party targets only.
+Inside an action the target's sources are parsed on several threads: the
+aspect passes `--jobs=<bucket>` (the largest of 1/2/4/8/16 not above the
+number of sources) and declares the same count to Bazel's scheduler through
+`resource_set`, so a 60-file target no longer runs as a serial tail behind
+sixty one-file actions. Because the aspect passes a flag, it and the published
+binary are versioned together (see the release pin in `MODULE.bazel`).
 
 **Renaming across targets.** An action parses only its own target's sources, but
 a rename must reach *every* use of a declaration — including uses in targets
@@ -720,6 +757,14 @@ repo or ruleset, and how to triage a failure.
 cpp_formatting/
   # Combined tool
   cpp_format.cpp                          # main(): YAML config + multi-pass driver
+
+  # Parallel translation-unit driver (shared by all three binaries)
+  tu_driver.h                             # TUSlot, TUSlotClient, runTranslationUnits(), --jobs sizing
+  tu_driver.cpp                           # one ClangTool per TU on worker threads; barriers, re-runs
+  tu_driver_test.cpp                      # gtest unit tests
+  rename_state.h                          # cross-TU rename state: DependentResolutions, RenameVetoes, merge
+  rename_state.cpp                        # record/veto/merge semantics
+  rename_state_test.cpp                   # gtest unit tests
 
   # trailing_return_types
   trailing_return_types.cpp               # main(): CLI parsing, ActionFactory

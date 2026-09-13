@@ -139,6 +139,14 @@ grep -q '"ruleId": "normalize_variables/member/snake_case"' <<<"$out" \
   || fail "cpp_format lint: missing normalize_variables rule id, got: $out"
 grep -q '"ruleId": "trailing_return_types"' <<<"$out" \
   || fail "cpp_format lint: missing trailing_return_types rule id, got: $out"
+out_j4="$(
+  expect_violations "$cpp_format" \
+    --trailing-return-types \
+    --normalize-variables-scope=member --normalize-variables-style=snake_case \
+    --lint --format=sarif --jobs=4 "$tmpdir/multi.cpp" -- -std=c++17
+)"
+[[ "$out" == "$out_j4" ]] \
+  || fail "cpp_format lint: SARIF differs with --jobs=4"
 diff -u <(printf 'struct S { int m_value; };\nint compute(S& s) { return s.m_value; }\n') "$tmpdir/multi.cpp" \
   || fail "cpp_format lint: input file was modified"
 echo "PASS: cpp_format lint aggregates all passes into one SARIF report"
@@ -298,6 +306,23 @@ if grep -q "itemCount" "$macrodir/macro.txt"; then
 fi
 [[ "$(grep -c "otherCount" "$macrodir/macro.txt")" -eq 2 ]] \
   || fail "macro lint: expected exactly one diagnostic per otherCount site"
+
+# The veto re-run under several threads: text, SARIF and diff output are byte
+# for byte what one thread produces.
+(
+  cd "$macrodir"
+  for fmt in text sarif diff; do
+    expect_violations "$normalize" --style=snake_case --scope=member --lint \
+      --format=$fmt --jobs=1 counter.cpp main.cpp counter.h \
+      -- -std=c++17 -xc++ -Wno-pragma-once-outside-header -I. > "j1.$fmt" 2>/dev/null
+    expect_violations "$normalize" --style=snake_case --scope=member --lint \
+      --format=$fmt --jobs=4 counter.cpp main.cpp counter.h \
+      -- -std=c++17 -xc++ -Wno-pragma-once-outside-header -I. > "j4.$fmt" 2>/dev/null
+    cmp "j1.$fmt" "j4.$fmt" \
+      || fail "macro lint: --format=$fmt differs between --jobs=1 and --jobs=4"
+  done
+)
+echo "PASS: lint output is identical with --jobs=1 and --jobs=4"
 
 # Lint must not have touched anything, and the diff format must match what
 # --in-place produces -- including leaving the vetoed member alone.

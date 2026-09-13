@@ -6,11 +6,11 @@
 #include <string>
 #include <vector>
 
-#include "clang/Tooling/Tooling.h"
 #include "cpp_formatting/lint_lib.h"
 #include "cpp_formatting/output_mode.h"
 #include "cpp_formatting/rename_variables_lib.h"
 #include "cpp_formatting/trailing_return_types_lib.h"
+#include "cpp_formatting/tu_driver.h"
 
 // ---------------------------------------------------------------------------
 // NormalizeRule
@@ -28,15 +28,16 @@ struct NormalizeRule {
 // CppFormatActionFactory
 // ---------------------------------------------------------------------------
 
-/// Factory for ClangTool::run() that applies every normalize_variables rule
-/// plus (optionally) the return-type rewrite in a single pass over
-/// each translation unit, sharing one Rewriter.  This avoids re-parsing every
-/// TU once per pass: parses per TU drop from 1 + #rules to 1.
+/// The TU driver's client for cpp_format: builds, per translation unit, one
+/// action that applies every normalize_variables rule plus (optionally) the
+/// return-type rewrite in a single pass over the AST, sharing one Rewriter.
+/// This avoids re-parsing every TU once per pass: parses per TU drop from
+/// 1 + #rules to 1.
 ///
-/// Like RenameActionFactory, rewritten content is buffered in PendingRewrites
-/// and committed by flush() after ClangTool::run() returns, so every TU
-/// compiles against the original on-disk source.
-class CppFormatActionFactory : public clang::tooling::FrontendActionFactory {
+/// Like RenameActionFactory, each TU writes into its own TUSlot; finish()
+/// merges the slots in source order and flush() commits the rewritten content
+/// afterwards, so every TU compiles against the original on-disk source.
+class CppFormatActionFactory : public TUSlotClient {
  public:
   /// \p ReturnStyle selects the return-type pass; nullopt skips it entirely.
   CppFormatActionFactory(std::vector<NormalizeRule> Rules,
@@ -44,13 +45,28 @@ class CppFormatActionFactory : public clang::tooling::FrontendActionFactory {
                          std::string ReturnRuleId, OutputMode Mode,
                          FileSet CollectFrom);
 
-  auto create() -> std::unique_ptr<clang::FrontendAction> override;
+  // TUSlotClient
+  auto ruleCount() const -> size_t override { return Rules.size(); }
+  auto createAction(TUSlot& Slot)
+      -> std::unique_ptr<clang::FrontendAction> override;
+  auto shared() -> CrossTUState& override { return Shared; }
+  /// False in Emit mode, whose records carry their own vetoes for aggregation
+  /// to act on, so a veto needs no second pass.
+  auto rerunNeededOnVeto() const -> bool override {
+    return Mode != OutputMode::Emit;
+  }
+  /// False in Emit mode: every TU records independently and aggregation
+  /// merges, which also makes the records identical for any thread count.
+  auto crossTUSeeding() const -> bool override {
+    return Mode != OutputMode::Emit;
+  }
+  void finish(std::vector<TUSlot>& Slots) override;
 
   /// Attach a lint report shared by all rules.  Not owned.
   void setLintReport(LintReport* Report) { this->Report = Report; }
 
-  /// The rewrites buffered during ClangTool::run().  In Lint mode this is how
-  /// the main obtains the rewritten content for diff output.
+  /// The rewrites buffered during the run.  In Lint mode this is how the main
+  /// obtains the rewritten content for diff output.
   auto rewrites() const -> const PendingRewrites& { return Pending; }
 
   /// Commit buffered rewrites: print them (DryRun) or write them to disk
@@ -59,27 +75,16 @@ class CppFormatActionFactory : public clang::tooling::FrontendActionFactory {
 
   /// In Emit mode, writes this run's edit records (every rule's renames plus
   /// the trailing-return rewrites) and the dependent-token resolution sidecar
-  /// as JSON to \p OS.  Call after ClangTool::run() completes.
+  /// as JSON to \p OS.  Call after the run completes.
   void emitEdits(llvm::raw_ostream& OS);
 
   /// Renames skipped because the new name was already taken in the same
   /// scope, or because a reference to them could not be rewritten.
   auto conflicts() const -> const RenameConflicts& { return Conflicts; }
 
-  /// Declarations vetoed during ClangTool::run() because some reference to
-  /// them cannot be rewritten.  Non-empty means an earlier TU may have renamed
-  /// a declaration a later one vetoed: discard the buffered output with
-  /// resetForRerun() and run the tool again.
-  auto vetoes() const -> const RenameVetoes& { return Vetoes; }
-
-  /// Drops everything buffered by a previous ClangTool::run() while keeping
-  /// the accumulated vetoes, so a second run applies only the renames that
-  /// survived.  Nothing has reached disk at this point (flush() has not run).
-  void resetForRerun();
-
-  /// False in Emit mode, whose records carry their own vetoes for aggregation
-  /// to act on, so a veto needs no second pass.  See runWithVetoRerun().
-  auto rerunNeededOnVeto() const -> bool { return Mode != OutputMode::Emit; }
+  /// Declarations vetoed during the run because some reference to them
+  /// cannot be rewritten.
+  auto vetoes() const -> const RenameVetoes& { return Shared.Vetoes; }
 
  private:
   std::vector<NormalizeRule> Rules;
@@ -87,17 +92,13 @@ class CppFormatActionFactory : public clang::tooling::FrontendActionFactory {
   std::string ReturnRuleId;
   OutputMode Mode;
   FileSet CollectFrom;
-  PendingRewrites Pending;
-  EditReport Edits;  // populated in Emit mode (all rules + trailing-return)
-  RenameConflicts Conflicts;  // renames skipped because the name was taken
-  // Declarations that must not be renamed because a reference to them is not
-  // rewritable; shared by all rules and kept across a re-run.
-  RenameVetoes Vetoes;
-  // One cross-TU dependent-token resolution map per rule (see
-  // DependentResolutions).  Persists for the whole ClangTool::run() so a header
-  // TU can consume resolutions recorded by earlier .cpp TUs.  Kept per-rule so
-  // a token resolved by one rule is never re-applied by another.
-  std::vector<DependentResolutions> DepResPerRule;
+  PendingRewrites Pending;    // merged by finish()
+  EditReport Edits;           // merged by finish(); Emit mode
+  RenameConflicts Conflicts;  // merged by finish()
+  // Vetoes plus one cross-TU dependent-token resolution map per rule (kept
+  // per rule so a token resolved by one rule is never re-applied by another).
+  // Exchanged between TUs by the driver; see tu_driver.h.
+  CrossTUState Shared;
   LintReport* Report = nullptr;
 };
 

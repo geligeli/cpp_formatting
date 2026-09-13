@@ -10,7 +10,9 @@ reachable under sandboxing — no `compile_commands.json` needed.  The prebuilt
 binary embeds and self-extracts the Clang builtin headers, so unlike the
 from-source build this kit stages no resource directory of its own.
 
-Each action writes a structured edit-record JSON file (offset-level edits plus a
+Each action parses its target's sources on several threads (`--jobs`, sized by
+the number of sources and declared to Bazel via `resource_set`) and writes a
+structured edit-record JSON file (offset-level edits plus a
 template-dependent-token resolution sidecar).  `cpp_format --aggregate` merges
 the per-target records into one repository change, resolving dependent tokens
 across targets.  `cpp_format_targets(name, deps)` generates three targets:
@@ -45,6 +47,40 @@ CppFormatEditsInfo = provider(
 # living in a textual fragment are not formatted.
 _HDR_EXTS = ["h", "hh", "hpp", "hxx", "h++"]
 _SRC_EXTS = ["cc", "cpp", "cxx", "c++"] + _HDR_EXTS
+
+# One emit action per target parses all of that target's sources, on this many
+# threads (`cpp_format --jobs`).  Bazel is told the same number through
+# `resource_set`, so a 16-file target takes 16 of the local CPUs instead of
+# looking like a one-CPU action that then oversubscribes the box.  Buckets
+# rather than the exact count because a resource_set callback must be a
+# top-level function -- no lambdas -- and one per possible count is silly.  The
+# memory figure is a scheduling hint (roughly one Clang AST per thread).  The
+# binary caps --jobs at the CPU count itself, so a 16-bucket target on a 4-CPU
+# machine runs 4 threads.
+_JOB_BUCKETS = [16, 8, 4, 2, 1]
+
+def _jobs_for(num_sources):
+    for b in _JOB_BUCKETS:
+        if num_sources >= b:
+            return b
+    return 1
+
+def _rs_1(_os, _inputs_size):
+    return {"cpu": 1, "memory": 300}
+
+def _rs_2(_os, _inputs_size):
+    return {"cpu": 2, "memory": 600}
+
+def _rs_4(_os, _inputs_size):
+    return {"cpu": 4, "memory": 1200}
+
+def _rs_8(_os, _inputs_size):
+    return {"cpu": 8, "memory": 2400}
+
+def _rs_16(_os, _inputs_size):
+    return {"cpu": 16, "memory": 4800}
+
+_RESOURCE_SETS = {1: _rs_1, 2: _rs_2, 4: _rs_4, 8: _rs_8, 16: _rs_16}
 
 def _own_files(ctx, exts):
     out = []
@@ -131,9 +167,11 @@ def _aspect_impl(target, ctx):
     binary = ctx.file._cpp_format
 
     records = ctx.actions.declare_file(ctx.label.name + ".cpp_format.json")
+    jobs = _jobs_for(len(srcs))
     args = ctx.actions.args()
     args.add("--config", ctx.file._config)
     args.add("--emit-edits", records)
+    args.add("--jobs=" + str(jobs))
     args.add_all(srcs)
 
     # The dep closure's headers are renameable here even though they are not
@@ -148,7 +186,10 @@ def _aspect_impl(target, ctx):
 
     # Force C++ so headers (.h) parse as C++ rather than C, and carry the
     # derived compile command.  cpp_format drops -fno-canonical-system-headers
-    # itself and supplies its own (self-extracted) -resource-dir.
+    # itself, supplies its own (self-extracted) -resource-dir, and adds -w: the
+    # flags below are the project's, and a project that builds with -Werror
+    # would otherwise have a warning in a file this action only parses fail the
+    # action.
     compile_args = ctx.actions.args()
     compile_args.add("--")
     compile_args.add("-x")
@@ -166,6 +207,7 @@ def _aspect_impl(target, ctx):
         outputs = [records],
         mnemonic = "CppFormatEmit",
         progress_message = "cpp_format: emitting edits for %{label}",
+        resource_set = _RESOURCE_SETS[jobs],
     )
     mine = depset(direct = [records], transitive = transitive)
     return [

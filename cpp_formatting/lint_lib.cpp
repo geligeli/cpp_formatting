@@ -189,8 +189,15 @@ void LintReport::emitSARIF(llvm::raw_ostream& OS,
 }
 
 auto relativizeToCwd(llvm::StringRef Path) -> std::string {
-  llvm::SmallString<256> Cwd;
-  if (llvm::sys::fs::current_path(Cwd)) return Path.str();
+  // Resolved once: it is called for every edit record, from several threads,
+  // and the tool never changes its own working directory (each TU's Clang
+  // instance gets a file system with a private one).
+  static const std::string Cwd = [] {
+    llvm::SmallString<256> C;
+    if (llvm::sys::fs::current_path(C)) return std::string();
+    return std::string(C);
+  }();
+  if (Cwd.empty()) return Path.str();
   llvm::StringRef CwdRef(Cwd);
   if (Path.starts_with(CwdRef) && Path.size() > CwdRef.size() &&
       Path[CwdRef.size()] == '/')
