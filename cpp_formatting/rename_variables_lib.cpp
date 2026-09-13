@@ -86,15 +86,37 @@ bool matchesScope(const NamedDecl* D, VariableScope Scope) {
 // Template instantiation helpers
 // ---------------------------------------------------------------------------
 
+// The record \p RD was instantiated from, or null if it is not an
+// instantiation.  Instantiated records come in two shapes and only the first is
+// a ClassTemplateSpecializationDecl:
+//
+//   Outer<int>            -- a specialization; its pattern is the primary
+//                            template's CXXRecordDecl.
+//   Outer<int>::Inner     -- a class *nested* in a class template is an
+//                            ordinary CXXRecordDecl whose pattern comes from
+//                            getInstantiatedFromMemberClass().
+//
+// Missing the second shape meant members of a nested class never mapped back to
+// the pattern the rename map is keyed by: the declaration was renamed (it is
+// collected from the pattern) while every use in an instantiation was skipped,
+// and dependent uses were vetoed for binding to a member "not being renamed".
+static const CXXRecordDecl* instantiationPattern(const CXXRecordDecl* RD) {
+  if (const auto* Spec = dyn_cast<ClassTemplateSpecializationDecl>(RD))
+    return Spec->getSpecializedTemplate()->getTemplatedDecl();
+  return RD->getInstantiatedFromMemberClass();
+}
+
 static const FieldDecl* primaryTemplateMember(const FieldDecl* FD) {
   const auto* RD = dyn_cast_or_null<CXXRecordDecl>(FD->getParent());
   if (!RD) return FD;
-  const auto* Spec = dyn_cast<ClassTemplateSpecializationDecl>(RD);
-  if (!Spec) return FD;
-  CXXRecordDecl* Primary = Spec->getSpecializedTemplate()->getTemplatedDecl();
+  const CXXRecordDecl* Pattern = instantiationPattern(RD);
+  if (!Pattern) return FD;
+  // Fields have no back-pointer to the declaration they were instantiated
+  // from, so match by position; recursing walks a chain of nested
+  // instantiations up to the outermost pattern.
   unsigned Idx = FD->getFieldIndex();
   unsigned I = 0;
-  for (FieldDecl* PF : Primary->fields()) {
+  for (const FieldDecl* PF : Pattern->fields()) {
     if (I++ == Idx) return primaryTemplateMember(PF);
   }
   return FD;

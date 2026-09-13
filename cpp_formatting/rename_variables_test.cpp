@@ -957,3 +957,71 @@ TEST(RenameMacros, DependentMemberInMacroBodyIsLeftAlone) {
       "template struct Derived<int>;\n";
   EXPECT_EQ(rewriteMember(code, renameOne("itemCount", "item_count")), code);
 }
+
+// ---------------------------------------------------------------------------
+// Members of a class nested inside a class template.  `Outer<int>::Inner` is an
+// ordinary CXXRecordDecl instantiated from a member class, not a
+// ClassTemplateSpecializationDecl, so mapping a field back to the pattern needs
+// getInstantiatedFromMemberClass() as well.
+// ---------------------------------------------------------------------------
+
+TEST(RenameNestedTemplateClass, FieldUseInInstantiationIsRenamed) {
+  EXPECT_EQ(
+      rewriteMember("template <class T> struct Outer { struct Inner { int "
+                    "itemCount; }; };\n"
+                    "int use(Outer<int>::Inner& i) { return i.itemCount; }\n",
+                    renameOne("itemCount", "item_count")),
+      "template <class T> struct Outer { struct Inner { int "
+      "item_count; }; };\n"
+      "int use(Outer<int>::Inner& i) { return i.item_count; }\n");
+}
+
+TEST(RenameNestedTemplateClass, DependentUseThroughNestedClassIsRenamed) {
+  // gtest-param-util.h's ValuesInIteratorRangeGenerator<T>::Iterator shape:
+  // `Iterator` is dependent, so the access is a CXXDependentScopeMemberExpr and
+  // the instantiation has to resolve it to the pattern's field.  While the
+  // field failed to map back, every such resolution was vetoed instead.
+  EXPECT_EQ(
+      rewriteMember(
+          "template <class U> const U* down(const void* p) { return "
+          "static_cast<const U*>(p); }\n"
+          "template <class T> struct Gen {\n"
+          "  struct Iterator {\n"
+          "    int itemCount;\n"
+          "    bool eq(const void* o) const { return itemCount == down<const "
+          "Iterator>(o)->itemCount; }\n"
+          "  };\n"
+          "};\n"
+          "int use() { Gen<int>::Iterator i{0}; return i.eq(&i); }\n",
+          renameOne("itemCount", "item_count")),
+      "template <class U> const U* down(const void* p) { return "
+      "static_cast<const U*>(p); }\n"
+      "template <class T> struct Gen {\n"
+      "  struct Iterator {\n"
+      "    int item_count;\n"
+      "    bool eq(const void* o) const { return item_count == down<const "
+      "Iterator>(o)->item_count; }\n"
+      "  };\n"
+      "};\n"
+      "int use() { Gen<int>::Iterator i{0}; return i.eq(&i); }\n");
+}
+
+TEST(RenameNestedTemplateClass, MethodAndStaticMemberAlreadyMapBack) {
+  // These have a back-pointer of their own (getInstantiatedFromMemberFunction /
+  // getInstantiatedFromStaticDataMember), so they never needed the positional
+  // walk that fields do -- pinned so the asymmetry stays deliberate.
+  const char* code =
+      "template <class T> struct Outer {\n"
+      "  struct Inner { static int sharedCount; int getVal() const { return 0; "
+      "} };\n"
+      "};\n"
+      "template <class T> int Outer<T>::Inner::sharedCount = 0;\n"
+      "int useM(Outer<int>::Inner& i) { return i.getVal(); }\n"
+      "int useS() { return Outer<int>::Inner::sharedCount; }\n";
+  EXPECT_NE(
+      rewriteMethod(code, renameOne("getVal", "get_val")).find("i.get_val()"),
+      std::string::npos);
+  EXPECT_NE(rewriteMember(code, renameOne("sharedCount", "shared_count"))
+                .find("Outer<int>::Inner::shared_count"),
+            std::string::npos);
+}
