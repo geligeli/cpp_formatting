@@ -16,28 +16,36 @@ fetched.
 
 **1. Import the kit in `MODULE.bazel`.** Pick a release tag from the
 [Releases](https://github.com/geligeli/cpp_formatting/releases) page (tags are
-`<YYYYMMDD>-<shortsha>`). `archive_override` pulls the Bazel glue by URL; the
-`cpp_format` extension downloads the prebuilt binary for your host platform:
+`<YYYYMMDD>-<shortsha>`) and put it in `CPP_FORMAT_VERSION`. `archive_override`
+pulls the Bazel glue by URL; the `cpp_format` extension downloads the prebuilt
+binary for your host platform. **Both must come from the same tag** — the aspect
+passes flags that only a matching binary understands — so the tag is written
+*once* and every use derives from it:
 
 ```starlark
 bazel_dep(name = "cpp_formatting", version = "0.1.0")
+
+CPP_FORMAT_VERSION = "20260913-5ea87d3"
+
 archive_override(
     module_name = "cpp_formatting",
-    urls = ["https://github.com/geligeli/cpp_formatting/archive/refs/tags/20260913-5ea87d3.tar.gz"],
-    strip_prefix = "cpp_formatting-20260913-5ea87d3",
+    urls = ["https://github.com/geligeli/cpp_formatting/archive/refs/tags/" +
+            CPP_FORMAT_VERSION + ".tar.gz"],
+    strip_prefix = "cpp_formatting-" + CPP_FORMAT_VERSION,
 )
 
 cpp_format = use_extension("@cpp_formatting//bazel/integration:extensions.bzl", "cpp_format")
 cpp_format.release(
-    version = "20260913-5ea87d3",
+    version = CPP_FORMAT_VERSION,
     # Optional but recommended for reproducible CI — pin per-asset hashes:
     # sha256 = {"cpp_format-linux-x86_64": "…"},
 )
 use_repo(cpp_format, "cpp_format_bin")
 ```
 
-The host asset is selected automatically (Linux x86_64/aarch64, macOS arm64,
-Windows x64).
+Upgrading is then a one-line change, and the glue and the binary can never
+drift apart. The host asset is selected automatically (Linux x86_64/aarch64,
+macOS arm64, Windows x64).
 
 **2. Add a ruleset** — `cpp_format.yaml` at your repo root describes the passes
 to run (see [YAML config](#config-file---config)):
