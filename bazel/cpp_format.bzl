@@ -103,6 +103,17 @@ def _resource_dir(builtin_headers):
             return f.path[:idx] + "/staging"
     return None
 
+# The target's own `copts`, so the tool parses each file under the same
+# preprocessor conditions the compiler does.  abseil's randen_hwaes.cc is the
+# case: its body sits behind `#if ABSL_HAVE_ACCELERATED_AES`, which only
+# `-maes -msse4.1` from the target's copts turns on, so without them the tool
+# never saw the references it holds and the build broke where the tool had
+# looked at nothing.  A flag that still contains a make variable or a
+# `$(location)` is dropped rather than mis-expanded; `cc_ctx.defines` and
+# `local_defines` already arrive through the compilation context.
+def _rule_copts(ctx):
+    return [c for c in getattr(ctx.rule.attr, "copts", []) if "$(" not in c and "$" + "{" not in c]
+
 def _compile_flags(ctx, cc_toolchain, cc_ctx):
     feature_config = cc_common.configure_features(
         ctx = ctx,
@@ -113,7 +124,7 @@ def _compile_flags(ctx, cc_toolchain, cc_ctx):
     variables = cc_common.create_compile_variables(
         feature_configuration = feature_config,
         cc_toolchain = cc_toolchain,
-        user_compile_flags = ctx.fragments.cpp.copts + ctx.fragments.cpp.cxxopts,
+        user_compile_flags = ctx.fragments.cpp.copts + ctx.fragments.cpp.cxxopts + _rule_copts(ctx),
         include_directories = cc_ctx.includes,
         quote_include_directories = cc_ctx.quote_includes,
         system_include_directories = cc_ctx.system_includes,

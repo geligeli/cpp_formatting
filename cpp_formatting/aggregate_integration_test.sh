@@ -243,6 +243,12 @@ echo "All aggregate integration tests passed."
 # library's edits too -- otherwise the declaration is renamed and the macro body
 # is left spelling the old name, i.e. a broken build.  `otherCount`, which no
 # macro names, must survive.
+#
+# BUMP is defined in main.cpp, not counter.h, on purpose: the spelling audit
+# lexes each main file for every spelling of a renamed name, so a macro body in
+# counter.h that names itemCount would make the *library's* action decline the
+# rename on its own -- correct, and asserted at the end of this test, but it
+# would leave nothing for the cross-target propagation to prove.
 # ---------------------------------------------------------------------------
 mkdir -p "$tmpdir/macro"
 cd "$tmpdir/macro"
@@ -255,7 +261,6 @@ struct Counter {
   int itemCount;
   int otherCount;
 };
-#define BUMP(c) ((c).itemCount += 1)
 int total(const Counter& c);
 #endif
 EOF
@@ -265,6 +270,7 @@ int total(const Counter& c) { return c.itemCount + c.otherCount; }
 EOF
 cat > main.cpp <<'EOF'
 #include "counter.h"
+#define BUMP(c) ((c).itemCount += 1)
 int main() {
   Counter c{0, 0};
   BUMP(c);
@@ -321,6 +327,30 @@ realpath counter.h >> lib_owned.txt
 diff -u veto.patch veto_perfile.patch \
   || fail "veto: per-file records merge differently than per-target records"
 echo "PASS: the cross-target veto holds with one action per file"
+
+# And the local counterpart: a macro body in the library's own header that
+# spells itemCount is caught by the spelling audit of that header's action --
+# nothing expands the macro there, so no AST node accounts for the token -- and
+# the library declines the rename itself, before any dependent is consulted.
+cat > counter_macro.h <<'EOF'
+#ifndef COUNTER_MACRO_H_
+#define COUNTER_MACRO_H_
+struct Counter { int itemCount; int otherCount; };
+#define BUMP(c) ((c).itemCount += 1)
+#endif
+EOF
+"$cpp_format" --config=cpp_format.yaml --emit-edits=counter_macro.json \
+  counter_macro.h -- -x c++ -std=c++17 -I.
+grep -q '"name": "itemCount"' counter_macro.json \
+  || fail "audit: an unexpanded macro body naming the member should decline it"
+grep -q 'spelled where no reference the tool understands accounts for it' counter_macro.json \
+  || fail "audit: unexpected veto reason: $(cat counter_macro.json)"
+if grep -q '"old": "itemCount"' counter_macro.json; then
+  fail "audit: the declined member must not be emitted as an edit"
+fi
+grep -q '"old": "otherCount"' counter_macro.json \
+  || fail "audit: the sibling member should still be renamed"
+echo "PASS: an unexpanded macro body in the owning header declines the rename locally"
 
 # ---------------------------------------------------------------------------
 # Test 6 — two rename rules: one rule's veto must not cancel the other's

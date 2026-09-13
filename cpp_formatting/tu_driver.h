@@ -2,6 +2,7 @@
 #define CPP_FORMATTING_TU_DRIVER_H_
 
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -62,6 +63,9 @@ struct TUSlot {
   RenameConflicts Conflicts;
   /// Seeded from the shared state when the TU starts; the scan pass appends.
   RenameVetoes Vetoes;
+  /// Old spellings of every declaration this TU set out to rename, so the
+  /// driver can tell which never-resolved dependent tokens matter.
+  std::set<std::string> RenamedNames;
   /// One map per rule (see TUSlotClient::ruleCount), seeded from the shared
   /// state when the TU starts; this TU's instantiations append.
   std::vector<DependentResolutions> DepRes;
@@ -77,6 +81,7 @@ struct TUSlot {
 struct CrossTUState {
   RenameVetoes Vetoes;
   std::vector<DependentResolutions> DepResPerRule;
+  std::set<std::string> RenamedNames;  ///< union over every TU
 };
 
 /// What the driver needs from a tool: how to build a per-TU action that writes

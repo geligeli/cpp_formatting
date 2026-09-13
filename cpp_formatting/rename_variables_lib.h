@@ -4,6 +4,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -210,6 +211,9 @@ class RenameActionFactory : public TUSlotClient {
 /// rewrite (see RenameVetoes), those declarations are dropped from this TU's
 /// rename set before anything is applied, and declarations vetoed by an earlier
 /// TU are never collected in the first place.
+/// \p RenamedNames, when non-null, receives the old spelling of every
+/// declaration this TU set out to rename; the TU driver intersects it with the
+/// dependent tokens no TU resolved to decline those names (see nameVetoKey).
 void runRenameRuleOnAST(clang::ASTContext& Ctx, clang::Rewriter& RW,
                         const VariableRenameCallback& CB, VariableScope Scope,
                         const FileSet& CollectFrom,
@@ -218,7 +222,8 @@ void runRenameRuleOnAST(clang::ASTContext& Ctx, clang::Rewriter& RW,
                         DependentResolutions* DepRes = nullptr,
                         EditReport* Edits = nullptr,
                         RenameConflicts* Conflicts = nullptr,
-                        RenameVetoes* Vetoes = nullptr);
+                        RenameVetoes* Vetoes = nullptr,
+                        std::set<std::string>* RenamedNames = nullptr);
 
 // ---------------------------------------------------------------------------
 // Convenience factories

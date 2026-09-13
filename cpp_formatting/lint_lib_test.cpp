@@ -280,6 +280,91 @@ TEST(AggregateEdits, DropsDependentResolutionsOfAVetoedDeclaration) {
   EXPECT_EQ(Out.count("h.h"), 0u);
 }
 
+TEST(AggregateEdits, DropsRenamesWhoseDependentUseNobodyResolved) {
+  // A header spells `x.val` in a template; no report resolves it (the
+  // instantiation folds it away, or none exists in the build).  The member
+  // named val must then keep its name everywhere; biz is unaffected.
+  EditReport Decl, Tmpl;
+  Decl.Edits.push_back({"c.h", 0, 3, "val", "val_", "c.h", 0});
+  Decl.Edits.push_back({"c.h", 4, 3, "biz", "biz_", "c.h", 4});
+  Tmpl.Resolutions.push_back({"t.h", 0, 3, "val", "", false});  // pending
+
+  std::map<std::string, std::string> Out;
+  std::vector<std::string> Conflicts;
+  ASSERT_TRUE(aggregateEdits({Decl, Tmpl},
+                             filesFrom({{"c.h", "val biz"}, {"t.h", "val"}}),
+                             Out, Conflicts));
+  EXPECT_TRUE(Conflicts.empty());
+  EXPECT_EQ(Out["c.h"], "val biz_");
+  EXPECT_EQ(Out.count("t.h"), 0u);
+}
+
+TEST(AggregateEdits, APendingTokenResolvedByAnotherReportIsApplied) {
+  EditReport Decl, Tmpl, Inst;
+  Decl.Edits.push_back({"c.h", 0, 3, "val", "val_", "c.h", 0});
+  Tmpl.Resolutions.push_back({"t.h", 0, 3, "val", "", false});  // pending
+  Inst.Resolutions.push_back({"t.h", 0, 3, "val", "val_", false, "c.h", 0});
+
+  std::map<std::string, std::string> Out;
+  std::vector<std::string> Conflicts;
+  ASSERT_TRUE(aggregateEdits({Tmpl, Decl, Inst},
+                             filesFrom({{"c.h", "val"}, {"t.h", "val"}}), Out,
+                             Conflicts));
+  EXPECT_EQ(Out["c.h"], "val_");
+  EXPECT_EQ(Out["t.h"], "val_");
+}
+
+TEST(AggregateEdits, APendingCopyUnderAnotherRuleDoesNotMakeATokenUnresolved) {
+  // Every rule's collector enters the same token; the rule that renames
+  // methods never resolves a field token.  Resolved under rule 0, it is
+  // accounted for, and rule 1's pending copy must not decline the name.
+  EditReport Decl, Inst, Tmpl;
+  Decl.Edits.push_back({"c.h", 0, 3, "val", "val_", "c.h", 0});
+  Inst.Resolutions.push_back({"t.h", 0, 3, "val", "val_", false, "c.h", 0, 0});
+  Tmpl.Resolutions.push_back({"t.h", 0, 3, "val", "", false, "", 0, 1});
+
+  std::map<std::string, std::string> Out;
+  std::vector<std::string> Conflicts;
+  ASSERT_TRUE(aggregateEdits({Decl, Inst, Tmpl},
+                             filesFrom({{"c.h", "val"}, {"t.h", "val"}}), Out,
+                             Conflicts));
+  EXPECT_EQ(Out["c.h"], "val_");
+  EXPECT_EQ(Out["t.h"], "val_");
+}
+
+TEST(AggregateEdits, DropsRenamesDeclinedByName) {
+  // A name-keyed veto (nameVetoKey): '\x01' + the spelling, offset 0.
+  EditReport Decl, Other;
+  Decl.Edits.push_back({"c.h", 0, 3, "val", "val_", "c.h", 0});
+  Decl.Edits.push_back({"c.h", 4, 3, "biz", "biz_", "c.h", 4});
+  Other.Vetoes.push_back({std::string("\x01val"), 0, "val", "never resolved"});
+
+  std::map<std::string, std::string> Out;
+  std::vector<std::string> Conflicts;
+  ASSERT_TRUE(aggregateEdits({Decl, Other}, filesFrom({{"c.h", "val biz"}}),
+                             Out, Conflicts));
+  EXPECT_EQ(Out["c.h"], "val biz_");
+}
+
+TEST(EditRecords, JSONRoundTripCarriesPendingResolutionsAndNameVetoes) {
+  EditReport R;
+  R.Resolutions.push_back({"t.h", 0, 3, "val", "", false});
+  R.Vetoes.push_back({std::string("\x01val"), 0, "val", "never resolved"});
+  std::string Json;
+  llvm::raw_string_ostream OS(Json);
+  R.emitJSON(OS);
+  OS.flush();
+
+  EditReport Parsed;
+  ASSERT_TRUE(parseEditReport(Json, Parsed));
+  ASSERT_EQ(Parsed.Resolutions.size(), 1u);
+  EXPECT_EQ(Parsed.Resolutions[0].Old, "val");
+  EXPECT_TRUE(Parsed.Resolutions[0].New.empty());
+  EXPECT_FALSE(Parsed.Resolutions[0].Veto);
+  ASSERT_EQ(Parsed.Vetoes.size(), 1u);
+  EXPECT_EQ(Parsed.Vetoes[0].File, std::string("\x01val"));
+}
+
 TEST(EditRecords, JSONRoundTripCarriesOwnersAndVetoes) {
   EditReport R;
   R.Edits.push_back({"a.cpp", 5, 3, "val", "val_", "h.h", 7});

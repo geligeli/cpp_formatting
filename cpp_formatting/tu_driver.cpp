@@ -34,6 +34,7 @@ void TUSlot::clearOutputs() {
   Edits = EditReport{};
   Conflicts.clear();
   Vetoes.clear();
+  RenamedNames.clear();
   for (DependentResolutions& M : DepRes) M.clear();
   Report.clear();
   Diagnostics.clear();
@@ -319,6 +320,7 @@ auto runTranslationUnits(const CompilationDatabase& Compilations,
   auto mergeCrossTU = [&](size_t Index) {
     const TUSlot& S = Slots[Index];
     for (const auto& [Key, Veto] : S.Vetoes) G.Vetoes.try_emplace(Key, Veto);
+    G.RenamedNames.insert(S.RenamedNames.begin(), S.RenamedNames.end());
     for (size_t R = 0; R < RuleCount; ++R)
       mergeDependentResolutions(G.DepResPerRule[R], S.DepRes[R]);
   };
@@ -352,6 +354,37 @@ auto runTranslationUnits(const CompilationDatabase& Compilations,
         if (!LastPass) break;
       }
     }
+    // A dependent token that no instantiation in any TU resolved cannot be
+    // rewritten, and only its spelling is known.  If some TU renames a
+    // declaration of that spelling, decline the *name* (nameVetoKey) and run
+    // again so every TU stops renaming it.  Judged only after a pass that saw
+    // every TU: mid-pass, "not resolved yet" is the normal state.
+    if (Client.rerunNeededOnVeto() && !Restart) {
+      // A location resolved or vetoed under *any* rule is accounted for; a
+      // rule that renames nothing of the token's kind leaves its copy pending.
+      std::set<std::pair<std::string, unsigned>> Accounted;
+      for (const DependentResolutions& M : G.DepResPerRule)
+        for (const auto& [Key, R] : M)
+          if (R.HasName || R.Vetoed) Accounted.insert(Key);
+      for (const DependentResolutions& M : G.DepResPerRule) {
+        for (const auto& [Key, R] : M) {
+          if (R.HasName || R.Vetoed || R.OldName.empty()) continue;
+          if (Accounted.count(Key) > 0) continue;
+          if (G.RenamedNames.count(R.OldName) == 0) continue;
+          const std::pair<std::string, unsigned> NK = nameVetoKey(R.OldName);
+          const std::string Reason =
+              "a template-dependent use of the name at " +
+              relativizeToCwd(Key.first) + " (offset " +
+              std::to_string(Key.second) +
+              ") is never resolved by any instantiation in the sources given";
+          if (G.Vetoes
+                  .try_emplace(NK, RenameVeto{NK.first, 0, R.OldName, Reason})
+                  .second)
+            Restart = true;
+        }
+      }
+    }
+
     // The first pass reported every parse diagnostic; don't repeat them.
     Mode = DiagMode::Silent;
 

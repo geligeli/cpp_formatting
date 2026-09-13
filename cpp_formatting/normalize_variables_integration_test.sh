@@ -471,3 +471,74 @@ if "$binary" \
   fail "-Werror test: a real parse error must still fail the run"
 fi
 echo "PASS: the project's -Werror cannot fail the run, a real error still does"
+
+# ---------------------------------------------------------------------------
+# Test 13 — a reference in a file this run will never rewrite declines the
+# rename instead of leaving it behind.
+#
+# A textual header (a Bazel textual_hdrs .inc) is parsed as part of the TU that
+# includes it, so the tool *sees* the reference -- but the file is not in the
+# source list, so nothing would ever rewrite it.  Renaming the declaration
+# anyway is exactly how abseil's LogEntry::kNoVerbosityLevel broke.  The member
+# keeps its name everywhere and the skip is reported; a sibling member with no
+# such reference renames normally; the .inc is not touched.
+# ---------------------------------------------------------------------------
+incdir="$tmpdir/inc"
+mkdir -p "$incdir"
+cat > "$incdir/log.cpp" <<'EOF'
+struct Log { int itemCount = 0; int otherCount = 0; };
+#include "log_impl.inc"
+int use(Log& l) { return l.itemCount + l.otherCount + peek(l); }
+EOF
+cat > "$incdir/log_impl.inc" <<'EOF'
+inline int peek(Log& l) { return l.itemCount; }
+EOF
+inc_out="$("$binary" --style=snake_case --scope=member --in-place \
+  --report-rename-conflicts "$incdir/log.cpp" -- -std=c++17 -xc++ 2>&1)" \
+  || fail "inc test: exited nonzero: $inc_out"
+grep -q "skipped rename 'itemCount' -> 'item_count': referenced from a file that is not being formatted: .*log_impl.inc:1" <<<"$inc_out" \
+  || fail "inc test: the decline was not reported: $inc_out"
+grep -q 'int itemCount = 0;' "$incdir/log.cpp" \
+  || fail "inc test: a member referenced from the .inc was renamed"
+grep -q 'l.itemCount + l.other_count' "$incdir/log.cpp" \
+  || fail "inc test: the sibling member should have renamed"
+grep -q 'return l.itemCount;' "$incdir/log_impl.inc" \
+  || fail "inc test: the .inc must not be modified"
+echo "PASS: a reference from a file that is not being formatted declines the rename"
+
+# ---------------------------------------------------------------------------
+# Test 14 — a template-dependent use that no instantiation ever resolves
+# declines the name.
+#
+# Impl<T>::kIsNothrow is spelled inside a template argument of an alias
+# template.  When IsNothrow<int> is used, Clang folds the argument to the value
+# `false`; no DeclRefExpr for kIsNothrow ever appears in any instantiation, so
+# the cross-TU resolution has nothing to observe.  Before, the two declarations
+# were renamed and the use was left behind (abseil's any_invocable_test.h).
+# Now the token stays pending after the pass, the driver declines the *name*
+# and re-runs; a sibling constant still renames.
+# ---------------------------------------------------------------------------
+aliasdir="$tmpdir/alias"
+mkdir -p "$aliasdir"
+cat > "$aliasdir/alias.cpp" <<'EOF'
+template <class T, class = void>
+struct Impl { static constexpr bool kIsNothrow = false; };
+template <bool B> struct BoolC { static constexpr bool value = B; };
+template <class T> using IsNothrow = BoolC<Impl<T>::kIsNothrow>;
+struct S { static constexpr int kOther = 1; };
+bool f() { return IsNothrow<int>::value && S::kOther == 1; }
+EOF
+alias_out="$("$binary" --style=snake_case --scope=member --in-place \
+  --report-rename-conflicts "$aliasdir/alias.cpp" -- -std=c++17 -xc++ 2>&1)" \
+  || fail "alias test: exited nonzero: $alias_out"
+grep -q "skipped rename 'kIsNothrow' -> 'is_nothrow': a template-dependent use of the name at .*alias.cpp .* is never resolved by any instantiation" <<<"$alias_out" \
+  || fail "alias test: the decline was not reported: $alias_out"
+grep -q 'static constexpr bool kIsNothrow = false;' "$aliasdir/alias.cpp" \
+  || fail "alias test: the declaration was renamed although its use cannot be"
+grep -q 'BoolC<Impl<T>::kIsNothrow>' "$aliasdir/alias.cpp" \
+  || fail "alias test: the dependent use changed"
+grep -q 'static constexpr int other = 1;' "$aliasdir/alias.cpp" \
+  || fail "alias test: the sibling constant should have renamed"
+grep -q 'S::other == 1' "$aliasdir/alias.cpp" \
+  || fail "alias test: the sibling's use should have renamed"
+echo "PASS: a dependent use no instantiation resolves declines the name"

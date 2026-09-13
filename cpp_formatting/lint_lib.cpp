@@ -455,8 +455,15 @@ auto mergeEditReports(
   //    belonging to such a declaration is dropped here, including those emitted
   //    by other targets that never saw the offending reference.
   std::set<std::pair<std::string, unsigned>> Vetoed;
+  // Names declined outright (a veto whose "file" is '\x01' + the name; see
+  // nameVetoKey in rename_state.h): every rename edit of that old spelling is
+  // dropped, whichever declaration it belonged to.
+  std::set<std::string> DeclinedNames;
   for (const EditReport& Rep : Reports)
-    for (const RenameVeto& V : Rep.Vetoes) Vetoed.emplace(V.File, V.Offset);
+    for (const RenameVeto& V : Rep.Vetoes) {
+      Vetoed.emplace(V.File, V.Offset);
+      if (!V.File.empty() && V.File[0] == '\x01') DeclinedNames.insert(V.Name);
+    }
   const auto IsVetoed = [&Vetoed](llvm::StringRef OwnerFile,
                                   unsigned OwnerOffset) {
     return !OwnerFile.empty() &&
@@ -481,6 +488,12 @@ auto mergeEditReports(
         S.Vetoed = true;
         continue;
       }
+      if (R.New.empty()) {
+        // Pending: a TU spelled the token but did not resolve it.  Keeps the
+        // spelling so a token *nobody* resolved can be recognised below.
+        if (S.Rec.Old.empty()) S.Rec = R;
+        continue;
+      }
       if (S.HasName && S.Rec.New != R.New) {
         S.Vetoed = true;  // instantiations disagree.
         continue;
@@ -490,13 +503,38 @@ auto mergeEditReports(
     }
   }
 
+  // A dependent token no report resolved and none vetoed was seen by the
+  // tool and can never be rewritten; nothing knows which declaration it names,
+  // so every rename of that spelling is declined -- the same rule the TU
+  // driver applies in a direct run.
+  // "Nobody" spans the rules: every rule's collector enters the token as
+  // pending, and a rule that renames nothing of that kind may never resolve
+  // it, but the token binds to one entity -- if any rule resolved or vetoed
+  // the location, it is accounted for.
+  std::set<std::pair<std::string, unsigned>> Accounted;
+  for (const auto& [Key, S] : ResMap)
+    if (S.HasName || S.Vetoed)
+      Accounted.emplace(std::get<1>(Key), std::get<2>(Key));
+  std::set<std::string> Unresolved;
+  for (const auto& [Key, S] : ResMap)
+    if (!S.HasName && !S.Vetoed && !S.Rec.Old.empty() &&
+        Accounted.count({std::get<1>(Key), std::get<2>(Key)}) == 0)
+      Unresolved.insert(S.Rec.Old);
+  const auto NameDeclined = [&](llvm::StringRef Old) {
+    return DeclinedNames.count(Old.str()) > 0 ||
+           Unresolved.count(Old.str()) > 0;
+  };
+
   // 2. Gather all edits per file: ordinary edits + surviving resolutions.
   std::map<std::string, std::vector<EditRecord>> ByFile;
   for (const EditReport& Rep : Reports)
-    for (const EditRecord& E : Rep.Edits)
-      if (!IsVetoed(E.OwnerFile, E.OwnerOffset)) ByFile[E.File].push_back(E);
+    for (const EditRecord& E : Rep.Edits) {
+      if (IsVetoed(E.OwnerFile, E.OwnerOffset)) continue;
+      if (!E.OwnerFile.empty() && NameDeclined(E.Old)) continue;  // a rename
+      ByFile[E.File].push_back(E);
+    }
   for (const auto& [Key, S] : ResMap) {
-    if (S.Vetoed || !S.HasName) continue;
+    if (S.Vetoed || !S.HasName || NameDeclined(S.Rec.Old)) continue;
     ByFile[S.Rec.File].push_back(
         {S.Rec.File, S.Rec.Offset, S.Rec.Length, S.Rec.Old, S.Rec.New});
   }
