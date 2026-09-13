@@ -33,24 +33,36 @@ build:windows --cxxopt=/GR-
 build:windows --cxxopt=/Zc:preprocessor
 build:windows --cxxopt=/wd5105
 
-# MSVC defaults to /permissive (non-conforming name lookup) in pre-C++20 modes.
-# Under it, `friend class TrailingObjects;` inside a class deriving from
-# TrailingObjects<...> resolves to the namespace-level template rather than the
-# base's injected-class-name, and MSVC then rejects it:
+# The rest of the MSVC flag set LLVM's own build uses, from
+# llvm/cmake/modules/HandleLLVMOptions.cmake: building LLVM with Bazel instead
+# of CMake means reproducing the flags its source expects.
 #
-#   TrieRawHashMap.cpp(111): error C2990: 'llvm::TrailingObjects':
-#     non-class template has already been declared as a class template
+#   /permissive-     conformance mode.  MSVC defaults to /permissive before
+#                    C++20, whose non-conforming lookup binds
+#                    `friend class TrailingObjects;` to the namespace-level
+#                    template rather than the base's injected-class-name and
+#                    then rejects it (C2990 in TrieRawHashMap.cpp, new in
+#                    LLVM 21).  Upstream declined a source workaround for the
+#                    identical error elsewhere (llvm/llvm-project#163865),
+#                    pointing at this flag instead.
+#   /Zc:__cplusplus  without it MSVC reports __cplusplus as 199711L whatever
+#                    /std: says, so headers that branch on it pick C++98 paths.
+#   /Zc:inline       drop unreferenced internal-linkage functions.
+#   /bigobj          LLVM's larger objects exceed the default section limit.
 #
-# That file is new in LLVM 21, which is why this first bit on that upgrade.
-# Conformance mode is the fix upstream points to for this class of error
-# (llvm/llvm-project#163865, where the source-level workaround was declined),
-# and it keeps the LLVM source unpatched.
+# Each is given twice: LLVM is compiled in both configurations -- the target one
+# for the binary, the exec one for tablegen and the other build tools -- and
+# --cxxopt reaches only the former.  Miss the host copy and the same file fails
+# again, just marked "[for tool]".
 build:windows --cxxopt=/permissive-
-# LLVM is compiled in both configurations -- the target one for the binary, the
-# exec one for tablegen and the other build tools -- and --cxxopt reaches only
-# the former, so the exec build needs the flag spelled out separately. Without
-# this the same file fails again, just marked "[for tool]".
 build:windows --host_cxxopt=/permissive-
+build:windows --cxxopt=/Zc:__cplusplus
+build:windows --host_cxxopt=/Zc:__cplusplus
+build:windows --cxxopt=/Zc:inline
+build:windows --host_cxxopt=/Zc:inline
+build:windows --cxxopt=/bigobj
+build:windows --host_cxxopt=/bigobj
+build:windows --host_cxxopt=/Zc:preprocessor
 
 # Silence the MSVC warnings LLVM headers trigger in volume (C4624 alone fired
 # ~10k times per build); LLVM's own CMake build suppresses the same set on
