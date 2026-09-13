@@ -88,8 +88,13 @@ rather than pretending otherwise. A scenario declares:
 ```bash
 EXPECT=known_fail
 EXPECT_FAIL_PHASE=rebuild
-EXPECT_FAIL_REASON="why, with a file:line pointing at the mechanism"
+EXPECT_FAIL_REASON='why, with a file:line pointing at the mechanism'
 ```
+
+A `.scenario` is **sourced by bash**, so a value containing a backtick or `$` is
+substituted — silently dropping the text, and running it. Reasons quoting C++
+are the obvious trap (`` `Foo<T>::bar` `` disappears). Single-quote the value,
+or leave the metacharacters out; comment lines are safe either way.
 
 - Failing at the declared phase → **XFAIL**, exit 0.
 - Failing at a *different* phase → FAIL. A `known_fail` must never mask an

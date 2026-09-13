@@ -1,14 +1,17 @@
-# Observed: 3139 edits across 61 files apply cleanly with 0 conflicts, but the
-# rebuild then fails with 621 stale-name errors in 14 files.
+# Observed: 3140 edits across 61 files apply cleanly with 0 conflicts, but the
+# rebuild then fails with 490 stale-name errors in 14 files.
 #
 # History, so the trend is legible: 18081 errors in 52 files originally; 2993 in
 # 36 once colliding renames were skipped; 739 in 16 once macro arguments were
 # renamed and unrewritable macro references started vetoing the rename; 621 in
 # 14 once fields of a class nested in a class template mapped back to their
-# pattern. Each step removed a whole cause, and what is left is a single new
-# one -- see below. Macros and nested classes are done; this is neither.
+# pattern; 490 once partial and explicit specializations stopped being matched
+# against the primary template. Each step removed a whole cause. What is left is
+# one more -- see below; it is neither macros nor positional field matching.
+#
+# NB: this file is sourced by bash, so values must not contain backticks or $.
 REPO=googletest
 RULESET=member_snake_case
 EXPECT=known_fail
 EXPECT_FAIL_PHASE=rebuild
-EXPECT_FAIL_REASON="Qualified dependent names. `Helper<T>::member` inside a template is a DependentScopeDeclRefExpr -- a dependent *name*, not a member access on an object -- and only CXXDependentScopeMemberExpr (`x.member`) has cross-TU resolution. So the declaration is renamed and the qualified reference is not: gtest-internal.h's `&(TypeIdHelper<T>::dummy_)` alone is 229 of the 621 errors, and 311 of them are this shape ('is not a member of'). Minimal repro: template <class T> struct Helper { static int dummyValue; }; template <class T> int* get() { return &Helper<T>::dummyValue; }"
+EXPECT_FAIL_REASON='Qualified dependent names. Helper<T>::member inside a template is a DependentScopeDeclRefExpr -- a dependent *name*, not a member access on an object -- and only CXXDependentScopeMemberExpr (x.member) has cross-TU resolution, so the declaration is renamed and the qualified reference is not. All 311 remaining stale names are this shape (reported as "is not a member of"), the rest being knock-on errors: gtest-internal.h TypeIdHelper<T>::dummy_ is 229 by itself, plus FloatingPoint<RawType>::kMaxUlps and friends. Minimal repro: template <class T> struct Helper { static int dummyValue; }; template <class T> int* get() { return &Helper<T>::dummyValue; }'
