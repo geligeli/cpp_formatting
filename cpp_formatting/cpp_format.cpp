@@ -363,6 +363,14 @@ auto main(int argc, const char** argv) -> int {
   // normalize_variables rule plus (optionally) trailing_return_types all run
   // on the same AST, so each TU is parsed exactly once.
   std::vector<NormalizeRule> Rules;
+  // (scope, style) per rule, kept alongside Rules so the combination can be
+  // checked once every rule has parsed.
+  struct ParsedRule {
+    VariableScope Scope;
+    NamingStyle Style;
+    std::string Spelling;  ///< "member/snake_case", for the diagnostics
+  };
+  std::vector<ParsedRule> Parsed;
   for (const auto& rule : cfg.normalize_variables) {
     NamingStyle style{};
     if (!parseNamingStyle(rule.style, style)) {
@@ -398,6 +406,7 @@ auto main(int argc, const char** argv) -> int {
       return 1;
     }
 
+    Parsed.push_back({scope, style, rule.scope + "/" + rule.style});
     Rules.push_back(
         {scope,
          [style](std::string_view name, std::string& newName) -> bool {
@@ -405,6 +414,45 @@ auto main(int argc, const char** argv) -> int {
            return newName != name;
          },
          "normalize_variables/" + rule.scope + "/" + rule.style});
+  }
+
+  // Reject rule combinations that cannot be applied soundly.  Each rule
+  // collects on its own and decides in ignorance of the others -- collides()
+  // asks whether a new name is taken in the DeclContext as the AST spells it,
+  // which is before any rule has renamed anything -- so an unsound pair is not
+  // reported as a conflict, it is silently miscompiled.  Refusing up front is
+  // the only place this can be caught cheaply.
+  for (size_t I = 0; I < Parsed.size(); ++I) {
+    for (size_t J = I + 1; J < Parsed.size(); ++J) {
+      const ParsedRule& A = Parsed[I];
+      const ParsedRule& B = Parsed[J];
+      if (scopesCanMatchSameDecl(A.Scope, B.Scope)) {
+        llvm::errs()
+            << "Rules " << (I + 1) << " (" << A.Spelling << ") and " << (J + 1)
+            << " (" << B.Spelling
+            << ") can match the same declaration, which would then be renamed "
+               "twice -- the second rewrite lands on bytes the first already "
+               "replaced and corrupts them. The broad scopes already cover the "
+               "fine-grained ones: 'member' includes static and const data "
+               "members, 'global' includes static and const globals. Keep one "
+               "rule per declaration.\n";
+        return 1;
+      }
+      if (scopesShareADeclContext(A.Scope, B.Scope) &&
+          namingStylesCanCollide(A.Style, B.Style)) {
+        llvm::errs()
+            << "Rules " << (I + 1) << " (" << A.Spelling << ") and " << (J + 1)
+            << " (" << B.Spelling
+            << ") can produce the same name for two declarations in one scope, "
+               "and neither rule can see the other's renames. A field and its "
+               "accessor would both be given the same name, which does not "
+               "compile and is not reported as a conflict. Choose styles whose "
+               "names cannot coincide -- 'trailing_' with 'snake_case' (only "
+               "the first ever ends in '_'), or 'm_prefix' with "
+               "'UpperCamelCase' (they differ in the first character).\n";
+        return 1;
+      }
+    }
   }
 
   // The file set decides which declarations may be renamed; the source list

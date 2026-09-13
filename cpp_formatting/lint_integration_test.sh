@@ -342,3 +342,84 @@ grep -q "int itemCount;" "$macrodir/counter.h" \
 echo "PASS: a macro-vetoed rename is absent from lint output, with no re-run duplicates"
 
 echo "All lint integration tests passed."
+
+# ---------------------------------------------------------------------------
+# Test 9 — unsound rule combinations are refused before anything is parsed
+# ---------------------------------------------------------------------------
+# Two rules decide in ignorance of each other, so a pair that can land on one
+# name is not reported as a conflict -- it is silently miscompiled.  The only
+# cheap place to catch it is the configuration.
+cat > "$tmpdir/widget.cpp" <<'EOF'
+class Widget {
+ public:
+  int Value() const { return value_; }
+ private:
+  int value_;
+};
+EOF
+
+# Runs a command expecting exit code 2 would be a parse failure; a refused
+# configuration exits 1 having written an explanation to stderr.
+expect_refused() {
+  local why="$1"; shift
+  set +e
+  local out
+  out="$("$@" 2>&1)"
+  local rc=$?
+  set -e
+  [[ $rc -eq 1 ]] || fail "$why: expected exit 1, got $rc"
+  grep -q "$why" <<<"$out" || fail "$why: unexpected message: $out"
+  # Nothing may be rewritten on the way out.
+  grep -q 'int value_;' "$tmpdir/widget.cpp" || fail "$why: the file was modified"
+}
+
+# The getter/field pair: member/snake_case and method/snake_case both produce
+# `value`, so Widget would get a field and a method of that name.
+run_rules() {
+  local cfg="$1"
+  cat > "$tmpdir/rules.yaml" <<EOF
+normalize_variables:
+$cfg
+EOF
+  "$cpp_format" --config="$tmpdir/rules.yaml" --in-place "$tmpdir/widget.cpp" \
+    -- -std=c++17
+}
+expect_refused "can produce the same name" run_rules \
+'  - scope: member
+    style: snake_case
+  - scope: method
+    style: snake_case'
+
+# m_prefix is not safe against snake_case either: a method named MType
+# snake_cases to m_type, which is what m_prefix gives a member named type_.
+expect_refused "can produce the same name" run_rules \
+'  - scope: member
+    style: m_prefix
+  - scope: method
+    style: snake_case'
+
+# The fine-grained scopes are subsets of the broad ones, so a static data
+# member would be renamed twice and the second rewrite would corrupt the first.
+expect_refused "can match the same declaration" run_rules \
+'  - scope: member
+    style: snake_case
+  - scope: static_member
+    style: kConstant'
+
+# Disjoint styles in a shared scope are allowed: only trailing_ ever ends in
+# an underscore, so the two rules cannot land on one name.
+run_rules '  - scope: member
+    style: trailing_
+  - scope: method
+    style: snake_case'
+grep -q 'int value_;' "$tmpdir/widget.cpp" \
+  || fail "trailing_ + snake_case: the member should keep its underscore"
+grep -q 'int value() const' "$tmpdir/widget.cpp" \
+  || fail "trailing_ + snake_case: the method should have been renamed"
+
+# A local rule shares no DeclContext with a member rule, so any styles go.
+run_rules '  - scope: member
+    style: snake_case
+  - scope: local
+    style: snake_case'
+echo "PASS: unsound rename rule combinations are refused, sound ones run"

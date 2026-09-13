@@ -48,4 +48,24 @@ bool parseNamingStyle(std::string_view keyword, NamingStyle& out);
 // parseNamingStyle).
 std::string_view namingStyleKeyword(NamingStyle style);
 
+// ---------------------------------------------------------------------------
+// Style compatibility
+// ---------------------------------------------------------------------------
+
+// True when two styles can produce the same name from different inputs, so two
+// rename rules using them may pick one name for two different declarations.
+//
+// Disjointness has to be proved, not assumed: this returns true unless some
+// structural property holds for *every* name one style produces and for none
+// of the other's.  `trailing_` and `snake_case` are disjoint because only the
+// first ever ends in `_`; `m_prefix` and `snake_case` are not, because
+// snake_case turns a method named MType into m_type.
+//
+// The proof assumes an identifier whose first word begins with a letter, which
+// is what `_1st` would violate -- both `UpperCamelCase` and `snake_case` leave
+// such a word alone and could then agree. Guarding a combination that is
+// otherwise sound against a name of that shape is not worth refusing the
+// combination outright.
+bool namingStylesCanCollide(NamingStyle a, NamingStyle b);
+
 #endif  // CPP_FORMATTING_NAMING_CONVENTION_H_

@@ -73,6 +73,24 @@ enum class VariableScope {
            ///< operators are never renamed.
 };
 
+// True when one declaration can match both scopes -- the fine-grained scopes
+// are subsets of the broad ones, so a static data member is matched by
+// `member`, `static_member` and `const_member` alike.  Two rules that both
+// match it each rewrite the same bytes, and the second rewrite lands on text
+// the first already replaced: `MaxCount` under `member: snake_case` plus
+// `static_member: kConstant` comes out as `kMaxCountt`.  That is silent
+// corruption, not a conflict, so a caller configuring several rules must
+// reject the pair rather than run it.
+bool scopesCanMatchSameDecl(VariableScope a, VariableScope b);
+
+// True when declarations of the two scopes can share a DeclContext, i.e. a
+// name one of them takes is a name the other cannot also have.  Data members
+// and member functions share a class; the three global scopes share a
+// namespace; locals share neither.  Rules whose scopes share a context must
+// use styles that cannot produce the same name -- see namingStylesCanCollide()
+// and the note on collides() in AGENTS.md.
+bool scopesShareADeclContext(VariableScope a, VariableScope b);
+
 // ---------------------------------------------------------------------------
 // Pending rewrites — buffered in-place writes
 // ---------------------------------------------------------------------------

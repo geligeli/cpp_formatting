@@ -177,3 +177,66 @@ std::string_view namingStyleKeyword(NamingStyle style) {
     if (s == style) return kw;
   return "snake_case";
 }
+
+// ---------------------------------------------------------------------------
+// namingStylesCanCollide
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Does the property hold for every name the style produces, for none of them,
+// or does it depend on the input?  Only Yes-vs-No is proof of disjointness.
+enum class Holds { No, Yes, Sometimes };
+
+struct StyleShape {
+  Holds EndsUnderscore;
+  Holds StartsUnderscore;
+  Holds FirstCharUpper;
+  Holds ContainsUnderscore;
+  Holds ContainsUpper;
+};
+
+// Read straight off formatName(), given that splitIntoWords() never yields an
+// empty word (so a joined name never starts or ends with the separator) and
+// that formatName() returns "" for an empty word list (so every produced name
+// has at least one word in it).
+StyleShape shapeOf(NamingStyle style) {
+  constexpr Holds N = Holds::No, Y = Holds::Yes, S = Holds::Sometimes;
+  switch (style) {
+    //                    ends_  _starts  Upper  has_  hasUpper
+    case NamingStyle::SnakeCase:
+      return {N, N, N, S, N};
+    case NamingStyle::LeadingUnderscore:
+      return {N, Y, N, Y, N};
+    case NamingStyle::TrailingUnderscore:
+      return {Y, N, N, Y, N};
+    case NamingStyle::MemberPrefix:
+      return {N, N, N, Y, N};
+    case NamingStyle::CamelCase:
+      return {N, N, N, N, S};  // one word is all lowercase
+    case NamingStyle::UpperCamelCase:
+      return {N, N, Y, N, Y};
+    case NamingStyle::UpperSnakeCase:
+      return {N, N, Y, S, Y};
+    case NamingStyle::KConstant:
+      return {N, N, N, N, Y};  // leading 'k', then a capitalized word
+  }
+  return {S, S, S, S, S};
+}
+
+bool provesDisjoint(Holds a, Holds b) {
+  return a != Holds::Sometimes && b != Holds::Sometimes && a != b;
+}
+
+}  // namespace
+
+bool namingStylesCanCollide(NamingStyle a, NamingStyle b) {
+  if (a == b) return true;
+  const StyleShape A = shapeOf(a);
+  const StyleShape B = shapeOf(b);
+  return !(provesDisjoint(A.EndsUnderscore, B.EndsUnderscore) ||
+           provesDisjoint(A.StartsUnderscore, B.StartsUnderscore) ||
+           provesDisjoint(A.FirstCharUpper, B.FirstCharUpper) ||
+           provesDisjoint(A.ContainsUnderscore, B.ContainsUnderscore) ||
+           provesDisjoint(A.ContainsUpper, B.ContainsUpper));
+}

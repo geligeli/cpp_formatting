@@ -1199,3 +1199,57 @@ TEST(RenameUnsafeNewName, MemberOnAnotherObjectIsNotCapturedByALocal) {
             "struct S { int action; };\n"
             "void f(S& s, const int& action) { s.action = action; }\n");
 }
+
+// ---------------------------------------------------------------------------
+// Scope relations — the guard that keeps unsound rule combinations out
+// ---------------------------------------------------------------------------
+
+TEST(ScopeRelations, FineGrainedScopesOverlapTheBroadOnes) {
+  // A static data member is matched by all three, so two rules naming any two
+  // of them would rename it twice.
+  EXPECT_TRUE(scopesCanMatchSameDecl(VariableScope::Member,
+                                     VariableScope::StaticMember));
+  EXPECT_TRUE(scopesCanMatchSameDecl(VariableScope::Member,
+                                     VariableScope::ConstMember));
+  EXPECT_TRUE(scopesCanMatchSameDecl(VariableScope::StaticMember,
+                                     VariableScope::ConstMember));
+  // A `static const int x;` at namespace scope is matched by all three.
+  EXPECT_TRUE(scopesCanMatchSameDecl(VariableScope::Global,
+                                     VariableScope::StaticGlobal));
+  EXPECT_TRUE(scopesCanMatchSameDecl(VariableScope::Global,
+                                     VariableScope::ConstGlobal));
+  EXPECT_TRUE(scopesCanMatchSameDecl(VariableScope::StaticGlobal,
+                                     VariableScope::ConstGlobal));
+}
+
+TEST(ScopeRelations, DistinctFamiliesNeverMatchTheSameDecl) {
+  // matchesScope() excludes members from Global and locals from everything
+  // else, and Method matches no VarDecl at all.
+  EXPECT_FALSE(
+      scopesCanMatchSameDecl(VariableScope::Member, VariableScope::Method));
+  EXPECT_FALSE(
+      scopesCanMatchSameDecl(VariableScope::Member, VariableScope::Global));
+  EXPECT_FALSE(
+      scopesCanMatchSameDecl(VariableScope::Local, VariableScope::Global));
+  EXPECT_FALSE(
+      scopesCanMatchSameDecl(VariableScope::Method, VariableScope::Global));
+}
+
+TEST(ScopeRelations, MembersAndMethodsShareAClass) {
+  // The pair that needs disjoint styles: a field and a member function of one
+  // class cannot have the same name.
+  EXPECT_TRUE(
+      scopesShareADeclContext(VariableScope::Member, VariableScope::Method));
+  EXPECT_TRUE(scopesShareADeclContext(VariableScope::StaticMember,
+                                      VariableScope::Method));
+  EXPECT_TRUE(scopesShareADeclContext(VariableScope::Global,
+                                      VariableScope::StaticGlobal));
+  // A local never shares a DeclContext with a member or a global, so a local
+  // rule can use any style alongside them.
+  EXPECT_FALSE(
+      scopesShareADeclContext(VariableScope::Local, VariableScope::Member));
+  EXPECT_FALSE(
+      scopesShareADeclContext(VariableScope::Local, VariableScope::Global));
+  EXPECT_FALSE(
+      scopesShareADeclContext(VariableScope::Member, VariableScope::Global));
+}

@@ -1286,6 +1286,60 @@ class CaptureAction : public ASTFrontendAction {
 }  // namespace
 
 // ---------------------------------------------------------------------------
+// Scope relations (used to reject unsound rule combinations up front)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Where declarations of this scope live.  Two scopes with the same home can
+// put two declarations in one DeclContext, and then their names must differ.
+enum class ScopeHome { Class, Namespace, Function };
+
+ScopeHome homeOf(VariableScope S) {
+  switch (S) {
+    case VariableScope::Member:
+    case VariableScope::StaticMember:
+    case VariableScope::ConstMember:
+    case VariableScope::Method:
+      return ScopeHome::Class;
+    case VariableScope::Global:
+    case VariableScope::StaticGlobal:
+    case VariableScope::ConstGlobal:
+      return ScopeHome::Namespace;
+    case VariableScope::Local:
+      return ScopeHome::Function;
+  }
+  return ScopeHome::Namespace;
+}
+
+bool isDataMemberScope(VariableScope S) {
+  return S == VariableScope::Member || S == VariableScope::StaticMember ||
+         S == VariableScope::ConstMember;
+}
+
+bool isGlobalScope(VariableScope S) {
+  return S == VariableScope::Global || S == VariableScope::StaticGlobal ||
+         S == VariableScope::ConstGlobal;
+}
+
+}  // namespace
+
+bool scopesCanMatchSameDecl(VariableScope A, VariableScope B) {
+  if (A == B) return true;
+  // Within each family the scopes nest: ConstMember is a subset of
+  // StaticMember is a subset of Member, and both StaticGlobal and ConstGlobal
+  // are subsets of Global (a `static const` one is in both).  Across families
+  // nothing overlaps -- matchesScope() excludes members from Global and locals
+  // from everything else, and Method matches no VarDecl at all.
+  return (isDataMemberScope(A) && isDataMemberScope(B)) ||
+         (isGlobalScope(A) && isGlobalScope(B));
+}
+
+bool scopesShareADeclContext(VariableScope A, VariableScope B) {
+  return homeOf(A) == homeOf(B);
+}
+
+// ---------------------------------------------------------------------------
 // reportRenameConflicts (public)
 // ---------------------------------------------------------------------------
 

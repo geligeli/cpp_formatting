@@ -246,3 +246,73 @@ TEST(NamingStyleKeyword, UnknownKeyword) {
   NamingStyle out{};
   EXPECT_FALSE(parseNamingStyle("unknown", out));
 }
+
+// ---------------------------------------------------------------------------
+// namingStylesCanCollide
+// ---------------------------------------------------------------------------
+
+namespace {
+constexpr NamingStyle kAll[] = {
+    NamingStyle::SnakeCase,          NamingStyle::LeadingUnderscore,
+    NamingStyle::TrailingUnderscore, NamingStyle::MemberPrefix,
+    NamingStyle::CamelCase,          NamingStyle::UpperCamelCase,
+    NamingStyle::UpperSnakeCase,     NamingStyle::KConstant,
+};
+}  // namespace
+
+TEST(NamingStylesCanCollide, AStyleAlwaysCollidesWithItself) {
+  for (NamingStyle s : kAll) EXPECT_TRUE(namingStylesCanCollide(s, s));
+}
+
+TEST(NamingStylesCanCollide, Symmetric) {
+  for (NamingStyle a : kAll)
+    for (NamingStyle b : kAll)
+      EXPECT_EQ(namingStylesCanCollide(a, b), namingStylesCanCollide(b, a));
+}
+
+TEST(NamingStylesCanCollide, UnderscoreMarkersProveDisjointness) {
+  // Only trailing_ ever ends in '_', and only _leading ever starts with one,
+  // so each is disjoint from every other style.  This is what makes
+  // `member: trailing_` + `method: snake_case` safe to run in one pass.
+  for (NamingStyle s : kAll) {
+    if (s != NamingStyle::TrailingUnderscore)
+      EXPECT_FALSE(namingStylesCanCollide(NamingStyle::TrailingUnderscore, s))
+          << "trailing_ vs " << namingStyleKeyword(s);
+    if (s != NamingStyle::LeadingUnderscore)
+      EXPECT_FALSE(namingStylesCanCollide(NamingStyle::LeadingUnderscore, s))
+          << "_leading vs " << namingStyleKeyword(s);
+  }
+}
+
+TEST(NamingStylesCanCollide, CaseMarkersProveDisjointness) {
+  // m_prefix is all lowercase and UpperCamelCase starts with a capital.
+  EXPECT_FALSE(namingStylesCanCollide(NamingStyle::MemberPrefix,
+                                      NamingStyle::UpperCamelCase));
+  // snake_case has no capitals at all; both of these always have one.
+  EXPECT_FALSE(namingStylesCanCollide(NamingStyle::SnakeCase,
+                                      NamingStyle::UpperCamelCase));
+  EXPECT_FALSE(
+      namingStylesCanCollide(NamingStyle::SnakeCase, NamingStyle::KConstant));
+  // An underscore is in every m_prefix name and in no kConstant one.
+  EXPECT_FALSE(namingStylesCanCollide(NamingStyle::MemberPrefix,
+                                      NamingStyle::KConstant));
+}
+
+TEST(NamingStylesCanCollide, OverlappingStylesAreReported) {
+  // snake_case turns a method named MType into m_type, which is exactly what
+  // m_prefix produces for a member named type_.
+  EXPECT_TRUE(namingStylesCanCollide(NamingStyle::SnakeCase,
+                                     NamingStyle::MemberPrefix));
+  EXPECT_EQ(renameToStyle("MType", NamingStyle::SnakeCase),
+            renameToStyle("type_", NamingStyle::MemberPrefix));
+  // camelCase produces kFoo for a name split as k|foo.
+  EXPECT_TRUE(
+      namingStylesCanCollide(NamingStyle::CamelCase, NamingStyle::KConstant));
+  EXPECT_EQ(renameToStyle("k_foo", NamingStyle::CamelCase),
+            renameToStyle("foo", NamingStyle::KConstant));
+  // A one-word name is the same in both.
+  EXPECT_TRUE(
+      namingStylesCanCollide(NamingStyle::SnakeCase, NamingStyle::CamelCase));
+  EXPECT_TRUE(namingStylesCanCollide(NamingStyle::UpperCamelCase,
+                                     NamingStyle::UpperSnakeCase));
+}
