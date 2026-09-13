@@ -145,6 +145,15 @@ struct ResolutionRecord {
   bool Veto = false;
   std::string OwnerFile;  ///< member this token resolves to, or ""
   unsigned OwnerOffset = 0;
+  /// Which rename rule produced this.  One dependent token is looked at by
+  /// every rule, and the rules disagree by construction: the rule that owns
+  /// the member it resolves to records a name, and every other rule records a
+  /// veto because it resolves to a member *that rule* is not renaming.  Merging
+  /// is veto-absorbing, so pooling the rules under one (file, offset) key lets
+  /// one rule's veto cancel another's rename -- the declaration is renamed and
+  /// the dependent use is left spelling the old name.  The index keeps them
+  /// apart, exactly as CrossTUState::DepResPerRule does in a direct run.
+  unsigned Rule = 0;
 };
 
 // One invocation's output: ordinary edits plus the dependent-token sidecar.

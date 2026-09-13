@@ -199,12 +199,12 @@ void CppFormatActionFactory::emitEdits(llvm::raw_ostream& OS) {
   // aggregation resolves them across all TUs before turning survivors into
   // edits.  Keys are relativized to cwd to match the edit records and be stable
   // across sandboxes.
-  for (const DependentResolutions& Map : Shared.DepResPerRule)
-    for (const auto& [Key, R] : Map) {
+  for (unsigned Rule = 0; Rule < Shared.DepResPerRule.size(); ++Rule)
+    for (const auto& [Key, R] : Shared.DepResPerRule[Rule]) {
       if (!R.HasName && !R.Vetoed) continue;
       Edits.Resolutions.push_back({relativizeToCwd(Key.first), Key.second,
                                    R.Length, R.OldName, R.NewName, R.Vetoed,
-                                   R.OwnerFile, R.OwnerOffset});
+                                   R.OwnerFile, R.OwnerOffset, Rule});
     }
   for (const auto& [Key, V] : Shared.Vetoes) Edits.Vetoes.push_back(V);
   Edits.emitJSON(OS);

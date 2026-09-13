@@ -321,3 +321,73 @@ realpath counter.h >> lib_owned.txt
 diff -u veto.patch veto_perfile.patch \
   || fail "veto: per-file records merge differently than per-target records"
 echo "PASS: the cross-target veto holds with one action per file"
+
+# ---------------------------------------------------------------------------
+# Test 6 — two rename rules: one rule's veto must not cancel the other's
+#          dependent-token resolution
+# ---------------------------------------------------------------------------
+# Every rule looks at every dependent token, and the rules disagree by
+# construction: the rule owning the member the token resolves to records a
+# name, and the others record a veto because it resolves to a member *they* are
+# not renaming.  Merging is veto-absorbing, so the records have to be kept apart
+# per rule -- pooled under one (file, offset) key, the veto wins, the
+# declaration is renamed and the dependent use is left spelling the old name.
+mkdir -p "$tmpdir/tworule"
+cd "$tmpdir/tworule"
+
+cat > m.h <<'EOF'
+#ifndef M_H_
+#define M_H_
+template <typename T>
+class MatcherBase {
+ public:
+  // Renamed by the *method* rule; the identically named VTable field below is
+  // renamed by the *member* rule.
+  bool MatchAndExplain(const T& x) const {
+    return vtable_->match_and_explain(*this, x);
+  }
+
+ private:
+  struct VTable {
+    bool (*match_and_explain)(const MatcherBase&, const T&);
+  };
+  const VTable* vtable_;
+};
+#endif
+EOF
+cat > m.cpp <<'EOF'
+#include "m.h"
+bool f(MatcherBase<int>& m, int x) { return m.MatchAndExplain(x); }
+EOF
+cat > cpp_format.yaml <<'EOF'
+normalize_variables:
+  - scope: member
+    style: trailing_
+  - scope: method
+    style: snake_case
+EOF
+
+realpath m.h > owned.txt
+realpath m.cpp >> owned.txt
+"$cpp_format" --config=cpp_format.yaml --owned-files=owned.txt \
+  --emit-edits=m_cpp.json m.cpp -- -x c++ -std=c++17 -I.
+"$cpp_format" --config=cpp_format.yaml --owned-files=owned.txt \
+  --emit-edits=m_h.json m.h -- -x c++ -std=c++17 -I.
+
+# The two rules must record the token under *different* rule indices.
+grep -q '"rule": 1' m_cpp.json \
+  || fail "two rules: the sidecar does not distinguish the rules"
+
+"$cpp_format" --aggregate --root="$tmpdir/tworule" m_cpp.json m_h.json \
+  > tworule.patch
+"$cpp_format" --aggregate --apply --root="$tmpdir/tworule" m_cpp.json m_h.json
+
+# The member rule owns the VTable field: declaration and dependent use both
+# gain the trailing underscore.  The method rule owns MatchAndExplain.
+grep -q 'bool (\*match_and_explain_)' m.h \
+  || fail "two rules: the VTable field was not renamed"
+grep -q 'vtable_->match_and_explain_(' m.h \
+  || fail "two rules: the dependent use was left spelling the old name"
+grep -q 'bool match_and_explain(const T& x)' m.h \
+  || fail "two rules: the method was not renamed"
+echo "PASS: two rename rules keep their dependent-token resolutions apart"

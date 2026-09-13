@@ -343,6 +343,7 @@ void EditReport::emitJSON(llvm::raw_ostream& OS) const {
                          {"old", R.Old},
                          {"new", R.New},
                          {"veto", R.Veto}};
+    if (R.Rule != 0) O["rule"] = static_cast<int64_t>(R.Rule);
     if (!R.OwnerFile.empty()) {
       O["owner_file"] = R.OwnerFile;
       O["owner_offset"] = static_cast<int64_t>(R.OwnerOffset);
@@ -399,6 +400,7 @@ auto parseEditReport(llvm::StringRef Json, EditReport& Out) -> bool {
       R.Old = O->getString("old").value_or("").str();
       R.New = O->getString("new").value_or("").str();
       R.Veto = O->getBoolean("veto").value_or(false);
+      R.Rule = static_cast<unsigned>(O->getInteger("rule").value_or(0));
       R.OwnerFile = O->getString("owner_file").value_or("").str();
       R.OwnerOffset =
           static_cast<unsigned>(O->getInteger("owner_offset").value_or(0));
@@ -469,11 +471,12 @@ auto mergeEditReports(
     bool Vetoed = false;
     bool HasName = false;
   };
-  std::map<std::pair<std::string, unsigned>, Resolved> ResMap;
+  // Keyed by rule as well as location: see ResolutionRecord::Rule.
+  std::map<std::tuple<unsigned, std::string, unsigned>, Resolved> ResMap;
   for (const EditReport& Rep : Reports) {
     for (const ResolutionRecord& R : Rep.Resolutions) {
       if (IsVetoed(R.OwnerFile, R.OwnerOffset)) continue;
-      Resolved& S = ResMap[{R.File, R.Offset}];
+      Resolved& S = ResMap[{R.Rule, R.File, R.Offset}];
       if (R.Veto) {
         S.Vetoed = true;
         continue;
