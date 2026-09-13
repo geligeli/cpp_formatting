@@ -3,6 +3,8 @@ load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
+load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
 
 cc_library(
     name = "output_mode",
@@ -370,6 +372,8 @@ cc_binary(
     deps = [
         ":const_placement_lib",
         ":cpp_format_lib",
+        ":cpp_index_lib",
+        ":cpp_index_merge",
         ":embedded_clang_resource",
         ":lint_lib",
         ":naming_convention",
@@ -378,6 +382,101 @@ cc_binary(
         "@llvm-project//clang:frontend",
         "@llvm-project//clang:tooling",
         "@llvm-project//llvm:Support",
+    ],
+)
+
+# The symbol index schema: one IndexUnit per translation unit
+# (`cpp_format --emit-index`), merged into one Index for the repository
+# (`cpp_format --merge-index`).  Public so a consumer can read the files.
+proto_library(
+    name = "index_proto",
+    srcs = ["index.proto"],
+    visibility = ["//visibility:public"],
+)
+
+cc_proto_library(
+    name = "index_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":index_proto"],
+)
+
+# The Clang-free half of the index: normalizing, merging and serializing the
+# messages.  `cpp_format --merge-index` / `--dump-index` run on this alone.
+cc_library(
+    name = "cpp_index_merge",
+    srcs = ["cpp_index_merge.cpp"],
+    hdrs = ["cpp_index_merge.h"],
+    deps = [
+        ":index_cc_proto",
+        "@llvm-project//llvm:Support",
+        "@protobuf//:protobuf",
+    ],
+)
+
+cc_test(
+    name = "cpp_index_merge_test",
+    srcs = ["cpp_index_merge_test.cpp"],
+    copts = [
+        "-DGTEST_HAS_RTTI=0",
+    ],
+    deps = [
+        ":cpp_index_merge",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@llvm-project//llvm:Support",
+    ],
+)
+
+# The per-TU half of the index: an IndexDataConsumer for Clang's own indexing
+# library, the TU driver client behind `cpp_format --emit-index`, and the
+# in-memory test helper.
+cc_library(
+    name = "cpp_index_lib",
+    srcs = ["cpp_index_lib.cpp"],
+    hdrs = ["cpp_index_lib.h"],
+    deps = [
+        ":cpp_index_merge",
+        ":index_cc_proto",
+        ":lint_lib",
+        ":rename_variables_lib",
+        ":tu_driver",
+        "@llvm-project//clang:ast",
+        "@llvm-project//clang:basic",
+        "@llvm-project//clang:frontend",
+        "@llvm-project//clang:index",
+        "@llvm-project//clang:lex",
+        "@llvm-project//clang:tooling",
+        "@llvm-project//llvm:Support",
+        "@protobuf//:protobuf",
+    ],
+)
+
+cc_test(
+    name = "cpp_index_test",
+    srcs = ["cpp_index_test.cpp"],
+    copts = [
+        "-DGTEST_HAS_RTTI=0",
+    ],
+    deps = [
+        ":cpp_index_lib",
+        ":cpp_index_merge",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@llvm-project//clang:tooling",
+    ],
+)
+
+# Exercises `cpp_format --emit-index` (per-file, with --owned-files, as the
+# aspect runs it), `--merge-index` (incl. --records-from and an index as an
+# input) and `--dump-index` (text, JSON, --lookup across files).
+sh_test(
+    name = "index_integration_test",
+    srcs = ["index_integration_test.sh"],
+    args = [
+        "$(location //cpp_formatting:cpp_format)",
+    ],
+    data = [
+        "//cpp_formatting:cpp_format",
     ],
 )
 

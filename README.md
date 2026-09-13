@@ -91,6 +91,7 @@ tools/cpp_format.sh diff           # print the merged, git-apply-able patch
 tools/cpp_format.sh fix            # apply the fixes in place
 tools/cpp_format.sh fix //app/...  # scope to a package tree
 tools/cpp_format.sh compile_commands   # write compile_commands.json for clangd
+tools/cpp_format.sh index          # write index.pb, the repo's symbol index
 ```
 
 Commit the placed script (it's a normal, editable file). It queries the
@@ -114,6 +115,10 @@ cpp_format_targets(name = "format", deps = ["//app:main", "//lib:core"])
 bazel test //:format.check   # test gate    bazel run //:format.fix   # apply
 bazel run //:format.compile_commands      # write compile_commands.json
 ```
+
+The same dep set can be **indexed**: `cpp_index_targets(name = "index", deps =
+[...])` defines `//:index.index`, an ordinary build target whose output is the
+merged symbol index of those targets (see [Symbol index](#symbol-index)).
 
 **A `compile_commands.json` for free.** The aspect already derives every
 target's compile command, so both entry points can also write it out as a
@@ -527,6 +532,9 @@ bazel run //cpp_formatting:cpp_format -- \
 | `--lint` | Analyze only — report violations, modify nothing, exit 1 if any are found |
 | `--format=<fmt>` | Output format for `--lint`: `text` (default), `sarif`, or `diff` |
 | `--jobs=<N>` / `-j<N>` | Translation units to parse in parallel. `0` (default) uses every CPU; larger values are capped at the CPU count. The result does not depend on it (see [Parallel parsing](#parallel-parsing)). |
+| `--emit-index=<file>` | Index mode: parse the sources and write one `cpp_index.IndexUnit` (binary protobuf). Runs no formatting pass and takes no config; see [Symbol index](#symbol-index). |
+| `--merge-index --output=<file> [--records-from=<list>] <unit.pb>...` | Merge index units (or earlier indexes) into one `cpp_index.Index`. `--format=binary\|text\|json` picks the encoding (default binary). |
+| `--dump-index [--format=text\|json\|binary] [--lookup=<path>:<offset>] <file>` | Print a unit or index, or list the symbol at a byte offset and every occurrence of it. |
 
 **Pass ordering:** `normalize_variables` rules are applied first (in the order
 listed in the config), then `const_placement`, then `return_types`. The order
@@ -826,6 +834,11 @@ instead generates four graph targets:
 | `<name>.fix` | `bazel run` | Applies the edits in `$BUILD_WORKSPACE_DIRECTORY` (outside the action graph, since Bazel actions cannot mutate sources). |
 | `<name>.compile_commands` | `bazel run` | Writes a `compile_commands.json` for the deps (transitively) in `$BUILD_WORKSPACE_DIRECTORY`. Also available standalone as the `cpp_format_compile_commands(name, deps)` rule. |
 
+and `cpp_index_targets(name, deps)` generates one more, `<name>.index` -- a
+`bazel build` target whose output is the merged symbol index of the deps (see
+[Symbol index](#symbol-index)); `cpp_format.sh index [pattern]` is its
+query-driven twin.
+
 **Compilation database.** The aspect writes each target's compile command out
 as a `<name>.compile_commands.jsonl` fragment (one JSON object per source
 file, a plain `ctx.actions.write`; output group `cpp_format_compile_commands`,
@@ -851,6 +864,100 @@ Clang builtin headers from `@llvm-project` (see
 [bazel/testdata/BUILD.bazel](bazel/testdata/BUILD.bazel) for a worked example).
 
 ---
+
+## Symbol index
+
+The same per-file pipeline that emits edit records can emit a **symbol index**:
+for every symbol -- class, struct, enum, enumerator, field, function, method,
+variable, parameter, alias, namespace, template parameter, macro -- every
+declaration, definition and reference across the repository, as byte ranges.
+Take any token in any file and find every use of it anywhere.
+
+```sh
+tools/cpp_format.sh index                # -> index.pb in the workspace root
+tools/cpp_format.sh index //app/...      # one package tree; INDEX_OUT= to place it
+
+# Look at it:
+cpp_format --dump-index --format=text index.pb          # or json
+cpp_format --dump-index --lookup=lib/foo.cpp:1234 index.pb
+```
+
+`--lookup` prints the symbol under the byte offset and every occurrence of it:
+
+```
+c:@S@Widget@FI@itemCount
+  FIELD Widget::itemCount : int
+  canonical widget.h:95-104
+  widget.cpp:55-64 REFERENCE|READ
+  widget.cpp:96-105 REFERENCE|WRITE
+  widget.cpp:113-117 REFERENCE|READ|WRITE macro-body
+  widget.h:95-104 DEFINITION
+```
+
+**The format** is a protocol buffer, [cpp_formatting/index.proto](cpp_formatting/index.proto).
+An `IndexUnit` is what one translation unit produces: a `files` table
+(paths relative to the working directory -- under Bazel, exec-root-relative
+like `lib/foo.cpp`, `bazel-out/.../foo.pb.h` or `external/...`, so a unit is
+portable), a `symbols` table keyed by Clang's USR (the symbol's identity across
+TUs and machines: `c:@N@demo@S@Widget`), and `occurrences` that refer to both
+by index and carry a `[begin, end)` byte range, role bits (`DECLARATION`,
+`DEFINITION`, `REFERENCE`, `READ`, `WRITE`, `CALL`, `DEPENDENT`, ...), whether
+the token was spelled through a macro, and relations (`CALLED_BY`,
+`CONTAINED_BY`); there is one occurrence per token and symbol, its roles the
+union of every report of it. A unit also lists its `pending` dependent tokens
+(below). Symbols
+carry their kind, qualified name, printed type, canonical declaration and
+symbol-level relations (`CHILD_OF`, `BASE_OF`, `OVERRIDE_OF`,
+`SPECIALIZATION_OF`). The merged `Index` has the same tables with the
+occurrences grouped per file, sorted by offset. Every list has a defined order
+and there are no maps, so the bytes are a pure function of the content: units
+cache under Bazel, and a merge does not depend on its inputs' order.
+
+**How it is built.** `cpp_format --emit-index` parses a TU with Clang's own
+indexing library (the one behind clangd) and records the occurrences in the
+main file and in every *owned* file (`--owned-files`, or every source given);
+symbols referenced from those files but declared elsewhere -- `std::`, other
+repositories, system headers -- get a symbol entry with their canonical
+location but no occurrences of their own. Under Bazel the `cpp_index_aspect`
+runs one such action per translation unit, never for a header on its own (a
+header is only ever compiled as part of a TU that includes it); the owned set
+is the target's `srcs`, `hdrs` and `textual_hdrs` plus the dep closure's
+first-party headers, so a header is indexed by every TU that includes it, and
+a header-only dependency by its dependents' TUs. A `no-cpp-index` tag opts a
+target out. Then
+`cpp_format --merge-index` unions the units: files by path, symbols by USR,
+identical occurrences deduplicated. Merging mutates nothing, so
+`cpp_index_targets(name, deps)` makes it an ordinary cached build action --
+`bazel build //:index.index` produces `index.index.pb` -- while
+`cpp_format.sh index` does the same for any target pattern. An index is itself
+a valid merge input, so it can be extended with further units.
+
+**Extending it.** Any producer may emit `IndexUnit`s -- a proto-aware indexer
+would describe `.proto` files with `Language.PROTO` symbols and let the C++
+symbols of a generated `.pb.h` point back at them through a `GENERATED_FROM`
+relation -- and `--merge-index` unions them all under one symbol table. `File`
+and `Symbol` carry free-form `attributes` for whatever has no field yet.
+
+**Dependent tokens.** `t.m` where `t` is a template parameter, `Helper<T>::k`,
+or a call `f(t)` with dependent arguments names no declaration until the
+template is instantiated, and Clang's indexer reports nothing for the opaque
+cases. The indexer reuses the rename tool's cross-TU machinery for them: the
+unit of the TU that *instantiates* the template records what the token
+resolved to, as a `REFERENCE|DEPENDENT` occurrence of that symbol on the token
+as written in the pattern (one per distinct symbol when the template is
+instantiated with several types), while the unit of the file that *spells* the
+token lists it as `pending`. The merge drops a pending entry once any unit
+resolved it, and what is left over is reported as `unresolved` in the index;
+`--lookup` on such a token says so. The two directions work across targets:
+`demo_main.cpp`'s action resolves the token in `demo.h`'s template.
+
+**What is not indexed.** A dependent token whose template no indexed
+translation unit instantiates. Occurrences in files that are not owned
+(system headers, other repositories) are dropped; their symbols stay. A token
+spelled inside a macro *body* is recorded on the invocation's name at the
+call site, which every symbol that expansion names shares; a macro *argument*
+is recorded on its own spelling. `~Foo` and `operator+` occurrences cover
+their first token only.
 
 ## Running all tests
 
@@ -935,6 +1042,16 @@ cpp_formatting/
   lint_lib_test.cpp                       # gtest unit tests
   lint_integration_test.sh                # shell integration tests for --lint/--format
 
+  # Symbol index (--emit-index / --merge-index / --dump-index)
+  index.proto                             # the schema: IndexUnit (per TU) and Index (merged)
+  cpp_index_lib.h                         # IndexDataConsumer -> IndexUnit, IndexActionFactory, test helper
+  cpp_index_lib.cpp                       # location mapping, owned-file filter, symbol interning
+  cpp_index_test.cpp                      # gtest unit tests (in-memory TUs)
+  cpp_index_merge.h                       # Clang-free: normalize, merge, group per file, lookup, I/O
+  cpp_index_merge.cpp                     # implementation
+  cpp_index_merge_test.cpp                # gtest unit tests
+  index_integration_test.sh               # shell integration tests for the three modes
+
   # Shared
   output_mode.h                           # OutputMode enum (DryRun / InPlace / Debug / Lint)
   BUILD                                   # all Bazel targets, plus the clang_include_headers
@@ -954,7 +1071,8 @@ Managed via Bzlmod ([MODULE.bazel](MODULE.bazel)):
 | Dependency | Version |
 |---|---|
 | `llvm-project` (Clang libraries + LLVM YAML + builtin headers) | 21.1.8 (built from source, see below) |
-| `googletest` | 1.14.0.bcr.1 |
+| `protobuf` (the symbol index format; its own abseil pin comes with it) | 31.1 |
+| `googletest` | 1.15.2 |
 | `rules_cc` | 0.2.17 |
 | `rules_shell` | 0.4.1 |
 | `rules_pkg` | (bundles the clang builtin headers into the binary) |

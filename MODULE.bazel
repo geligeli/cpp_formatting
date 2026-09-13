@@ -5,9 +5,20 @@ module(
 
 # Good practice to include rules_cc when building C++ with Bzlmod
 bazel_dep(name = "rules_cc", version = "0.2.17")
-bazel_dep(name = "googletest", version = "1.14.0.bcr.1")
+# 1.15.2 is what protobuf's abseil pin resolves the graph to anyway; naming it
+# here keeps Bazel's direct-dependency check quiet.
+bazel_dep(name = "googletest", version = "1.15.2")
 bazel_dep(name = "rules_shell", version = "0.4.1")
 bazel_dep(name = "rules_pkg", version = "1.2.0")
+
+# The symbol index (`cpp_format --emit-index` / `--merge-index`) is serialized
+# as protocol buffers.  The module graph resolved protobuf 29.0 transitively
+# before this, but that release asks for abseil 20240116.1, which no longer
+# compiles with GCC 15 (its container_memory.h uses uintptr_t without
+# including <cstdint>), and it references an abseil target the fixed releases
+# have removed -- so the two are bumped as a pair by taking the protobuf
+# release whose own abseil pin has the fix.
+bazel_dep(name = "protobuf", version = "31.1")
 
 # Transitive dependencies required by the LLVM Bazel overlay's BUILD files.
 bazel_dep(name = "bazel_skylib", version = "1.8.2")

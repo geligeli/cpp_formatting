@@ -2300,3 +2300,116 @@ auto rewriteVariableNames(llvm::StringRef Code, VariableRenameCallback CB,
   if (!Ok || Output.empty()) return Code.str();
   return Output;
 }
+
+// ---------------------------------------------------------------------------
+// Dependent tokens (shared with the symbol index)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Every dependent token with a spelling of its own, in any file.  Unlike
+// DependentTokenCollector this is not restricted to owned files and also
+// takes the two unresolved-overload shapes: `t.f(x)` with a non-dependent
+// base but dependent arguments (UnresolvedMemberExpr) and an unqualified call
+// whose lookup is deferred (UnresolvedLookupExpr).  Those are the node kinds
+// the rename tool's own cross-TU path does not visit yet.
+class AllDependentTokensCollector
+    : public RecursiveASTVisitor<AllDependentTokensCollector> {
+ public:
+  AllDependentTokensCollector(SourceManager& SM,
+                              std::vector<DependentToken>& Out)
+      : SM(SM), Out(Out) {}
+
+  bool VisitCXXDependentScopeMemberExpr(CXXDependentScopeMemberExpr* E) {
+    add(E->getMemberLoc(), E->getMember());
+    return true;
+  }
+  bool VisitDependentScopeDeclRefExpr(DependentScopeDeclRefExpr* E) {
+    add(E->getLocation(), E->getDeclName());
+    return true;
+  }
+  // An overload set left unresolved because the *arguments* are dependent:
+  // the callee node itself is not marked dependent (`this` and the name are
+  // not), only the enclosing call is, so no dependence test is applied here.
+  // Outside a template such a node survives only in code that failed to
+  // resolve, which does not reach an indexed AST.
+  bool VisitUnresolvedMemberExpr(UnresolvedMemberExpr* E) {
+    add(E->getMemberLoc(), E->getMemberName());
+    return true;
+  }
+  bool VisitUnresolvedLookupExpr(UnresolvedLookupExpr* E) {
+    add(E->getNameLoc(), E->getName());
+    return true;
+  }
+
+ private:
+  void add(SourceLocation Loc, DeclarationName Name) {
+    if (!Name.isIdentifier() || !rewriteLocFor(Loc, SM).isValid()) return;
+    Out.push_back({Loc, Name.getAsIdentifierInfo()->getName().str()});
+  }
+
+  SourceManager& SM;
+  std::vector<DependentToken>& Out;
+};
+
+// The declaration a binding names: the rename-map key when the reference is
+// one of the kinds the rename tool maps back to its pattern, otherwise the
+// pattern of an instantiated function or variable, otherwise the canonical
+// declaration itself.
+const Decl* bindingDecl(const NamedDecl* D, const Decl* Key) {
+  if (Key) return Key;
+  if (const auto* FD = dyn_cast<FunctionDecl>(D))
+    if (const FunctionDecl* P = FD->getTemplateInstantiationPattern())
+      return P->getCanonicalDecl();
+  if (const auto* VD = dyn_cast<VarDecl>(D))
+    if (const VarDecl* P = VD->getTemplateInstantiationPattern())
+      return P->getCanonicalDecl();
+  return D->getCanonicalDecl();
+}
+
+class DependentBindingWalker
+    : public RecursiveASTVisitor<DependentBindingWalker> {
+ public:
+  DependentBindingWalker(
+      SourceManager& SM, llvm::function_ref<bool(SourceLocation)> IsToken,
+      llvm::function_ref<void(SourceLocation, const Decl*)> OnBinding)
+      : SM(SM), IsToken(IsToken), OnBinding(OnBinding) {}
+
+  bool shouldVisitTemplateInstantiations() const { return true; }
+
+  bool VisitMemberExpr(MemberExpr* E) {
+    bind(E->getMemberLoc(), E->getMemberDecl(), memberExprKey(E));
+    return true;
+  }
+  bool VisitDeclRefExpr(DeclRefExpr* E) {
+    bind(E->getLocation(), E->getDecl(), declRefKey(E));
+    return true;
+  }
+
+ private:
+  void bind(SourceLocation Loc, const NamedDecl* D, const Decl* Key) {
+    const SourceLocation Spelling = rewriteLocFor(Loc, SM);
+    if (Spelling.isInvalid() || !IsToken(Spelling)) return;
+    OnBinding(Spelling, bindingDecl(D, Key));
+  }
+
+  SourceManager& SM;
+  llvm::function_ref<bool(SourceLocation)> IsToken;
+  llvm::function_ref<void(SourceLocation, const Decl*)> OnBinding;
+};
+
+}  // namespace
+
+auto collectDependentTokens(ASTContext& Ctx) -> std::vector<DependentToken> {
+  std::vector<DependentToken> Out;
+  AllDependentTokensCollector C(Ctx.getSourceManager(), Out);
+  C.TraverseDecl(Ctx.getTranslationUnitDecl());
+  return Out;
+}
+
+void forEachDependentBinding(
+    ASTContext& Ctx, llvm::function_ref<bool(SourceLocation)> IsToken,
+    llvm::function_ref<void(SourceLocation, const Decl*)> OnBinding) {
+  DependentBindingWalker W(Ctx.getSourceManager(), IsToken, OnBinding);
+  W.TraverseDecl(Ctx.getTranslationUnitDecl());
+}
