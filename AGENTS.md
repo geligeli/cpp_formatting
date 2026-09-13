@@ -229,20 +229,17 @@ macro rule: a member referenced only from inside a macro body keeps its name
 (the rename is vetoed), while a sibling member with no macro reference renames
 normally, so the `check` phase stays non-vacuous.
 
-Two rename scenarios are declared `known_fail` and each pins a distinct gap.
-`googletest-member_trailing_method_snake` is the only scenario that renames
-member functions: its member half is green (it is what found the missing rule
-index in the resolution sidecar), and it fails on the method half, which misses
-every reference carrying an *unresolved overload set* — a call whose arguments
-are dependent is an `UnresolvedMemberExpr`, not a `MemberExpr`, and a
-using-declaration naming a member of a dependent base is neither. Those are
-node kinds the cross-TU dependent-token path does not visit.
-`abseil_cpp-member_snake_case` runs the member rename over the independent
-corpus and lands 2982 edits with 753 errors left: 24 from an `.inc` listed in
-`textual_hdrs` (below), and most of the rest from a **dependent-token veto that
-never reaches its declaration** — see the bullet of that name under "Known
-non-obvious behaviours". Neither is narrowed until it passes: the value is
-precisely in the cases googletest does not contain.
+Every rename scenario passes, and the two corpus ones each pin something the
+fixtures cannot: `googletest-member_trailing_method_snake` is the only scenario
+that renames member functions (3024 edits; its trail from 14868 errors is in the
+scenario file), and `abseil_cpp-member_snake_case` runs the member rename over
+the independent corpus (5281 edits across 275 files; its trail from 753 errors
+likewise). Between them they found the reference kinds and name rules listed
+under "Known non-obvious behaviours" — every one on a real corpus rather than by
+inspection. What neither renames is declined and reported (roughly 190
+declarations on abseil, most by the spelling audit and the unmapped-instantiation
+backstop); that is where recall work would start, and the scenarios' `rebuild`
+phase is what keeps it from ever becoming correctness work again.
 
 **Two-pass scenarios (`RULESET_THEN`).** A scenario may name a second ruleset,
 which runs over the *output* of the first: `swap` commits pass 1 (so `applied`
