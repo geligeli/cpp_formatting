@@ -1,9 +1,12 @@
-# Observed: 2596 edits across 61 files apply cleanly and 41-152 renames per TU
-# are skipped as collisions, but the rebuild then fails with ~2993 stale-name
-# errors in 36 files -- every one of them a member referenced from inside a
-# macro. (Before collision skipping landed this was 18081 errors in 52 files.)
+# Observed: 3132 edits across 61 files apply cleanly with 0 conflicts, but the
+# rebuild then fails with 739 stale-name errors in 16 files.
+#
+# History, so the trend is legible: 18081 errors in 52 files originally; 2993 in
+# 36 once colliding renames were skipped; 739 in 16 once macro arguments were
+# renamed and unrewritable macro references started vetoing the rename. What is
+# left is a different bug, no longer anything to do with macros -- see below.
 REPO=googletest
 RULESET=member_snake_case
 EXPECT=known_fail
 EXPECT_FAIL_PHASE=rebuild
-EXPECT_FAIL_REASON="Macro sites: renameAt() (rename_variables_lib.cpp) returns early on Loc.isMacroID(), so uses like GTEST_CHECK_POSIX_SUCCESS_(pthread_mutex_lock(&mutex_)) keep the old name while the declaration is renamed."
+EXPECT_FAIL_REASON="Members of a class nested inside a class template: primaryTemplateMember() only maps a field back to the primary template when its parent is a ClassTemplateSpecializationDecl, but Outer<int>::Inner is an ordinary CXXRecordDecl instantiated from a member class. The key misses, so the declaration is renamed while uses are skipped -- and dependent uses are vetoed, which is where gtest-param-util.h's ValuesInIteratorRangeGenerator<T>::Iterator::iterator_ goes stale. Minimal repro: template <class T> struct Outer { struct Inner { int itemCount; }; }; int use(Outer<int>::Inner& i) { return i.itemCount; }"
