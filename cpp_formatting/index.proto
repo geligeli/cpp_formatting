@@ -1,0 +1,277 @@
+// The symbol index: what `cpp_format --emit-index` writes for one translation
+// unit (an IndexUnit) and what `cpp_format --merge-index` builds from many of
+// them (an Index).
+//
+// Design rules, all in service of one property -- the serialized bytes are a
+// pure function of the content, so a unit is a cacheable Bazel output and a
+// merge does not depend on the order of its inputs:
+//
+//   * Occurrences refer to files and symbols by index into the `files` and
+//     `symbols` tables rather than repeating paths and USRs (USRs are long and
+//     occurrences are the bulk of the data).
+//   * No `map<>` fields (their wire order is unspecified); every repeated
+//     field has a defined sort order, documented at the field.
+//   * Every enum has a zero UNSPECIFIED value and leaves numeric room, so a
+//     unit written by a newer or a foreign producer still parses -- proto3
+//     keeps unknown enum values.
+//   * Positions are byte offsets into the file, `[begin, end)`, the keying the
+//     rest of the tool uses, not line/column.
+//   * Paths are relative to the producer's working directory -- under the
+//     Bazel aspect, exec-root-relative (`lib/foo.cpp`,
+//     `bazel-out/.../foo.pb.h`, `external/...`) -- never absolute, so a unit
+//     from a remote cache is usable on another machine.
+//
+// Extension hooks: any producer may emit an IndexUnit -- a proto-aware indexer
+// would describe `.proto` files with `Language.PROTO` symbols and let the C++
+// symbols of a generated `.pb.h` point back at them with a
+// `RelationKind.GENERATED_FROM` relation -- and the merger unions them all
+// under one symbol table keyed by USR.  `attributes` carries whatever a
+// producer wants to say that has no field yet.
+
+syntax = "proto3";
+
+package cpp_index;
+
+enum FileKind {
+  FILE_KIND_UNSPECIFIED = 0;
+  SOURCE = 1;     // a first-party file, relative to the workspace/exec root
+  GENERATED = 2;  // a build output (`bazel-out/...`)
+  EXTERNAL = 3;   // a file of another repository (`external/...`)
+  SYSTEM = 4;     // an absolute path outside the working directory (system
+                  // headers, the Clang resource directory)
+}
+
+enum Language {
+  LANGUAGE_UNSPECIFIED = 0;
+  C = 1;
+  CXX = 2;
+  OBJC = 3;
+  PROTO = 10;  // reserved for a proto-aware producer
+}
+
+// Mirrors clang::index::SymbolKind so a producer maps it with a switch, but
+// the numbers are ours: a Clang enum change cannot silently change the format.
+enum SymbolKind {
+  SYMBOL_KIND_UNSPECIFIED = 0;
+  MODULE = 1;
+  NAMESPACE = 2;
+  NAMESPACE_ALIAS = 3;
+  MACRO = 4;
+  ENUM = 5;
+  STRUCT = 6;
+  CLASS = 7;
+  PROTOCOL = 8;
+  EXTENSION = 9;
+  UNION = 10;
+  TYPE_ALIAS = 11;
+  FUNCTION = 12;
+  VARIABLE = 13;
+  FIELD = 14;
+  ENUM_CONSTANT = 15;
+  INSTANCE_METHOD = 16;
+  CLASS_METHOD = 17;
+  STATIC_METHOD = 18;
+  INSTANCE_PROPERTY = 19;
+  CLASS_PROPERTY = 20;
+  STATIC_PROPERTY = 21;
+  CONSTRUCTOR = 22;
+  DESTRUCTOR = 23;
+  CONVERSION_FUNCTION = 24;
+  PARAMETER = 25;
+  USING = 26;
+  TEMPLATE_TYPE_PARM = 27;
+  TEMPLATE_TEMPLATE_PARM = 28;
+  NON_TYPE_TEMPLATE_PARM = 29;
+  CONCEPT = 30;
+}
+
+enum SymbolSubKind {
+  SUB_KIND_NONE = 0;
+  CXX_COPY_CONSTRUCTOR = 1;
+  CXX_MOVE_CONSTRUCTOR = 2;
+  ACCESSOR_GETTER = 3;
+  ACCESSOR_SETTER = 4;
+  USING_TYPENAME = 5;
+  USING_VALUE = 6;
+  USING_ENUM = 7;
+}
+
+// Bit values for Symbol.properties.
+enum SymbolProperty {
+  PROPERTY_NONE = 0;
+  GENERIC = 1;  // a template
+  TEMPLATE_PARTIAL_SPECIALIZATION = 2;
+  TEMPLATE_SPECIALIZATION = 4;
+  UNIT_TEST = 8;
+  LOCAL = 128;  // function-local
+  PROTOCOL_INTERFACE = 256;
+}
+
+// Bit values for Occurrence.roles.  Relations are not roles here (see
+// Relation): they carry a target symbol.
+enum Role {
+  ROLE_NONE = 0;
+  DECLARATION = 1;
+  DEFINITION = 2;
+  REFERENCE = 4;
+  READ = 8;
+  WRITE = 16;
+  CALL = 32;
+  DYNAMIC = 64;  // a virtual call
+  ADDRESS_OF = 128;
+  IMPLICIT = 256;  // not spelled: an implicit constructor call, ...
+  UNDEFINITION = 512;  // a macro #undef
+  NAME_REFERENCE = 1024;  // references only the name as written (a
+                          // constructor's reference to its class)
+  // A use through a template parameter (`t.m`, `T::k`, `t.f(x)`), which names
+  // no declaration until the template is instantiated; the symbol is what one
+  // instantiation resolved it to.  A token instantiated with several types
+  // has one such occurrence per distinct symbol.  Always with REFERENCE, never
+  // with READ/WRITE/CALL (the instantiation's use is not classified).
+  DEPENDENT = 2048;
+}
+
+enum RelationKind {
+  RELATION_UNSPECIFIED = 0;
+  CHILD_OF = 1;  // a member of the related symbol (symbol-level)
+  BASE_OF = 2;  // the related class derives from this one
+  OVERRIDE_OF = 3;  // this method overrides the related one
+  RECEIVED_BY = 4;
+  CALLED_BY = 5;  // the occurrence is a call inside the related function
+  EXTENDED_BY = 6;
+  ACCESSOR_OF = 7;
+  CONTAINED_BY = 8;  // the occurrence is inside the related symbol's body
+  IB_TYPE_OF = 9;
+  SPECIALIZATION_OF = 10;
+  // Provenance: this symbol was generated from the related one (a message
+  // class in a `.pb.h` from the `message` in its `.proto`).  Reserved for a
+  // producer that indexes the source language.
+  GENERATED_FROM = 100;
+}
+
+// How the occurrence's spelling relates to the preprocessor.
+enum MacroContext {
+  NOT_IN_MACRO = 0;
+  MACRO_ARGUMENT = 1;  // spelled once at the call site, as a macro argument;
+                       // the range is that spelling
+  MACRO_BODY = 2;  // spelled in a macro body (or pasted with `##`); the range
+                   // is the invocation's name token at the call site, which
+                   // every symbol the expansion names shares
+}
+
+// A producer-defined key/value pair.  Sorted by key, keys unique.
+message Attribute {
+  string key = 1;
+  string value = 2;
+}
+
+message File {
+  string path = 1;
+  FileKind kind = 2;
+  repeated Attribute attributes = 10;
+}
+
+// A byte range `[begin, end)` in a file.
+message Location {
+  int32 file = 1;  // index into `files`
+  uint32 begin = 2;
+  uint32 end = 3;
+}
+
+message Relation {
+  RelationKind kind = 1;
+  int32 symbol = 2;  // index into `symbols`
+}
+
+message Symbol {
+  // Clang's Unified Symbol Resolution string: the identity of the symbol
+  // across translation units, processes and machines.  `c:@N@demo@S@Widget`.
+  string usr = 1;
+  string name = 2;  // `Widget`
+  string qualified_name = 3;  // `demo::Widget`
+  SymbolKind kind = 4;
+  SymbolSubKind sub_kind = 5;
+  Language language = 6;
+  uint32 properties = 7;  // SymbolProperty bits
+  // The printed type of a value (variable, field, parameter, enumerator) or
+  // the function type of a function; empty for anything else.
+  string type = 8;
+  // The canonical declaration, wherever it is -- the file may be SYSTEM or
+  // EXTERNAL, so a symbol referenced from an indexed file still points at its
+  // declaration even though that file has no occurrences of its own.
+  Location canonical = 9;
+  // Symbol-level relations (CHILD_OF, BASE_OF, OVERRIDE_OF,
+  // SPECIALIZATION_OF).  Sorted by (kind, symbol), unique.
+  repeated Relation relations = 10;
+  repeated Attribute attributes = 20;
+}
+
+message Occurrence {
+  int32 file = 1;  // index into `files`
+  uint32 begin = 2;
+  uint32 end = 3;
+  int32 symbol = 4;  // index into `symbols`
+  uint32 roles = 5;  // Role bits
+  MacroContext macro = 6;
+  // Occurrence-level relations (CALLED_BY, CONTAINED_BY).  Sorted by
+  // (kind, symbol), unique.
+  repeated Relation relations = 7;
+}
+
+// A template-dependent token (`t.m` through a template parameter) that no
+// indexed instantiation has resolved yet.  The unit that owns the file lists
+// its dependent tokens here; a unit whose TU instantiates the template records
+// the resolved symbol as a DEPENDENT occurrence instead, and the merge drops
+// the pending entry once any unit carries such an occurrence for the range.
+message DependentToken {
+  int32 file = 1;  // index into `files`
+  uint32 begin = 2;
+  uint32 end = 3;
+  string name = 4;  // the spelled identifier
+}
+
+// What one producer invocation found -- under the Bazel aspect, one
+// translation unit.  A merge of units is itself a unit.
+message IndexUnit {
+  string producer = 1;  // `cpp_format`
+  uint32 schema_version = 2;
+  // The translation units parsed, as `File.path`s.  Sorted, unique.
+  repeated string translation_units = 3;
+  repeated File files = 4;  // sorted by path, unique
+  repeated Symbol symbols = 5;  // sorted by usr, unique
+  // Sorted by (file, begin, end, symbol, macro), unique: one entry per token
+  // and symbol, whose roles are the union of every report of it (a
+  // macro-body token read in one expansion and written in another; a
+  // dependent name resolved through the primary template and confirmed by an
+  // instantiation).
+  repeated Occurrence occurrences = 6;
+  // Sorted by (file, begin, end, name), unique; never overlaps a DEPENDENT
+  // occurrence's range.
+  repeated DependentToken pending = 8;
+}
+
+message FileOccurrences {
+  int32 file = 1;  // index into `files`
+  // Sorted by (begin, end, symbol, macro), unique -- a token's occurrences are
+  // found by binary search on `begin`.
+  repeated Occurrence occurrences = 2;
+}
+
+// The merged repository index.  Its fields share IndexUnit's numbers, and the
+// one field the two do not share is reserved, so a reader can parse a file as
+// either message and tell which it got: a unit has `occurrences`, an index has
+// `per_file`.  That is what lets `--merge-index` take an earlier index as one
+// of its inputs.
+message Index {
+  string producer = 1;
+  uint32 schema_version = 2;
+  repeated string translation_units = 3;  // sorted, unique
+  repeated File files = 4;  // sorted by path, unique
+  repeated Symbol symbols = 5;  // sorted by usr, unique
+  reserved 6;  // IndexUnit.occurrences: grouped into per_file here
+  // One entry per file, parallel to `files` (`per_file[i].file == i`).
+  repeated FileOccurrences per_file = 7;
+  // IndexUnit.pending that no merged unit resolved: dependent tokens whose
+  // template no indexed translation unit instantiates.
+  repeated DependentToken unresolved = 8;
+}

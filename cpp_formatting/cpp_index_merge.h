@@ -1,0 +1,92 @@
+#ifndef CPP_FORMATTING_CPP_INDEX_MERGE_H_
+#define CPP_FORMATTING_CPP_INDEX_MERGE_H_
+
+// The Clang-free half of the symbol index: normalizing, merging, grouping and
+// serializing `cpp_index` messages (see index.proto).  Depends on protobuf and
+// llvm:Support only, so it sits at the lint_lib layer -- `--merge-index` and
+// `--dump-index` never parse any C++.
+
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "cpp_formatting/index.pb.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/Support/raw_ostream.h"
+
+/// The `schema_version` every producer of this repository writes.
+constexpr uint32_t kIndexSchemaVersion = 1;
+
+/// How a message is written to or read from a file.
+enum class IndexFormat { Binary, Text, Json };
+
+/// Parses `binary`, `text` or `json`.
+auto parseIndexFormat(llvm::StringRef Name, IndexFormat& Out) -> bool;
+
+// ---------------------------------------------------------------------------
+// Normalization and merging
+// ---------------------------------------------------------------------------
+
+/// Puts a unit into canonical form: files sorted by path, symbols by USR,
+/// occurrences by (file, begin, end, symbol, roles, macro), each list unique,
+/// every index remapped, and duplicates merged (a symbol's empty fields are
+/// filled from its duplicate, relations and attributes unioned).  An entry
+/// whose file or symbol index is out of range is dropped.  Idempotent, and the
+/// serialized bytes of a normalized unit depend only on its content.
+void normalizeUnit(cpp_index::IndexUnit& Unit);
+
+/// The union of several units, normalized -- so independent of their order.
+auto mergeUnits(const std::vector<cpp_index::IndexUnit>& Units)
+    -> cpp_index::IndexUnit;
+
+/// Groups a (normalized) unit's occurrences per file, for offset lookup.
+auto buildIndex(const cpp_index::IndexUnit& Unit) -> cpp_index::Index;
+
+/// The inverse of buildIndex: flattens `per_file` back into `occurrences`, so
+/// an index can be merged with further units.
+auto unitFromIndex(const cpp_index::Index& Index) -> cpp_index::IndexUnit;
+
+/// Every occurrence in \p Path whose range contains \p Offset.  Empty when
+/// the file is unknown.
+auto lookup(const cpp_index::Index& Index, llvm::StringRef Path,
+            uint32_t Offset) -> std::vector<const cpp_index::Occurrence*>;
+
+/// The `|`-joined names of the Role bits set in \p Roles (`ROLE_NONE` when
+/// none is).
+auto roleNames(uint32_t Roles) -> std::string;
+
+// ---------------------------------------------------------------------------
+// Files
+// ---------------------------------------------------------------------------
+
+/// Reads a unit or an index (either message, in binary form) from \p Path
+/// into a unit.  Prints a diagnostic and returns false when the file cannot be
+/// read or parsed.
+auto readUnit(llvm::StringRef Path, cpp_index::IndexUnit& Out) -> bool;
+
+/// Writes \p Message to \p Path (`-` for stdout) in the given format.  Prints
+/// a diagnostic and returns false on failure.
+auto writeMessage(const google::protobuf::Message& Message,
+                  llvm::StringRef Path, IndexFormat Format) -> bool;
+
+// ---------------------------------------------------------------------------
+// CLI entry points
+// ---------------------------------------------------------------------------
+
+/// `cpp_format --merge-index`: reads every input, merges, groups per file and
+/// writes the Index to \p OutputPath.  Exit code: 0, or 2 when an input
+/// cannot be read, 1 when the output cannot be written.
+auto runMergeIndex(const std::vector<std::string>& InputPaths,
+                   llvm::StringRef OutputPath, IndexFormat Format) -> int;
+
+/// `cpp_format --dump-index`: reads one unit or index and either prints it in
+/// \p Format, or, given \p Lookup = (path, offset), prints the symbol(s) at
+/// that token and every occurrence of each across the index.  Exit code: 0,
+/// or 2 when the input cannot be read.
+auto runDumpIndex(llvm::StringRef Path, IndexFormat Format,
+                  const std::optional<std::pair<std::string, uint32_t>>& Lookup,
+                  llvm::raw_ostream& OS) -> int;
+
+#endif  // CPP_FORMATTING_CPP_INDEX_MERGE_H_

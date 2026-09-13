@@ -116,6 +116,12 @@ build:minify --platform_suffix=-minify
 build:lint --aspects=//bazel:cpp_format.bzl%cpp_format_aspect
 build:lint --output_groups=+cpp_format_edits
 
+# Symbol index: the same, for the per-file index units (e.g. `bazel build
+# --config=index //bazel/testdata/...`).  The merged index of a target set is
+# the `<name>.index` target of cpp_index_targets, or `cpp_format.sh index`.
+build:index --aspects=//bazel:cpp_format.bzl%cpp_index_aspect
+build:index --output_groups=+cpp_index
+
 # Personal, machine-local overrides.  Last import wins, so anything in here
 # takes precedence over the settings above.
 try-import %workspace%/.bazelrc.local

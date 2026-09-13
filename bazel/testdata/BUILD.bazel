@@ -8,7 +8,7 @@ load("@rules_shell//shell:sh_test.bzl", "sh_test")
 # The kit tracks a pinned published binary, which necessarily lags in-tree
 # aspect changes (e.g. --owned-files, --aggregate --records-from); re-point at
 # the kit once a release that carries the current flag set is published.
-load("//bazel:cpp_format.bzl", "cpp_format_targets")
+load("//bazel:cpp_format.bzl", "cpp_format_targets", "cpp_index_targets")
 
 # A small first-party cc_library used to exercise the cpp_format Bazel
 # integration end to end: a member the `member -> snake_case` rule renames
@@ -39,6 +39,38 @@ cpp_format_targets(
     deps = [
         ":demo",
         ":demo_main",
+    ],
+)
+
+# Generates :index.index, a build target whose output (index.index.pb) is the
+# merged symbol index of the demo targets: every symbol's declarations,
+# definitions and references across both, as byte ranges.
+cpp_index_targets(
+    name = "index",
+    deps = [
+        ":demo",
+        ":demo_main",
+    ],
+)
+
+# Reads the merged index back with `cpp_format --dump-index` and asserts the
+# cross-target reference: demo_main.cpp's use of Widget::item_count resolves
+# to the same symbol as its definition in demo.h, both under exec-root-relative
+# paths.
+sh_test(
+    name = "index_test",
+    srcs = ["index_test.sh"],
+    args = [
+        "$(location :index.index)",
+        "$(location //cpp_formatting:cpp_format)",
+        "$(location demo.h)",
+        "$(location demo_main.cpp)",
+    ],
+    data = [
+        "demo.h",
+        "demo_main.cpp",
+        ":index.index",
+        "//cpp_formatting:cpp_format",
     ],
 )
 

@@ -72,6 +72,10 @@ struct TUSlot {
   /// state when the TU starts; this TU's instantiations append.
   std::vector<DependentResolutions> DepRes;
   LintReport Report;
+  /// The serialized cpp_index.IndexUnit of this TU (`--emit-index`).  Kept as
+  /// bytes so the driver -- and the three binaries that never index -- do not
+  /// depend on protobuf; the index client parses it back in finish().
+  std::string IndexBytes;
   std::string Diagnostics;  ///< buffered Clang stderr (parallel batches)
   int Rc = 0;               ///< ClangTool::run's result for this TU
 

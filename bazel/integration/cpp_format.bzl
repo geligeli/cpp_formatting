@@ -32,6 +32,16 @@ fragment per target (a plain `ctx.actions.write`, no tool run, nothing
 compiled), and `.compile_commands` / `cpp_format.sh compile_commands` merge the
 fragments into one file -- no second Bazel dependency needed for a
 compilation database.
+
+A second aspect, `cpp_index_aspect`, builds the symbol index the same way: one
+`cpp_format --emit-index` action per translation unit writes its
+`cpp_index.IndexUnit` (see cpp_formatting/index.proto in the cpp_formatting
+repository) -- the TU's own file plus every owned header it includes -- and `cpp_index_targets(name, deps)` defines `<name>.index`, whose
+action merges the transitive units into one `Index` with
+`cpp_format --merge-index`.  Unlike `.fix`, merging mutates nothing, so it is
+an ordinary cached build action and `bazel build` produces the index file.
+`cpp_format.sh index` does the same for a target pattern and writes `index.pb`
+into the workspace.
 """
 
 load("@rules_cc//cc:action_names.bzl", "CPP_COMPILE_ACTION_NAME")
@@ -59,10 +69,10 @@ _HDR_EXTS = ["h", "hh", "hpp", "hxx", "h++"]
 _TU_EXTS = ["cc", "cpp", "cxx", "c++"]
 _SRC_EXTS = _TU_EXTS + _HDR_EXTS
 
-def _own_files(ctx, exts):
+def _own_files(ctx, exts, attrs = ("srcs", "hdrs")):
     out = []
     seen = {}
-    for attr in ("srcs", "hdrs"):
+    for attr in attrs:
         for t in getattr(ctx.rule.attr, attr, []):
             for f in t.files.to_list():
                 # Deduplicated: a glob can match the same header in both srcs
@@ -546,6 +556,189 @@ def cpp_format_targets(name, deps, **kwargs):
     _cpp_format_run(name = name + ".diff", deps = deps, mode_flags = "", **kwargs)
     _cpp_format_run(name = name + ".fix", deps = deps, mode_flags = "--apply", **kwargs)
     cpp_format_compile_commands(name = name + ".compile_commands", deps = deps, **kwargs)
+
+# ---------------------------------------------------------------------------
+# Symbol index
+# ---------------------------------------------------------------------------
+
+CppIndexInfo = provider(
+    doc = "Transitive symbol-index state: per-translation-unit index units, and " +
+          "the first-party headers the dep closure owns (indexed by the TUs that " +
+          "include them).",
+    fields = {
+        "units": "depset of per-translation-unit cpp_index.IndexUnit files (binary protobuf)",
+        "headers": "depset of first-party header source files in the dep closure",
+    },
+)
+
+def _index_unit_path(ctx, src):
+    return ctx.label.name + ".cpp_index/" + src.short_path + ".pb"
+
+# The target's own files whose occurrences its index actions record: srcs,
+# hdrs *and* textual_hdrs -- plus, added by the caller, the dep closure's
+# headers, exactly as for the formatter.  A header is not a translation unit
+# (see _own_translation_units), so it is indexed by every TU that includes it,
+# its own target's and its dependents'; the merge dedups what they agree on.
+# Textual headers are the one addition over the formatter's set: nothing is
+# rewritten, and an .inc is only ever parsed through its includer -- this is
+# the one place the tool can see what is in it.
+def _index_owned(ctx):
+    out = _own_sources(ctx)
+    seen = {f.path: True for f in out}
+    for t in getattr(ctx.rule.attr, "textual_hdrs", []):
+        for f in t.files.to_list():
+            if f.is_source and f.path not in seen and not f.short_path.startswith("../"):
+                seen[f.path] = True
+                out.append(f)
+    return out
+
+def _index_aspect_impl(target, ctx):
+    dep_infos = [
+        d[CppIndexInfo]
+        for d in getattr(ctx.rule.attr, "deps", [])
+        if CppIndexInfo in d
+    ]
+    transitive = depset(transitive = [i.units for i in dep_infos])
+    dep_headers = depset(transitive = [i.headers for i in dep_infos])
+
+    # First-party cc_* targets only, as for the formatter.  A `no-cpp-index`
+    # target is skipped and contributes no headers; `no-cpp-format` does not
+    # apply -- an index wants the whole repository, formatted or not.
+    if ctx.label.workspace_name != "" or CcInfo not in target:
+        return [CppIndexInfo(units = transitive, headers = dep_headers)]
+    if "no-cpp-index" in getattr(ctx.rule.attr, "tags", []):
+        return [CppIndexInfo(units = transitive, headers = dep_headers)]
+    mine_headers = depset(direct = _owned_headers(ctx), transitive = [dep_headers])
+
+    # A header-only target has no translation unit and emits nothing; its
+    # headers are indexed by the TUs that include them (see
+    # _own_translation_units), which is what the propagated set is for.
+    tus = _own_translation_units(ctx)
+    if not tus:
+        return [CppIndexInfo(units = transitive, headers = mine_headers)]
+
+    cc_toolchain = find_cc_toolchain(ctx)
+    cc_ctx = target[CcInfo].compilation_context
+    _compiler, flags = _compile_flags(ctx, cc_toolchain, cc_ctx)
+    binary = ctx.file._cpp_format
+
+    owned_list = ctx.actions.declare_file(ctx.label.name + ".cpp_index/owned-files.txt")
+    owned = ctx.actions.args()
+    owned.add_all(depset(direct = _index_owned(ctx), transitive = [dep_headers]))
+    owned.set_param_file_format("multiline")
+    ctx.actions.write(owned_list, owned)
+
+    # As for the emit-edits actions: C++ forced, the derived flags carried, and
+    # the binary supplying its own self-extracted -resource-dir.
+    compile_args = ctx.actions.args()
+    compile_args.add("--")
+    compile_args.add("-x")
+    compile_args.add("c++")
+    compile_args.add_all(flags)
+
+    # One action per translation unit, exactly like the emit-edits actions:
+    # parsed once, cached per file, and every occurrence in this file and in
+    # every owned header it includes recorded against paths relative to the
+    # exec root (so the unit is usable from a remote cache on another machine).
+    units = []
+    for src in tus:
+        unit = ctx.actions.declare_file(_index_unit_path(ctx, src))
+        args = ctx.actions.args()
+        args.add("--emit-index", unit)
+        args.add("--owned-files", owned_list)
+        args.add(src)
+        ctx.actions.run(
+            executable = binary,
+            tools = [binary],
+            arguments = [args, compile_args],
+            inputs = depset(
+                direct = [src, owned_list],
+                transitive = [cc_ctx.headers, cc_toolchain.all_files],
+            ),
+            outputs = [unit],
+            mnemonic = "CppIndexEmit",
+            progress_message = "cpp_format: indexing " + src.short_path,
+        )
+        units.append(unit)
+
+    # Read by cpp_format.sh instead of globbing the units directory, for the
+    # same reason as the edit-record manifest: a removed source's unit is never
+    # deleted by Bazel and would keep its stale occurrences in the index.
+    manifest = ctx.actions.declare_file(ctx.label.name + ".cpp_index.manifest")
+    ctx.actions.write(manifest, "".join([u.path + "\n" for u in units]))
+
+    mine = depset(direct = units, transitive = [transitive])
+    return [
+        CppIndexInfo(units = mine, headers = mine_headers),
+        OutputGroupInfo(cpp_index = depset(direct = [manifest], transitive = [mine])),
+    ]
+
+cpp_index_aspect = aspect(
+    implementation = _index_aspect_impl,
+    attr_aspects = ["deps"],
+    fragments = ["cpp"],
+    toolchains = use_cc_toolchain(),
+    attrs = {
+        "_cpp_format": attr.label(
+            default = Label("@cpp_format_bin//:cpp_format"),
+            allow_single_file = True,
+        ),
+    },
+)
+
+def _index_impl(ctx):
+    units = depset(transitive = [
+        d[CppIndexInfo].units
+        for d in ctx.attr.deps
+        if CppIndexInfo in d
+    ])
+    binary = ctx.file._cpp_format
+    out = ctx.actions.declare_file(ctx.label.name + ".pb")
+
+    # The fixed flags and the unit list are separate Args objects: the list
+    # goes through a param file (a repository's worth of units does not fit on
+    # a command line), and `use_param_file` would sweep `--merge-index` into
+    # that file too, where the binary's sub-command dispatch cannot see it.
+    fixed = ctx.actions.args()
+    fixed.add("--merge-index")
+    fixed.add("--output", out)
+    listed = ctx.actions.args()
+    listed.add_all(units)
+    listed.use_param_file("--records-from=%s", use_always = True)
+    listed.set_param_file_format("multiline")
+    ctx.actions.run(
+        executable = binary,
+        tools = [binary],
+        arguments = [fixed, listed],
+        inputs = units,
+        outputs = [out],
+        mnemonic = "CppIndexMerge",
+        progress_message = "cpp_format: merging index " + ctx.label.name,
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+_cpp_index = rule(
+    doc = "Builds <name>.pb, the merged cpp_index.Index of `deps` (transitively). " +
+          "An ordinary build action: `bazel build` it, and read it with " +
+          "`cpp_format --dump-index`.",
+    implementation = _index_impl,
+    attrs = {
+        "deps": attr.label_list(
+            aspects = [cpp_index_aspect],
+            providers = [CcInfo],
+            doc = "cc_* targets to index (transitively).",
+        ),
+        "_cpp_format": attr.label(
+            default = Label("@cpp_format_bin//:cpp_format"),
+            allow_single_file = True,
+        ),
+    },
+)
+
+def cpp_index_targets(name, deps, **kwargs):
+    """Defines <name>.index, a build target whose output is the merged index
+    (<name>.index.pb) of `deps` and everything they depend on."""
+    _cpp_index(name = name + ".index", deps = deps, **kwargs)
 
 # ---------------------------------------------------------------------------
 # `bazel run //…:install` — drop cpp_format.sh into the consumer's workspace
