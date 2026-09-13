@@ -1,12 +1,14 @@
-# Observed: 3132 edits across 61 files apply cleanly with 0 conflicts, but the
-# rebuild then fails with 739 stale-name errors in 16 files.
+# Observed: 3139 edits across 61 files apply cleanly with 0 conflicts, but the
+# rebuild then fails with 621 stale-name errors in 14 files.
 #
 # History, so the trend is legible: 18081 errors in 52 files originally; 2993 in
 # 36 once colliding renames were skipped; 739 in 16 once macro arguments were
-# renamed and unrewritable macro references started vetoing the rename. What is
-# left is a different bug, no longer anything to do with macros -- see below.
+# renamed and unrewritable macro references started vetoing the rename; 621 in
+# 14 once fields of a class nested in a class template mapped back to their
+# pattern. Each step removed a whole cause, and what is left is a single new
+# one -- see below. Macros and nested classes are done; this is neither.
 REPO=googletest
 RULESET=member_snake_case
 EXPECT=known_fail
 EXPECT_FAIL_PHASE=rebuild
-EXPECT_FAIL_REASON="Members of a class nested inside a class template: primaryTemplateMember() only maps a field back to the primary template when its parent is a ClassTemplateSpecializationDecl, but Outer<int>::Inner is an ordinary CXXRecordDecl instantiated from a member class. The key misses, so the declaration is renamed while uses are skipped -- and dependent uses are vetoed, which is where gtest-param-util.h's ValuesInIteratorRangeGenerator<T>::Iterator::iterator_ goes stale. Minimal repro: template <class T> struct Outer { struct Inner { int itemCount; }; }; int use(Outer<int>::Inner& i) { return i.itemCount; }"
+EXPECT_FAIL_REASON="Qualified dependent names. `Helper<T>::member` inside a template is a DependentScopeDeclRefExpr -- a dependent *name*, not a member access on an object -- and only CXXDependentScopeMemberExpr (`x.member`) has cross-TU resolution. So the declaration is renamed and the qualified reference is not: gtest-internal.h's `&(TypeIdHelper<T>::dummy_)` alone is 229 of the 621 errors, and 311 of them are this shape ('is not a member of'). Minimal repro: template <class T> struct Helper { static int dummyValue; }; template <class T> int* get() { return &Helper<T>::dummyValue; }"
