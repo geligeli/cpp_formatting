@@ -1,20 +1,23 @@
-# Observed: 3182 edits across 61 files apply cleanly with 0 conflicts, but the
-# rebuild then fails with 179 stale-name errors in 11 files.
+# The corpus case that drove most of the rename work: 2982 edits across 60
+# files apply with 0 conflicts, //... rebuilds clean, and a second pass has
+# nothing left to do.
 #
-# History, so the trend is legible: 18081 errors in 52 files originally; 2993 in
-# 36 once colliding renames were skipped; 739 in 16 once macro arguments were
-# renamed and unrewritable macro references started vetoing the rename; 621 in
-# 14 once fields of a class nested in a class template mapped back to their
-# pattern; 490 once partial and explicit specializations stopped being matched
-# against the primary template; 179 once qualified dependent names resolved.
+# It took a long time to get here, and the trail is worth keeping. 18081 errors
+# in 52 files originally; 2993 in 36 once colliding renames were skipped; 739 in
+# 16 once macro arguments were renamed and unrewritable macro references vetoed
+# the rename; 621 in 14 once fields of a class nested in a class template mapped
+# back to their pattern; 490 once partial and explicit specializations stopped
+# being matched against the primary template; 179 once qualified dependent names
+# resolved; green once a new name that is a keyword, a macro, or captured by a
+# local at an unqualified use stopped being applied at all.
 #
-# Everything above was a *missed* rename -- the reference kept the old name and
-# the build broke, loudly. What is left is the opposite and more dangerous kind:
-# the rename is applied and the new name means something else. See below.
+# Every one of those was found here rather than by inspection, which is the
+# argument for keeping a real corpus in the loop: the last one, renaming
+# OnCallSpec::action_ to action inside WillByDefault(const Action<F>& action),
+# rewrote `action_ = action` to `action = action` and would have compiled
+# silently had that parameter not been const.
 #
 # NB: this file is sourced by bash, so values must not contain backticks or $.
 REPO=googletest
 RULESET=member_snake_case
-EXPECT=known_fail
-EXPECT_FAIL_PHASE=rebuild
-EXPECT_FAIL_REASON='Unsafe new names. collides() only asks whether the new name is taken in the declarations own DeclContext, so three ways of landing on a name that means something else all get through. (1) A keyword: char_ becomes char, so gtest_unittest.cc gets "char char;" -- 23 errors. (2) An active macro: errno_ becomes errno, and glibc defines errno, so the ctor-init becomes an old-style base initializer -- most of gmock-actions.h, 82 errors. (3) Shadowed at the use site, not the declaration site: OnCallSpec::action_ becomes action inside WillByDefault(const Action<F>& action), so "action_ = action" becomes the self-assignment "action = action" -- gmock-spec-builders.h, 28 errors. (3) is the one that can compile and silently mean something else; these only fail loudly here by luck.'
+EXPECT=pass
