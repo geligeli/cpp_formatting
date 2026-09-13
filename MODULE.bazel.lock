@@ -158,8 +158,8 @@
   "moduleExtensions": {
     "//bazel/integration:extensions.bzl%cpp_format": {
       "general": {
-        "bzlTransitiveDigest": "hhCZgIq81KToOgSgqTO9yUwlZxka3as0CBmpGx8Ciu0=",
-        "usagesDigest": "2SeAWtLipQQVafU/yyBxS50GyVwEW+bIB56snPwYb+4=",
+        "bzlTransitiveDigest": "6N/vIsxDty/MWHg66D27sBhuS7/dkjBhF6gYTpVj6pQ=",
+        "usagesDigest": "56aKeO7VNsP1B0LZUOA8z1ufHht/Hs50Au1G/4lQQZk=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
         "envVariables": {},
@@ -167,7 +167,7 @@
           "cpp_format_bin": {
             "repoRuleId": "@@//bazel/integration:extensions.bzl%_binary_repo",
             "attributes": {
-              "version": "20260913-5ea87d3",
+              "version": "20260913-a0a8896",
               "base_url": "https://github.com/geligeli/cpp_formatting/releases/download",
               "sha256": {}
             }

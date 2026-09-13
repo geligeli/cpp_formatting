@@ -45,6 +45,7 @@ def _binary_repo_impl(rctx):
     if not asset:
         fail(("cpp_format: no prebuilt release asset for host %r; " +
               "build //cpp_formatting:cpp_format from source instead") % (key,))
+
     # Download into a subdirectory so the file path never collides with the
     # `cpp_format` filegroup target name (a same-name src would be a self-edge).
     out = "bin/cpp_format.exe" if key[0] == "windows" else "bin/cpp_format"
@@ -55,6 +56,7 @@ def _binary_repo_impl(rctx):
     )
     sha = rctx.attr.sha256.get(asset, "")
     rctx.download(url = url, output = out, executable = True, sha256 = sha)
+
     # A stable, platform-independent label: @cpp_format_bin//:cpp_format.
     rctx.file(
         "BUILD.bazel",
@@ -97,6 +99,10 @@ def _ext_impl(mctx):
     # which then downloads a binary older than the aspect that drives it (an
     # older binary rejects `--owned-files`).  Same root-vs-dependency trap as
     # `_config`'s `@@//:cpp_format.yaml` default in cpp_format.bzl.
+    # cpp_formatting issues its own tag through a `dev_dependency = True`
+    # proxy, so as a dependency it contributes no tag at all; the root-wins
+    # rule below still holds for any vendored copy of the kit whose owner did
+    # not.
     root = None
     dep = None
     for mod in mctx.modules:
