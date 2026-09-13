@@ -91,6 +91,7 @@ build:windows --cxxopt=/wd4267
 build:windows --cxxopt=/wd4319
 build:windows --cxxopt=/wd4624
 build:windows --cxxopt=/wd4805
+build:windows --define=protobuf_allow_msvc=true
 
 build:minify -c opt
 build:minify --copt=-ffunction-sections
