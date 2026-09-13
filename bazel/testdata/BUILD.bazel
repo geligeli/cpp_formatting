@@ -19,6 +19,17 @@ cc_library(
     srcs = ["demo.cpp"],
     hdrs = ["demo.h"],
     includes = ["."],
+    deps = [":budget"],
+)
+
+# A header-only library: it lists no source the aspect would give an action to,
+# so it takes the aspect's early return.  Its members are renamed by the TUs
+# that include it, and it writes an empty manifest rather than no manifest at
+# all -- see budget.h.
+cc_library(
+    name = "budget",
+    hdrs = ["budget.h"],
+    includes = ["."],
 )
 
 # A dependent target that only *uses* Widget::item_count.  Exercises the
@@ -37,6 +48,7 @@ cc_binary(
 cpp_format_targets(
     name = "format",
     deps = [
+        ":budget",
         ":demo",
         ":demo_main",
     ],

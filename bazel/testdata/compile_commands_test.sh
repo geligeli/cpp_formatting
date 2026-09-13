@@ -28,9 +28,13 @@ json="$db/compile_commands.json"
 [[ -s "$json" ]] || { echo "FAIL: no compile_commands.json written" >&2; exit 1; }
 
 # 2. Shape: one entry per demo source, `file` under the workspace given, no
-#    placeholder left behind, and the directory a real path.
+#    placeholder left behind, and the directory a real path.  Headers count:
+#    the database is written for every source a target lists, headers included,
+#    because an editor wants an entry for a header it opens -- unlike the emit
+#    actions, which are one per translation unit and give a header none.  So
+#    the four are demo.cpp, demo.h, demo_main.cpp and header-only budget.h.
 n="$(grep -c '"directory"' "$json")"
-[[ "$n" -eq 3 ]] || { echo "FAIL: expected 3 entries, got $n" >&2; cat "$json" >&2; exit 1; }
+[[ "$n" -eq 4 ]] || { echo "FAIL: expected 4 entries, got $n" >&2; cat "$json" >&2; exit 1; }
 grep -q "\"file\":\"$ws/$src\"" "$json" || { echo "FAIL: no entry for $ws/$src" >&2; cat "$json" >&2; exit 1; }
 if grep -q "__EXEC_ROOT__\|__WORKSPACE__" "$json"; then
   echo "FAIL: placeholder left in output" >&2; cat "$json" >&2; exit 1

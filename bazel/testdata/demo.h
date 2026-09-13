@@ -1,6 +1,8 @@
 #ifndef BAZEL_TESTDATA_DEMO_H_
 #define BAZEL_TESTDATA_DEMO_H_
 
+#include "budget.h"
+
 // Fixture for the cpp_format Bazel integration.  Conforms to cpp_format.yaml
 // (`member -> snake_case`), so `bazel test //bazel/testdata:format.check`
 // passes; rename `item_count` to a camelCase name to see the gate fail and

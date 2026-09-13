@@ -263,13 +263,24 @@ def _aspect_impl(target, ctx):
     # less reach, never a half-applied rename.
     tus = _own_translation_units(ctx)
     if not tus:
+        # The manifest is still written, empty.  Bazel never deletes the output
+        # of an action that is no longer registered, so a target that used to
+        # have records -- every header-only library did, before a header stopped
+        # being a translation unit -- would keep its stale manifest in bazel-bin,
+        # and cpp_format.sh would read it and fail on a record file nothing
+        # produces any more.  Writing an empty one overwrites it.
+        manifest = ctx.actions.declare_file(ctx.label.name + ".cpp_format.manifest")
+        ctx.actions.write(manifest, "")
         return [
             CppFormatEditsInfo(
                 records = depset(transitive = transitive),
                 headers = mine_headers,
                 compile_commands = mine_cc,
             ),
-            OutputGroupInfo(cpp_format_compile_commands = cc_group),
+            OutputGroupInfo(
+                cpp_format_edits = depset(direct = [manifest], transitive = transitive),
+                cpp_format_compile_commands = cc_group,
+            ),
         ]
 
     builtin = ctx.files._builtin_headers
