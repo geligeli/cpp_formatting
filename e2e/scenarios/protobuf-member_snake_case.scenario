@@ -1,0 +1,4 @@
+# Placeholder expectation: measured and rewritten before commit.
+REPO=protobuf
+RULESET=member_snake_case
+EXPECT=pass

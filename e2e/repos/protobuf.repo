@@ -1,0 +1,14 @@
+# The generated-code case, which nothing else in the corpus has: the .pb.cc /
+# .pb.h files are build *outputs*, so the aspect never passes them -- but they
+# are real C++ that references members of the hand-written runtime, and they are
+# compiled into the same targets. A member the tool renames in the runtime whose
+# only other use is in generated code is precisely the "reference the tool never
+# parses" bound, made reproducible.
+#
+# //src/... is the C++ runtime and its tests; //... would pull in the Java,
+# Python, Ruby, C#, Rust and Objective-C trees, none of which is cc_*.
+REPO_KIND=git
+REPO_URL=https://github.com/protocolbuffers/protobuf.git
+REPO_REV=c68fd82a6da7e755d2e3d63a87a53a42dd2fecc9   # v6.31.1
+TARGET_PATTERN='//src/...'
+RUN_TESTS=0

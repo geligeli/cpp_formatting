@@ -1,0 +1,12 @@
+# The per-target re-inclusion stress: highway compiles the *same header* several
+# times within one translation unit, once per SIMD target, by #including it
+# again under a different HWY_NAMESPACE (foreach_target.h). One spelling of a
+# member therefore has many expansions that need not agree, which is exactly
+# the shape the macro-body veto exists for -- at a scale nothing else in the
+# corpus reaches. It is also the only repo here built with target-specific
+# copts on nearly every target, so it exercises the aspect's copts plumbing.
+REPO_KIND=git
+REPO_URL=https://github.com/google/highway.git
+REPO_REV=2607d3b5b0113992fe84d3848859eae13b3b52c1   # 1.4.0
+TARGET_PATTERN='//...'
+RUN_TESTS=0
