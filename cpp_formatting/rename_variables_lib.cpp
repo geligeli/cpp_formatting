@@ -476,6 +476,19 @@ static bool addRenameVeto(RenameVetoes* Vetoes, const Decl* Key,
       .second;
 }
 
+// The class a member's name is looked up in: the nearest enclosing record that
+// is not an anonymous struct or union (whose members are found in the
+// enclosing class).
+static const CXXRecordDecl* lookupHomeOf(const NamedDecl* Member) {
+  for (const DeclContext* DC = Member->getDeclContext(); DC;
+       DC = DC->getParent()) {
+    const auto* RD = dyn_cast<CXXRecordDecl>(DC);
+    if (!RD) return nullptr;
+    if (!RD->isAnonymousStructOrUnion()) return RD;
+  }
+  return nullptr;
+}
+
 // ---------------------------------------------------------------------------
 // Pass 1: collect the rename map
 // ---------------------------------------------------------------------------
@@ -621,7 +634,17 @@ class CollectRenamesVisitor
   // into an occupied name is not a formatting change: at best it fails to
   // compile, at worst it silently rebinds uses to the other entity.
   bool collides(const NamedDecl* D, llvm::StringRef NewName) {
-    const DeclContext* DC = D->getDeclContext();
+    // The scope the name is *looked up* in, which for a member of an anonymous
+    // union or struct is the enclosing class, not the anonymous record it is
+    // declared in.  re2's Regexp keeps its variant fields in anonymous structs
+    // inside an anonymous union and has an accessor of the same name on the
+    // class for each -- `runes_` next to `Rune* runes()`, `hi_` next to
+    // `int hi()`.  Consulting the anonymous struct finds nothing, so every one
+    // of those renames looked free and produced a class declaring a field and
+    // a method of one name: ill-formed, and every later lookup in the class
+    // fails with it (1069 errors from 7 files, all of them this).
+    const DeclContext* DC = lookupHomeOf(D);
+    if (!DC) DC = D->getDeclContext();
     if (!DC) return false;
     DC = DC->getPrimaryContext();
     const Decl* Key = D->getCanonicalDecl();
@@ -632,10 +655,17 @@ class CollectRenamesVisitor
     ASTContext& Ctx = D->getASTContext();
     DeclarationName DN(&Ctx.Idents.get(NewName));
     for (const NamedDecl* ND : DC->lookup(DN)) {
-      if (ND->getCanonicalDecl() == Key || ND->isImplicit()) continue;
-      if (overloadsCleanly(Ctx, D, ND)) continue;
+      // A member of an anonymous union or struct appears in the enclosing
+      // class only as an implicit IndirectFieldDecl, so that one kind of
+      // implicit declaration is exactly what must not be skipped: it is how a
+      // sibling anonymous struct's field is seen at all.
+      const auto* IFD = dyn_cast<IndirectFieldDecl>(ND);
+      const NamedDecl* Cand = IFD ? cast<NamedDecl>(IFD->getAnonField()) : ND;
+      if (!Cand || Cand->getCanonicalDecl() == Key) continue;
+      if (!IFD && ND->isImplicit()) continue;
+      if (overloadsCleanly(Ctx, D, Cand)) continue;
       record(D, NewName,
-             ("existing " + std::string(ND->getDeclKindName()) + " '" +
+             ("existing " + std::string(Cand->getDeclKindName()) + " '" +
               NewName.str() + "'"));
       return true;
     }
@@ -961,19 +991,6 @@ enum class ApplyMode { Scan, Rewrite };
 // access made through the derived type: `this->status_` rewritten to
 // `this->status` names the method.  The check has to be made per use, against
 // the class the use goes through.
-
-// The class a member's name is looked up in: the nearest enclosing record that
-// is not an anonymous struct or union (whose members are found in the
-// enclosing class).
-static const CXXRecordDecl* lookupHomeOf(const NamedDecl* Member) {
-  for (const DeclContext* DC = Member->getDeclContext(); DC;
-       DC = DC->getParent()) {
-    const auto* RD = dyn_cast<CXXRecordDecl>(DC);
-    if (!RD) return nullptr;
-    if (!RD->isAnonymousStructOrUnion()) return RD;
-  }
-  return nullptr;
-}
 
 // The first declaration of \p Name in a class on a derivation path from
 // \p From down to (but excluding) \p Home, or null.  Home itself is

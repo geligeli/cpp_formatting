@@ -1,0 +1,17 @@
+# Small, fast, and Google-style: a few seconds per phase, so it is the cheapest
+# real corpus in the set and a reasonable gate to run on every change.
+#
+# What it adds over the fixtures: real virtual hierarchies (RE2::Arg, the
+# Walker<T> visitors in the parser) for the method scope, and a handful of
+# members reached through templates. What it does not add is naming variety --
+# like every Google repo here its members already end in an underscore.
+#
+# //:all, not //...: every cc_* target lives in the root package (the sources
+# sit in re2/ but the BUILD file is at the top), while //app is an emscripten
+# binary that needs a toolchain we do not have and //python is a pybind
+# extension.
+REPO_KIND=git
+REPO_URL=https://github.com/google/re2.git
+REPO_REV=b654eab8f96ef2264105343d56d45d0bf1134231   # 2025-11-05
+TARGET_PATTERN='//:all'
+RUN_TESTS=0

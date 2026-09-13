@@ -1499,3 +1499,45 @@ TEST(RenameMacros, DeclarationThroughAPastingMacroIsDeclined) {
             "struct S { PARAM(foo) FIELD(other_) foo_type f() const { return "
             "foo; } };\n");
 }
+
+TEST(RenameAnonymousUnion, CollidesWithAnAccessorOnTheEnclosingClass) {
+  // re2's Regexp shape: the variant fields live in anonymous structs inside an
+  // anonymous union, and the class has an accessor of the same name for each.
+  // The name is looked up in the class, not in the anonymous struct, so
+  // `runes_ -> runes` would declare a field and a method of one name.
+  const char* code =
+      "struct Regexp {\n"
+      "  int nrunes() { return nrunes_; }\n"
+      "  int* runes() { return runes_; }\n"
+      "  union {\n"
+      "    struct { int nrunes_; int* runes_; };\n"
+      "    struct { int cap_; };\n"
+      "  };\n"
+      "};\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("runes_", "runes")), code);
+  EXPECT_EQ(rewriteMember(code, renameOne("nrunes_", "nrunes")), code);
+  // cap_ has no accessor of that name, so it renames -- the check is not a
+  // blanket refusal to touch anonymous-union members.
+  EXPECT_EQ(rewriteMember(code, renameOne("cap_", "cap")),
+            "struct Regexp {\n"
+            "  int nrunes() { return nrunes_; }\n"
+            "  int* runes() { return runes_; }\n"
+            "  union {\n"
+            "    struct { int nrunes_; int* runes_; };\n"
+            "    struct { int cap; };\n"
+            "  };\n"
+            "};\n");
+}
+
+TEST(RenameAnonymousUnion, TwoAnonymousStructsCannotClaimOneName) {
+  // Members of different anonymous structs in one union are still all members
+  // of the enclosing class, so two of them cannot rename to the same name.
+  const char* code =
+      "struct S {\n"
+      "  union {\n"
+      "    struct { int aVal; };\n"
+      "    struct { int a_val; };\n"
+      "  };\n"
+      "};\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("aVal", "a_val")), code);
+}
