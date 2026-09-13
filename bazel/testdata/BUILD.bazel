@@ -1,5 +1,6 @@
 load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 # Uses the in-repo, built-from-source rules (not the prebuilt-binary kit under
 # bazel/integration/), so this demo — and the `//bazel/testdata:format.check`
@@ -31,12 +32,31 @@ cc_binary(
     deps = [":demo"],
 )
 
-# Generates :format.check (test / lint gate), :format.diff and :format.fix
-# (bazel run) over the demo targets.
+# Generates :format.check (test / lint gate), :format.diff, :format.fix and
+# :format.compile_commands (bazel run) over the demo targets.
 cpp_format_targets(
     name = "format",
     deps = [
         ":demo",
         ":demo_main",
+    ],
+)
+
+# Runs :format.compile_commands the way `bazel run` would and has cpp_format
+# consume the resulting compile_commands.json as its compilation database.
+sh_test(
+    name = "compile_commands_test",
+    srcs = ["compile_commands_test.sh"],
+    args = [
+        "$(location :format.compile_commands)",
+        "$(location //cpp_formatting:cpp_format)",
+        "$(location //:cpp_format.yaml)",
+        "$(location demo_main.cpp)",
+    ],
+    data = [
+        "demo_main.cpp",
+        ":format.compile_commands",
+        "//:cpp_format.yaml",
+        "//cpp_formatting:cpp_format",
     ],
 )

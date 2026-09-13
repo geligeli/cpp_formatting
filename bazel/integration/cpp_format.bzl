@@ -16,14 +16,22 @@ and remotely executes at file granularity -- writes a structured edit-record
 JSON file (offset-level edits plus a template-dependent-token resolution
 sidecar).  `cpp_format --aggregate` merges the per-file records into one
 repository change, resolving dependent tokens across files and targets.
-`cpp_format_targets(name, deps)` generates three targets:
+`cpp_format_targets(name, deps)` generates four targets:
 
   * `<name>.check` — a test that fails when any edit would be applied (lint gate),
   * `<name>.diff`  — `bazel run` prints the merged unified diff (review),
-  * `<name>.fix`   — `bazel run` applies the edits in $BUILD_WORKSPACE_DIRECTORY.
+  * `<name>.fix`   — `bazel run` applies the edits in $BUILD_WORKSPACE_DIRECTORY,
+  * `<name>.compile_commands` — `bazel run` writes a compile_commands.json there.
 
 Because Bazel actions cannot mutate workspace sources, `.fix` runs outside the
 action graph via `bazel run`, consuming the same records the aspect produced.
+
+The compile command the aspect derives for a target is also what an editor
+wants, so the aspect writes it out as a `<name>.compile_commands.jsonl`
+fragment per target (a plain `ctx.actions.write`, no tool run, nothing
+compiled), and `.compile_commands` / `cpp_format.sh compile_commands` merge the
+fragments into one file -- no second Bazel dependency needed for a
+compilation database.
 """
 
 load("@rules_cc//cc:action_names.bzl", "CPP_COMPILE_ACTION_NAME")
@@ -35,6 +43,7 @@ CppFormatEditsInfo = provider(
     fields = {
         "records": "depset of per-source-file edit-record JSON files",
         "headers": "depset of first-party header source files in the dep closure",
+        "compile_commands": "depset of per-target compile_commands fragments (see `_compile_commands_fragment`)",
     },
 )
 
@@ -105,11 +114,49 @@ def _compile_flags(ctx, cc_toolchain, cc_ctx):
         framework_include_directories = cc_ctx.framework_includes,
         preprocessor_defines = depset(transitive = [cc_ctx.defines, cc_ctx.local_defines]),
     )
-    return cc_common.get_memory_inefficient_command_line(
+    flags = cc_common.get_memory_inefficient_command_line(
         feature_configuration = feature_config,
         action_name = CPP_COMPILE_ACTION_NAME,
         variables = variables,
     )
+    compiler = cc_common.get_tool_for_action(
+        feature_configuration = feature_config,
+        action_name = CPP_COMPILE_ACTION_NAME,
+    )
+    return compiler, flags
+
+# The compile command the aspect derives is exactly what a compilation database
+# wants, so every first-party target with sources also gets a
+# `<name>.compile_commands.jsonl` fragment: one JSON object per source file,
+# written by `ctx.actions.write` (no tool runs, nothing is compiled).  The
+# `.compile_commands` run target and `cpp_format.sh compile_commands` merge the
+# fragments into a `compile_commands.json`.  Two things are only known at run
+# time and are left as placeholders for the merger to fill in:
+#
+#   * `directory` is the execution root, which is where every relative flag
+#     (`-iquote .`, `bazel-out/.../bin`, `external/...`) resolves -- no
+#     `external` or `bazel-out` symlink has to be planted in the workspace.
+#   * `file` is the source's absolute *workspace* path, which is the path an
+#     editor opens (clangd matches entries by that path, not by realpath).
+#     Includes resolve through the exec root's source symlinks and realpath
+#     back into the workspace, so navigation lands on the real files.
+#
+# `-fno-canonical-system-headers` is dropped: it is a gcc-only flag that clang
+# rejects (the tool itself drops it the same way), and everything else is
+# passed through -- an IDE gets the same view of the target as the tool does.
+def _compile_commands_fragment(ctx, srcs, compiler, flags):
+    args = [compiler, "-x", "c++"] + [f for f in flags if f != "-fno-canonical-system-headers"]
+    lines = [
+        json.encode({
+            "file": "__WORKSPACE__/" + src.short_path,
+            "directory": "__EXEC_ROOT__",
+            "arguments": args + ["-c", src.path],
+        }) + "\n"
+        for src in srcs
+    ]
+    frag = ctx.actions.declare_file(ctx.label.name + ".compile_commands.jsonl")
+    ctx.actions.write(frag, "".join(lines))
+    return frag
 
 def _aspect_impl(target, ctx):
     dep_infos = [
@@ -119,28 +166,52 @@ def _aspect_impl(target, ctx):
     ]
     transitive = [i.records for i in dep_infos]
     dep_headers = depset(transitive = [i.headers for i in dep_infos])
+    dep_cc = [i.compile_commands for i in dep_infos]
 
     # First-party cc_* targets only. The aspect still propagates into external
     # deps but produces nothing there.  A `no-cpp-format` target contributes no
     # owned headers either: its declarations are never renamed, so a dependent
     # must not rename their uses.
-    if ("no-cpp-format" in getattr(ctx.rule.attr, "tags", []) or
-        ctx.label.workspace_name != "" or CcInfo not in target):
+    if ctx.label.workspace_name != "" or CcInfo not in target:
         return [CppFormatEditsInfo(
             records = depset(transitive = transitive),
             headers = dep_headers,
+            compile_commands = depset(transitive = dep_cc),
         )]
     srcs = _own_sources(ctx)
-    mine_headers = depset(direct = _owned_headers(ctx), transitive = [dep_headers])
     if not srcs:
         return [CppFormatEditsInfo(
             records = depset(transitive = transitive),
-            headers = mine_headers,
+            headers = depset(direct = _owned_headers(ctx), transitive = [dep_headers]),
+            compile_commands = depset(transitive = dep_cc),
         )]
 
     cc_toolchain = find_cc_toolchain(ctx)
     cc_ctx = target[CcInfo].compilation_context
-    flags = _compile_flags(ctx, cc_toolchain, cc_ctx)
+    compiler, flags = _compile_flags(ctx, cc_toolchain, cc_ctx)
+
+    # The compilation-database fragment is written for every first-party target
+    # with sources, `no-cpp-format` or not: an IDE wants the whole repo.  Its
+    # output group also carries the target's transitive headers, so building it
+    # materialises every generated header the entries include -- what an editor
+    # needs to resolve them -- while still compiling nothing.
+    frag = _compile_commands_fragment(ctx, srcs, compiler, flags)
+    mine_cc = depset(direct = [frag], transitive = dep_cc)
+    cc_group = depset(direct = [frag], transitive = dep_cc + [cc_ctx.headers])
+
+    # A `no-cpp-format` target is not formatted and contributes no owned headers
+    # either: its declarations are never renamed, so a dependent must not
+    # rename their uses.
+    if "no-cpp-format" in getattr(ctx.rule.attr, "tags", []):
+        return [
+            CppFormatEditsInfo(
+                records = depset(transitive = transitive),
+                headers = dep_headers,
+                compile_commands = mine_cc,
+            ),
+            OutputGroupInfo(cpp_format_compile_commands = cc_group),
+        ]
+    mine_headers = depset(direct = _owned_headers(ctx), transitive = [dep_headers])
     binary = ctx.file._cpp_format
 
     # One action per source file, like CppCompile: Bazel then parallelises and
@@ -204,8 +275,11 @@ def _aspect_impl(target, ctx):
 
     mine = depset(direct = records, transitive = transitive)
     return [
-        CppFormatEditsInfo(records = mine, headers = mine_headers),
-        OutputGroupInfo(cpp_format_edits = depset(direct = [manifest], transitive = [mine])),
+        CppFormatEditsInfo(records = mine, headers = mine_headers, compile_commands = mine_cc),
+        OutputGroupInfo(
+            cpp_format_edits = depset(direct = [manifest], transitive = [mine]),
+            cpp_format_compile_commands = cc_group,
+        ),
     ]
 
 cpp_format_aspect = aspect(
@@ -316,11 +390,118 @@ _cpp_format_test = rule(
     attrs = _AGG_ATTRS,
 )
 
+# ---------------------------------------------------------------------------
+# compile_commands.json
+# ---------------------------------------------------------------------------
+
+# Merges the aspect's per-target `.compile_commands.jsonl` fragments into one
+# `compile_commands.json`, filling in the two run-time placeholders (see
+# `_compile_commands_fragment`).  cpp_format.sh carries the same two functions
+# and runs the merge outside Bazel over the fragments at their deterministic
+# bazel-bin paths.  Args: <exec root> <workspace> <output> <fragment>...
+# A file listed by several targets keeps the first entry seen.
+_MERGE_COMPILE_COMMANDS_SNIPPET = """
+json_escape() { local s="$1" bs='\\'; s="${s//"$bs"/"$bs$bs"}"; s="${s//\\"/$bs\\"}"; printf '%s' "$s"; }
+merge_compile_commands() {
+  local exec_root="$1" workspace="$2" out="$3"; shift 3
+  local dir_json ws_json frag line key first=1
+  dir_json="$(json_escape "$exec_root")"
+  ws_json="$(json_escape "$workspace")"
+  declare -A seen=()
+  {
+    printf '[\\n'
+    for frag in "$@"; do
+      while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        key="${line#*\\"file\\":\\"}"; key="${key%%\\"*}"
+        [[ -z "${seen[$key]:-}" ]] || continue
+        seen[$key]=1
+        line="${line//\\"__EXEC_ROOT__\\"/"\\"$dir_json\\""}"
+        line="${line//\\"__WORKSPACE__\\//"\\"$ws_json/"}"
+        [[ $first -eq 1 ]] || printf ',\\n'
+        first=0
+        printf '  %s' "$line"
+      done < "$frag"
+    done
+    printf '\\n]\\n'
+  } > "$out.tmp"
+  mv -f "$out.tmp" "$out"
+}
+"""
+
+def _compile_commands_of(ctx):
+    return depset(transitive = [
+        d[CppFormatEditsInfo].compile_commands
+        for d in ctx.attr.deps
+        if CppFormatEditsInfo in d
+    ]).to_list()
+
+def _compile_commands_impl(ctx):
+    frags = _compile_commands_of(ctx)
+    frag_lines = "".join([
+        'frags+=("$(rlocation "' + _rlocation_path(f) + '")")\n'
+        for f in frags
+    ])
+    script = ctx.actions.declare_file(ctx.label.name + ".sh")
+    ctx.actions.write(
+        output = script,
+        is_executable = True,
+        content = (
+            _RUNFILES_PREAMBLE + "frags=()\n" + frag_lines +
+            _MERGE_COMPILE_COMMANDS_SNIPPET +
+            # Under `bazel run` the runfiles tree sits inside bazel-bin, which
+            # is inside the execution root -- the directory every relative
+            # flag in the entries resolves against.
+            'ws="${BUILD_WORKSPACE_DIRECTORY:?run this with \'bazel run\'}"\n' +
+            'rf="${RUNFILES_DIR:-$PWD}"\n' +
+            'exec_root="${rf%/bazel-out/*}"\n' +
+            'out="${1:-' + ctx.attr.out + '}"\n' +
+            '[[ "$out" = /* ]] || out="${BUILD_WORKING_DIRECTORY:-$ws}/$out"\n' +
+            'merge_compile_commands "$exec_root" "$ws" "$out" "${frags[@]}"\n' +
+            'echo "cpp_format: wrote $out (${#frags[@]} targets)"\n'
+        ),
+    )
+
+    # The transitive headers ride along as default outputs (not runfiles, which
+    # would symlink every one of them): `bazel run` builds them, so the
+    # generated headers the entries name exist once the file is written.
+    headers = [d[CcInfo].compilation_context.headers for d in ctx.attr.deps if CcInfo in d]
+    runfiles = ctx.runfiles(files = frags)
+    runfiles = runfiles.merge(ctx.attr._bash_runfiles[DefaultInfo].default_runfiles)
+    return [DefaultInfo(
+        executable = script,
+        files = depset(direct = [script], transitive = headers),
+        runfiles = runfiles,
+    )]
+
+cpp_format_compile_commands = rule(
+    doc = "bazel run this to write a compile_commands.json for `deps` (transitively) " +
+          "into $BUILD_WORKSPACE_DIRECTORY (default compile_commands.json; override " +
+          "with a positional arg).  Nothing is compiled and cpp_format is not run: the " +
+          "entries are the compile commands the cpp_format aspect derives for each target.",
+    implementation = _compile_commands_impl,
+    executable = True,
+    attrs = {
+        "deps": attr.label_list(
+            aspects = [cpp_format_aspect],
+            providers = [CcInfo],
+            doc = "cc_* targets to cover (transitively).",
+        ),
+        "out": attr.string(
+            default = "compile_commands.json",
+            doc = "Default workspace-relative output path.",
+        ),
+        "_bash_runfiles": attr.label(default = Label("@bazel_tools//tools/bash/runfiles")),
+    },
+)
+
 def cpp_format_targets(name, deps, **kwargs):
-    """Defines <name>.check (test), <name>.diff and <name>.fix (bazel run)."""
+    """Defines <name>.check (test), <name>.diff, <name>.fix and
+    <name>.compile_commands (bazel run)."""
     _cpp_format_test(name = name + ".check", deps = deps, mode_flags = "--check", **kwargs)
     _cpp_format_run(name = name + ".diff", deps = deps, mode_flags = "", **kwargs)
     _cpp_format_run(name = name + ".fix", deps = deps, mode_flags = "--apply", **kwargs)
+    cpp_format_compile_commands(name = name + ".compile_commands", deps = deps, **kwargs)
 
 # ---------------------------------------------------------------------------
 # `bazel run //…:install` — drop cpp_format.sh into the consumer's workspace

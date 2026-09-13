@@ -90,6 +90,7 @@ tools/cpp_format.sh check          # CI gate: exit 1 if anything would change
 tools/cpp_format.sh diff           # print the merged, git-apply-able patch
 tools/cpp_format.sh fix            # apply the fixes in place
 tools/cpp_format.sh fix //app/...  # scope to a package tree
+tools/cpp_format.sh compile_commands   # write compile_commands.json for clangd
 ```
 
 Commit the placed script (it's a normal, editable file). It queries the
@@ -111,7 +112,24 @@ cpp_format_targets(name = "format", deps = ["//app:main", "//lib:core"])
 
 ```sh
 bazel test //:format.check   # test gate    bazel run //:format.fix   # apply
+bazel run //:format.compile_commands      # write compile_commands.json
 ```
+
+**A `compile_commands.json` for free.** The aspect already derives every
+target's compile command, so both entry points can also write it out as a
+compilation database for clangd and other editors — no second Bazel
+dependency (Hedron & co.) needed. `cpp_format.sh compile_commands [pattern]`
+writes `compile_commands.json` in the workspace root (set
+`COMPILE_COMMANDS_OUT` to put it elsewhere), and `<name>.compile_commands`
+does the same via `bazel run` (pass a path to override). Neither compiles
+anything or runs `cpp_format`: the entries are written at analysis time, and
+only the generated headers they mention get built. Entries use the execution
+root as `directory`, so relative flags (`-iquote .`, `bazel-out/...`,
+`external/...`) resolve without planting any symlinks in your tree, and the
+absolute workspace path as `file`, which is what an editor opens.
+`no-cpp-format` targets are included here (they are only excluded from
+formatting). The command is the target's, not the file's: per-target `copts`
+are not part of it.
 
 Use one or the other — don't run `cpp_format.sh //...` while `cpp_format_targets`
 are defined over the same targets (the aspect would be applied twice and Bazel
@@ -589,6 +607,9 @@ chmod +x ~/.local/bin/cpp_format
 `cpp_format` uses Clang to parse your source files and therefore needs to know the compiler flags for each file. The easiest way to provide them is via a `compile_commands.json` in your project root, which `cpp_format` auto-detects.
 
 - **CMake:** `cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ...`
+- **Bazel:** if you use the [Bazel integration](#add-cpp_format-to-your-bazel-codebase)
+  you don't need one at all — and it writes one for your editor anyway:
+  `tools/cpp_format.sh compile_commands` or `bazel run //:format.compile_commands`
 - **Bazel (Hedron plugin):** `bazel run @hedron_compile_commands//:refresh_all`
 - **Bear:** `bear -- make` (or your build command)
 
@@ -711,13 +732,25 @@ inside a running one. Because the aspect and the wrapper rely on flags of the
 binary (`--owned-files`, `--aggregate --records-from`), the kit and the
 published binary are versioned together (see the release pin in
 `MODULE.bazel`). For a pinned CI gate, `cpp_format_targets(name, deps)`
-instead generates three graph targets:
+instead generates four graph targets:
 
 | Target | Kind | Purpose |
 |---|---|---|
 | `<name>.check` | `bazel test` | Hermetic lint gate — counts edits without reading sources; exits 1 if any. |
 | `<name>.diff` | `bazel run` | Prints the merged, git-apply-able unified diff (review artifact). |
 | `<name>.fix` | `bazel run` | Applies the edits in `$BUILD_WORKSPACE_DIRECTORY` (outside the action graph, since Bazel actions cannot mutate sources). |
+| `<name>.compile_commands` | `bazel run` | Writes a `compile_commands.json` for the deps (transitively) in `$BUILD_WORKSPACE_DIRECTORY`. Also available standalone as the `cpp_format_compile_commands(name, deps)` rule. |
+
+**Compilation database.** The aspect writes each target's compile command out
+as a `<name>.compile_commands.jsonl` fragment (one JSON object per source
+file, a plain `ctx.actions.write`; output group `cpp_format_compile_commands`,
+which also carries the target's transitive headers so the generated ones get
+built). The `.compile_commands` target and `cpp_format.sh compile_commands`
+merge the fragments into one `compile_commands.json`, filling in the two
+things only known at run time: `directory` (the execution root, where every
+relative flag resolves) and `file` (the source's absolute workspace path). A
+file listed by several targets keeps the first entry. Nothing is compiled and
+`cpp_format` never runs for this.
 
 **Delivery paths.** The kit in [bazel/integration/](bazel/integration/) uses the
 **prebuilt release binary** (no LLVM build) and is consumed either by URL
