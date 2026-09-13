@@ -919,8 +919,12 @@ main file and in every *owned* file (`--owned-files`, or every source given);
 symbols referenced from those files but declared elsewhere -- `std::`, other
 repositories, system headers -- get a symbol entry with their canonical
 location but no occurrences of their own. Under Bazel the `cpp_index_aspect`
-runs one such action per source file (the target's `srcs`, `hdrs` and
-`textual_hdrs` are its owned set; a `no-cpp-index` tag opts a target out), and
+runs one such action per translation unit, never for a header on its own (a
+header is only ever compiled as part of a TU that includes it); the owned set
+is the target's `srcs`, `hdrs` and `textual_hdrs` plus the dep closure's
+first-party headers, so a header is indexed by every TU that includes it, and
+a header-only dependency by its dependents' TUs. A `no-cpp-index` tag opts a
+target out. Then
 `cpp_format --merge-index` unions the units: files by path, symbols by USR,
 identical occurrences deduplicated. Merging mutates nothing, so
 `cpp_index_targets(name, deps)` makes it an ordinary cached build action --

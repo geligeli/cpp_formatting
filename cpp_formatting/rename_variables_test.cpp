@@ -472,11 +472,12 @@ TEST(RenameMemberFunctions, DeclarationAndImplicitThisCall) {
 }
 
 TEST(RenameMemberFunctions, DotAndArrowCall) {
-  EXPECT_EQ(rewriteMethod("struct S { int get(); };\n"
-                          "int f(S& s, S* p) { return s.get() + p->get(); }",
-                          renameOne("get", "value")),
-            "struct S { int value(); };\n"
-            "int f(S& s, S* p) { return s.value() + p->value(); }");
+  EXPECT_EQ(
+      rewriteMethod("struct S { int fetch(); };\n"
+                    "int f(S& s, S* p) { return s.fetch() + p->fetch(); }",
+                    renameOne("fetch", "value")),
+      "struct S { int value(); };\n"
+      "int f(S& s, S* p) { return s.value() + p->value(); }");
 }
 
 TEST(RenameMemberFunctions, OutOfLineDefinition) {
@@ -497,27 +498,27 @@ TEST(RenameMemberFunctions, StaticMethod) {
 }
 
 TEST(RenameMemberFunctions, PointerToMemberFunction) {
-  EXPECT_EQ(rewriteMethod("struct S { int get(); };\n"
-                          "auto p = &S::get;",
-                          renameOne("get", "value")),
+  EXPECT_EQ(rewriteMethod("struct S { int fetch(); };\n"
+                          "auto p = &S::fetch;",
+                          renameOne("fetch", "value")),
             "struct S { int value(); };\n"
             "auto p = &S::value;");
 }
 
 TEST(RenameMemberFunctions, OverloadedMethods) {
-  EXPECT_EQ(rewriteMethod("struct S { int get(); int get(int); };\n"
-                          "int f(S& s) { return s.get() + s.get(1); }",
-                          renameOne("get", "value")),
+  EXPECT_EQ(rewriteMethod("struct S { int fetch(); int fetch(int); };\n"
+                          "int f(S& s) { return s.fetch() + s.fetch(1); }",
+                          renameOne("fetch", "value")),
             "struct S { int value(); int value(int); };\n"
             "int f(S& s) { return s.value() + s.value(1); }");
 }
 
 TEST(RenameMemberFunctions, DoesNotRenameCtorDtorOrOperators) {
   EXPECT_EQ(rewriteMethod("struct S { S(); ~S(); operator int() const; bool "
-                          "operator==(const S&) const; int get(); };",
+                          "operator==(const S&) const; int fetch(); };",
                           addSuffix("_x")),
             "struct S { S(); ~S(); operator int() const; bool "
-            "operator==(const S&) const; int get_x(); };");
+            "operator==(const S&) const; int fetch_x(); };");
 }
 
 TEST(RenameMemberFunctions, DoesNotRenameFreeFunctions) {
@@ -529,10 +530,10 @@ TEST(RenameMemberFunctions, DoesNotRenameFreeFunctions) {
 TEST(RenameMemberFunctions, VirtualOverrideHierarchyRenamedTogether) {
   // The base declaration, every override, and every call site — through base
   // or derived — all carry the new name.
-  EXPECT_EQ(rewriteMethod("struct B { virtual int get() const; };\n"
-                          "struct D : B { int get() const override; };\n"
-                          "int f(B& b, D& d) { return b.get() + d.get(); }",
-                          renameOne("get", "value")),
+  EXPECT_EQ(rewriteMethod("struct B { virtual int fetch() const; };\n"
+                          "struct D : B { int fetch() const override; };\n"
+                          "int f(B& b, D& d) { return b.fetch() + d.fetch(); }",
+                          renameOne("fetch", "value")),
             "struct B { virtual int value() const; };\n"
             "struct D : B { int value() const override; };\n"
             "int f(B& b, D& d) { return b.value() + d.value(); }");
@@ -541,9 +542,9 @@ TEST(RenameMemberFunctions, VirtualOverrideHierarchyRenamedTogether) {
 TEST(RenameMemberFunctions, TemplateMethodRenamedInInstantiation) {
   // The MemberExpr in non-template code references the instantiated
   // CXXMethodDecl; the tool must walk up the instantiation chain.
-  EXPECT_EQ(rewriteMethod("template<typename T> struct Box { T get(); };\n"
-                          "int f() { Box<int> b; return b.get(); }",
-                          renameOne("get", "value")),
+  EXPECT_EQ(rewriteMethod("template<typename T> struct Box { T fetch(); };\n"
+                          "int f() { Box<int> b; return b.fetch(); }",
+                          renameOne("fetch", "value")),
             "template<typename T> struct Box { T value(); };\n"
             "int f() { Box<int> b; return b.value(); }");
 }
@@ -1252,4 +1253,291 @@ TEST(ScopeRelations, MembersAndMethodsShareAClass) {
       scopesShareADeclContext(VariableScope::Local, VariableScope::Global));
   EXPECT_FALSE(
       scopesShareADeclContext(VariableScope::Member, VariableScope::Global));
+}
+
+// ---------------------------------------------------------------------------
+// References no visitor used to see, and names that must never be touched.
+// Together these are what "declined or correct, never broken" rests on.
+// ---------------------------------------------------------------------------
+
+TEST(RenameOffsetOf, MemberNamedInOffsetofIsRenamed) {
+  // offsetof's member designator is an OffsetOfExpr component, not a
+  // MemberExpr.  Through the macro the name is an argument spelled at the call
+  // site, so it renames like any other reference.
+  const char* code =
+      "#define OFFSETOF(T, m) __builtin_offsetof(T, m)\n"
+      "struct Spec { int pad_; int conv_; };\n"
+      "constexpr unsigned long kOff = OFFSETOF(Spec, conv_);\n"
+      "constexpr unsigned long kRaw = __builtin_offsetof(Spec, conv_);\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("conv_", "conv")),
+            "#define OFFSETOF(T, m) __builtin_offsetof(T, m)\n"
+            "struct Spec { int pad_; int conv; };\n"
+            "constexpr unsigned long kOff = OFFSETOF(Spec, conv);\n"
+            "constexpr unsigned long kRaw = __builtin_offsetof(Spec, conv);\n");
+}
+
+TEST(RenameOffsetOf, OffsetofOnDependentTypeDeclinesTheName) {
+  // Which member `conv_` names is known only per instantiation, and the
+  // rewrite pass never walks those.  The name is declined, not half-renamed.
+  const char* code =
+      "struct Spec { int conv_; };\n"
+      "template <class T> constexpr unsigned long off() {\n"
+      "  return __builtin_offsetof(T, conv_);\n"
+      "}\n"
+      "constexpr unsigned long kOff = off<Spec>();\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("conv_", "conv")), code);
+}
+
+TEST(RenameAnonymousUnion, MemberOfDependentBaseInAnonymousUnionIsRenamed) {
+  // abseil's StatusOr: the member lives in an anonymous union of a dependent
+  // base.  The instantiation reaches it through an implicit MemberExpr on the
+  // union's unnamed field at the same location, which used to read as "a
+  // member not being renamed" and veto the token while the declaration was
+  // renamed anyway.
+  const char* code =
+      "struct Status { bool ok() const { return true; } };\n"
+      "template <class T> struct Data { union { Status status_; }; };\n"
+      "template <class T> struct StatusOr : Data<T> {\n"
+      "  bool ok() const { return this->status_.ok(); }\n"
+      "};\n"
+      "bool use(StatusOr<int>& s) { return s.ok(); }\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("status_", "status")),
+            "struct Status { bool ok() const { return true; } };\n"
+            "template <class T> struct Data { union { Status status; }; };\n"
+            "template <class T> struct StatusOr : Data<T> {\n"
+            "  bool ok() const { return this->status.ok(); }\n"
+            "};\n"
+            "bool use(StatusOr<int>& s) { return s.ok(); }\n");
+}
+
+TEST(RenameAnonymousUnion, NonDependentUseThroughInstantiationIsRenamed) {
+  const char* code =
+      "struct Status { bool ok() const { return true; } };\n"
+      "template <class T> struct Data { union { Status status_; }; };\n"
+      "struct Derived : Data<int> { bool ok() const { return status_.ok(); } "
+      "};\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("status_", "status")),
+            "struct Status { bool ok() const { return true; } };\n"
+            "template <class T> struct Data { union { Status status; }; };\n"
+            "struct Derived : Data<int> { bool ok() const { return "
+            "status.ok(); } };\n");
+}
+
+TEST(RenameMemberFunctions, ProtocolNamesAreDeclined) {
+  // A range-for calls begin()/end() without spelling them, so renaming them is
+  // a complete rename that still does not compile.  No reference audit can
+  // see it; the names are declined by fiat.  A sibling renames normally.
+  const char* code =
+      "struct Bag { int* begin() const; int* end() const; int* first() const; "
+      "};";
+  EXPECT_EQ(rewriteMethod(code, addSuffix("_x")),
+            "struct Bag { int* begin() const; int* end() const; int* first_x() "
+            "const; };");
+}
+
+TEST(RenameMemberFunctions, MembersOfForeignSpecializationAreDeclined) {
+  // std::numeric_limits<Fix>::is_specialized is named by the primary template
+  // in <limits>; a specialization of one of *our* templates is unaffected.
+  const char* code =
+      "#include <limits>\n"
+      "struct Fix { int raw_; };\n"
+      "namespace std {\n"
+      "template <> struct numeric_limits<Fix> {\n"
+      "  static constexpr bool is_specialized = true;\n"
+      "  static int lowest() { return 0; }\n"
+      "};\n"
+      "}\n"
+      "template <class T> struct Ours { int get_raw() const; };\n"
+      "template <> struct Ours<int> { int get_raw() const; };\n";
+  EXPECT_EQ(rewriteMethod(code, addSuffix("_x")),
+            "#include <limits>\n"
+            "struct Fix { int raw_; };\n"
+            "namespace std {\n"
+            "template <> struct numeric_limits<Fix> {\n"
+            "  static constexpr bool is_specialized = true;\n"
+            "  static int lowest() { return 0; }\n"
+            "};\n"
+            "}\n"
+            "template <class T> struct Ours { int get_raw_x() const; };\n"
+            "template <> struct Ours<int> { int get_raw_x() const; };\n");
+  EXPECT_EQ(rewriteStaticMember(code, addSuffix("_x")), code);
+}
+
+TEST(RenameStaticMemberVariables, TraitValueIsDeclined) {
+  // std::conjunction and friends read B::value on user traits.
+  EXPECT_EQ(rewriteStaticMember("struct IsFoo { static constexpr bool value = "
+                                "true; static constexpr bool other = false; };",
+                                addSuffix("_")),
+            "struct IsFoo { static constexpr bool value = true; static "
+            "constexpr bool other_ = false; };");
+}
+
+// ---------------------------------------------------------------------------
+// A rename must still bind from every use site, and every spelling of the old
+// name must be one the tool understands.
+// ---------------------------------------------------------------------------
+
+TEST(RenameHiding, DerivedClassDeclaringTheNewNameDeclines) {
+  // Lookup of `status_` from inside Derived starts at Derived; once the base
+  // field is called `status`, Derived's method status() is found first.
+  // collides() only looks at the declaring class, so this is checked per use.
+  const char* code =
+      "struct Base { int status_; };\n"
+      "struct Derived : Base {\n"
+      "  int status() const;\n"
+      "  int f() const { return status_; }\n"
+      "};\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("status_", "status")), code);
+}
+
+TEST(RenameHiding, QualifiedAndBaseTypedAccessesAreNotHidden) {
+  // `Base::status_` starts lookup at Base, and `b.status_` on a Base never
+  // passes through Derived, so neither access can be captured.
+  const char* code =
+      "struct Base { int status_; };\n"
+      "struct Derived : Base {\n"
+      "  int status() const;\n"
+      "  int f() const { return Base::status_; }\n"
+      "};\n"
+      "int g(Base& b) { return b.status_; }\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("status_", "status")),
+            "struct Base { int status; };\n"
+            "struct Derived : Base {\n"
+            "  int status() const;\n"
+            "  int f() const { return Base::status; }\n"
+            "};\n"
+            "int g(Base& b) { return b.status; }\n");
+}
+
+TEST(RenameHiding, DependentBaseHidingIsSeenInTheInstantiation) {
+  // abseil's StatusOr<T> : StatusOrData<T>, with a method status() next to
+  // the base's field status_.  The pattern's this->status_ is dependent, so
+  // the check runs on the instantiation's resolved access.
+  const char* code =
+      "struct Status { bool ok() const { return true; } };\n"
+      "template <class T> struct Data { Status status_; };\n"
+      "template <class T> struct StatusOr : Data<T> {\n"
+      "  const Status& status() const { return this->status_; }\n"
+      "  bool ok() const { return this->status_.ok(); }\n"
+      "};\n"
+      "bool use(StatusOr<int>& s) { return s.ok(); }\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("status_", "status")), code);
+}
+
+TEST(RenameSpellingAudit, UsingDeclarationDeclines) {
+  // `using Base::val_;` spells the member and no visitor rewrites it.
+  const char* code =
+      "struct Base { int val_; };\n"
+      "struct D : Base { using Base::val_; int f() const { return val_; } };\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("val_", "value")), code);
+}
+
+TEST(RenameSpellingAudit, UnresolvedCallInsideATemplateDeclines) {
+  // Init(p) with a dependent argument is an UnresolvedMemberExpr -- an overload
+  // set, not a member -- so the call would be left spelling the old name.
+  const char* code =
+      "struct B {\n"
+      "  template <class U> B(U* p) { Init(p); }\n"
+      "  template <class M> void Init(M&& m) {}\n"
+      "};\n"
+      "int use(int* p) { B b(p); return 0; }\n";
+  EXPECT_EQ(rewriteMethod(code, renameOne("Init", "init")), code);
+}
+
+TEST(RenameSpellingAudit, PastedMacroArgumentDeclines) {
+  // The argument DoThis is spelled at the call site but only ever consumed by
+  // `##`: the pasted gmock_DoThis is a different identifier that nonetheless
+  // changes when DoThis is renamed.  No AST node accounts for that token.
+  const char* code =
+      "struct Spec { int a; };\n"
+      "#define MOCK(name) Spec gmock_##name(int) { return {}; } "
+      "int name(int x) { return x; }\n"
+      "struct MockFoo { MOCK(DoThis) };\n"
+      "#define CALL(obj, call) (obj).gmock_##call\n"
+      "int use(MockFoo& m) { return CALL(m, DoThis)(1).a + m.DoThis(2); }\n";
+  EXPECT_EQ(rewriteMethod(code, renameOne("DoThis", "do_this")), code);
+}
+
+TEST(RenameSpellingAudit, CommentsAndStringsDoNotCount) {
+  const char* code =
+      "struct S { int val_; };  // val_ is the payload\n"
+      "const char* kName = \"val_\";\n"
+      "int f(S& x) { return x.val_; }\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("val_", "value")),
+            "struct S { int value; };  // val_ is the payload\n"
+            "const char* kName = \"val_\";\n"
+            "int f(S& x) { return x.value; }\n");
+}
+
+TEST(RenameSpellingAudit, UnrelatedDeclarationsWithTheSameNameDoNotCount) {
+  // A free function and an enumerator that happen to be called Init are
+  // declarations the visitor sees; only spellings nobody accounts for decline.
+  const char* code =
+      "struct S { void Init(); };\n"
+      "void Init();\n"
+      "struct T { int Init; };\n"
+      "int g(S& s, T& t) { s.Init(); Init(); return t.Init; }\n";
+  EXPECT_EQ(rewriteMethod(code, renameOne("Init", "init")),
+            "struct S { void init(); };\n"
+            "void Init();\n"
+            "struct T { int Init; };\n"
+            "int g(S& s, T& t) { s.init(); Init(); return t.Init; }\n");
+}
+
+TEST(RenameMacros, DeclarationThroughAPastingMacroIsDeclined) {
+  // gmock's ACTION_P shape: the argument declares a member *and* is pasted
+  // into a typedef the body may spell.  Renaming the member would change the
+  // typedef.  A declaration through a macro that does not paste still renames.
+  const char* code =
+      "#define PARAM(name) int name; typedef int name##_type;\n"
+      "#define FIELD(name) int name;\n"
+      "struct S { PARAM(foo) FIELD(other) foo_type f() const { return foo; } "
+      "};\n";
+  EXPECT_EQ(rewriteMember(code, addSuffix("_")),
+            "#define PARAM(name) int name; typedef int name##_type;\n"
+            "#define FIELD(name) int name;\n"
+            "struct S { PARAM(foo) FIELD(other_) foo_type f() const { return "
+            "foo; } };\n");
+}
+
+TEST(RenameAnonymousUnion, CollidesWithAnAccessorOnTheEnclosingClass) {
+  // re2's Regexp shape: the variant fields live in anonymous structs inside an
+  // anonymous union, and the class has an accessor of the same name for each.
+  // The name is looked up in the class, not in the anonymous struct, so
+  // `runes_ -> runes` would declare a field and a method of one name.
+  const char* code =
+      "struct Regexp {\n"
+      "  int nrunes() { return nrunes_; }\n"
+      "  int* runes() { return runes_; }\n"
+      "  union {\n"
+      "    struct { int nrunes_; int* runes_; };\n"
+      "    struct { int cap_; };\n"
+      "  };\n"
+      "};\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("runes_", "runes")), code);
+  EXPECT_EQ(rewriteMember(code, renameOne("nrunes_", "nrunes")), code);
+  // cap_ has no accessor of that name, so it renames -- the check is not a
+  // blanket refusal to touch anonymous-union members.
+  EXPECT_EQ(rewriteMember(code, renameOne("cap_", "cap")),
+            "struct Regexp {\n"
+            "  int nrunes() { return nrunes_; }\n"
+            "  int* runes() { return runes_; }\n"
+            "  union {\n"
+            "    struct { int nrunes_; int* runes_; };\n"
+            "    struct { int cap; };\n"
+            "  };\n"
+            "};\n");
+}
+
+TEST(RenameAnonymousUnion, TwoAnonymousStructsCannotClaimOneName) {
+  // Members of different anonymous structs in one union are still all members
+  // of the enclosing class, so two of them cannot rename to the same name.
+  const char* code =
+      "struct S {\n"
+      "  union {\n"
+      "    struct { int aVal; };\n"
+      "    struct { int a_val; };\n"
+      "  };\n"
+      "};\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("aVal", "a_val")), code);
 }

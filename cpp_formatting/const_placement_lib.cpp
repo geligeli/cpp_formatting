@@ -16,6 +16,7 @@
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Lex/Lexer.h"
 #include "clang/Tooling/Tooling.h"
+#include "cpp_formatting/tu_driver.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -218,6 +219,8 @@ class ConstPlacementVisitor
         RuleId(RuleId),
         Edits(Edits) {}
 
+  void setOwnedFiles(const FileSet* O) { Owned = O; }
+
   /// Post-order: the children are traversed *before* this node is handled.
   ///
   /// Qualified types nest -- `const std::map<std::string const, T const*>` is
@@ -255,6 +258,7 @@ class ConstPlacementVisitor
   /// same QualifiedTypeLoc is handled more than once.  Keyed by the type
   /// specifier's (FileID, offset), as ApplyRenamesVisitor::renameAt is.
   std::set<std::pair<unsigned, unsigned>> Done;
+  const FileSet* Owned = nullptr;
 };
 
 void ConstPlacementVisitor::handle(QualifiedTypeLoc TL) {
@@ -273,8 +277,11 @@ void ConstPlacementVisitor::handle(QualifiedTypeLoc TL) {
   if (Spec.getBegin().isMacroID()) return;
 
   const FileID FID = SM.getFileID(Spec.getBegin());
-  if (FID != SM.getMainFileID())
-    return;  // each file is rewritten by its own TU
+  // Each file is rewritten by its own TU in a direct run; in Emit mode by
+  // every TU that owns it (a header has no TU of its own there).
+  if (Owned ? !isRewritableFile(Spec.getBegin(), SM, *Owned)
+            : FID != SM.getMainFileID())
+    return;
 
   bool Invalid = false;
   const llvm::StringRef Buf = SM.getBufferData(FID, &Invalid);
@@ -430,8 +437,9 @@ void ConstPlacementVisitor::emit(llvm::StringRef Path, unsigned Begin,
 
 void runConstPlacementOnAST(ASTContext& Ctx, Rewriter& RW, ConstStyle Style,
                             LintReport* Report, llvm::StringRef RuleId,
-                            EditReport* Edits) {
+                            EditReport* Edits, const FileSet* Owned) {
   ConstPlacementVisitor V(Ctx, RW, Style, Report, RuleId, Edits);
+  V.setOwnedFiles(Owned);
   V.TraverseDecl(Ctx.getTranslationUnitDecl());
 }
 

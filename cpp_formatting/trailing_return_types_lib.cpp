@@ -340,7 +340,9 @@ void TrailingReturnCallback::run(const MatchFinder::MatchResult& Result) {
   if (!Func) return;
 
   SourceManager& SM = *Result.SourceManager;
-  if (!SM.isWrittenInMainFile(Func->getLocation())) return;
+  if (Owned ? !isRewritableFile(Func->getLocation(), SM, *Owned)
+            : !SM.isWrittenInMainFile(Func->getLocation()))
+    return;
 
   TypeSourceInfo* TSI = Func->getTypeSourceInfo();
   if (!TSI) return;

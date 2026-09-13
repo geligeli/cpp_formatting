@@ -7,6 +7,7 @@
 #include "clang/ASTMatchers/ASTMatchFinder.h"
 #include "clang/Basic/FileEntry.h"
 #include "clang/Frontend/CompilerInstance.h"
+#include "clang/Lex/Preprocessor.h"
 #include "clang/Rewrite/Core/Rewriter.h"
 #include "cpp_formatting/const_placement_lib.h"
 #include "cpp_formatting/trailing_return_types_lib.h"
@@ -30,7 +31,8 @@ class CppFormatConsumer : public ASTConsumer {
                     LintReport* Report,
                     std::vector<DependentResolutions>* DepResPerRule,
                     EditReport* Edits, RenameConflicts* Conflicts,
-                    RenameVetoes* Vetoes)
+                    RenameVetoes* Vetoes, std::set<std::string>* RenamedNames,
+                    Preprocessor* PP)
       : RW(RW),
         Rules(Rules),
         ConstPlacement(ConstPlacement),
@@ -41,14 +43,16 @@ class CppFormatConsumer : public ASTConsumer {
         DepResPerRule(DepResPerRule),
         Edits(Edits),
         Conflicts(Conflicts),
-        Vetoes(Vetoes) {}
+        Vetoes(Vetoes),
+        RenamedNames(RenamedNames),
+        PP(PP) {}
 
   void HandleTranslationUnit(ASTContext& Ctx) override {
     for (size_t I = 0; I < Rules.size(); ++I)
       runRenameRuleOnAST(Ctx, RW, Rules[I].CB, Rules[I].Scope, CollectFrom,
                          Report, Rules[I].RuleId,
                          DepResPerRule ? &(*DepResPerRule)[I] : nullptr, Edits,
-                         Conflicts, Vetoes);
+                         Conflicts, Vetoes, RenamedNames, PP);
 
     // Between the renames and the return-type pass.  It has to run after the
     // renames because it shares their Rewriter and reads nothing they wrote;
@@ -57,9 +61,14 @@ class CppFormatConsumer : public ASTConsumer {
     // moved first rides along into `-> type` instead of being clobbered by the
     // wholesale `auto` replacement.  In Emit mode the same ordering lets
     // runToTrailing() subsume these records the way it subsumes rename ones.
+    // In Emit mode every pass may edit any owned file: a header is not a
+    // translation unit there and has no action of its own (see
+    // isRewritableFile in tu_driver.h).  A direct run keeps each file to its
+    // own TU, since it merges whole file contents rather than records.
+    const FileSet* Owned = Edits ? &CollectFrom : nullptr;
     if (ConstPlacement)
       runConstPlacementOnAST(Ctx, RW, *ConstPlacement, Report,
-                             constStyleRuleId(*ConstPlacement), Edits);
+                             constStyleRuleId(*ConstPlacement), Edits, Owned);
 
     if (ReturnStyle) {
       // MatchFinder::matchAST runs the matchers on the already-parsed AST —
@@ -69,6 +78,7 @@ class CppFormatConsumer : public ASTConsumer {
       TrailingReturnCallback Callback(RW, *ReturnStyle);
       if (Report) Callback.setLintReport(Report, ReturnRuleId);
       if (Edits) Callback.setEmitReport(Edits);
+      Callback.setOwnedFiles(Owned);
       registerTrailingReturnMatchers(Finder, Callback, *ReturnStyle);
       Finder.matchAST(Ctx);
     }
@@ -88,6 +98,8 @@ class CppFormatConsumer : public ASTConsumer {
   // One veto set for all rules: a reference that cannot be rewritten is
   // unrewritable whatever new name a rule would have given it.
   RenameVetoes* Vetoes;
+  std::set<std::string>* RenamedNames;
+  Preprocessor* PP;
 };
 
 // ---------------------------------------------------------------------------
@@ -109,7 +121,7 @@ class CppFormatAction : public ASTFrontendAction {
                   LintReport* Report,
                   std::vector<DependentResolutions>* DepResPerRule,
                   EditReport* Edits, RenameConflicts* Conflicts,
-                  RenameVetoes* Vetoes)
+                  RenameVetoes* Vetoes, std::set<std::string>* RenamedNames)
       : Rules(Rules),
         ConstPlacement(ConstPlacement),
         ReturnStyle(ReturnStyle),
@@ -121,7 +133,8 @@ class CppFormatAction : public ASTFrontendAction {
         DepResPerRule(DepResPerRule),
         Edits(Edits),
         Conflicts(Conflicts),
-        Vetoes(Vetoes) {}
+        Vetoes(Vetoes),
+        RenamedNames(RenamedNames) {}
 
   void EndSourceFileAction() override {
     SourceManager& SM = TheRewriter.getSourceMgr();
@@ -149,7 +162,8 @@ class CppFormatAction : public ASTFrontendAction {
     TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
     return std::make_unique<CppFormatConsumer>(
         TheRewriter, Rules, ConstPlacement, ReturnStyle, ReturnRuleId,
-        CollectFrom, Report, DepResPerRule, Edits, Conflicts, Vetoes);
+        CollectFrom, Report, DepResPerRule, Edits, Conflicts, Vetoes,
+        RenamedNames, &CI.getPreprocessor());
   }
 
  private:
@@ -167,6 +181,7 @@ class CppFormatAction : public ASTFrontendAction {
   // One veto set for all rules: a reference that cannot be rewritten is
   // unrewritable whatever new name a rule would have given it.
   RenameVetoes* Vetoes;
+  std::set<std::string>* RenamedNames;
   Rewriter TheRewriter;
 };
 
@@ -196,7 +211,7 @@ auto CppFormatActionFactory::createAction(TUSlot& Slot)
       Rules, ConstPlacement, ReturnStyle, ReturnRuleId, Mode, CollectFrom,
       &Slot.Pending, Report ? &Slot.Report : nullptr, &Slot.DepRes,
       Mode == OutputMode::Emit ? &Slot.Edits : nullptr, &Slot.Conflicts,
-      &Slot.Vetoes);
+      &Slot.Vetoes, &Slot.RenamedNames);
 }
 
 void CppFormatActionFactory::finish(std::vector<TUSlot>& Slots) {
@@ -220,7 +235,7 @@ void CppFormatActionFactory::emitEdits(llvm::raw_ostream& OS) {
   // across sandboxes.
   for (unsigned Rule = 0; Rule < Shared.DepResPerRule.size(); ++Rule)
     for (const auto& [Key, R] : Shared.DepResPerRule[Rule]) {
-      if (!R.HasName && !R.Vetoed) continue;
+      if (!R.HasName && !R.Vetoed && R.OldName.empty()) continue;
       Edits.Resolutions.push_back({relativizeToCwd(Key.first), Key.second,
                                    R.Length, R.OldName, R.NewName, R.Vetoed,
                                    R.OwnerFile, R.OwnerOffset, Rule});

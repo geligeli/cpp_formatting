@@ -126,6 +126,30 @@ using RenameVetoes = std::map<std::pair<std::string, unsigned>, RenameVeto>;
 /// anyway would either be a redeclaration error or, worse, silently rebind
 /// existing uses to a different entity -- so the declaration and all its uses
 /// are left alone and the site is reported.
+// ---------------------------------------------------------------------------
+// Declining a rename by *name*
+// ---------------------------------------------------------------------------
+//
+// Two of the tool's backstops know only the spelling of what they could not
+// rewrite, not which declaration it belongs to: a dependent token that no
+// instantiation in any translation unit ever resolved (a member named in a
+// template argument, which Clang folds to a value at instantiation, leaves no
+// node to observe), and a use in an instantiation that could not be mapped
+// back to its pattern.  Such a veto is stored in the same RenameVetoes map
+// under a key no file can have -- a leading '\x01' plus the name -- so that it
+// travels, seeds, merges, triggers re-runs and serializes exactly like a
+// declaration veto, and every collector checks each declaration's *name*
+// against it before renaming.  Aggregation drops every rename edit whose old
+// spelling matches.  Over-declining -- every declaration of that name, not
+// just the one meant -- is the safe side.
+inline auto nameVetoKey(llvm::StringRef Name)
+    -> std::pair<std::string, unsigned> {
+  return {std::string("\x01") + Name.str(), 0};
+}
+inline auto isNameVeto(llvm::StringRef VetoFile) -> bool {
+  return !VetoFile.empty() && VetoFile[0] == '\x01';
+}
+
 struct RenameConflict {
   std::string File;
   unsigned Line = 0;

@@ -1,0 +1,24 @@
+# The cheap corpus gate: 1462 edits across 42 files apply with 0 conflicts,
+# //:all rebuilds clean, and a second pass has nothing left to do. Minutes, not
+# the half hour abseil costs, so it is the one to run while iterating.
+#
+# It earned its place immediately. re2::Regexp keeps its variant fields in
+# anonymous structs inside an anonymous union, with an accessor of the same
+# name on the class for each -- runes_ next to Rune* runes(), hi_ next to
+# int hi(). collides() consulted the field's immediate DeclContext, which is
+# the anonymous struct, where nothing of that name exists; C++ looks the name
+# up in the enclosing class, where the accessor does. Every one of those
+# renames looked free and produced a class declaring a field and a method of
+# one name -- ill-formed, and every later lookup in the class fails with it:
+# 1069 errors from 7 files, all of them that. Neither googletest nor abseil
+# has the shape.
+#
+# What it declines is almost all capture (41 of 57): re2 names a parameter
+# after the member it initialises all over, so member_snake_case's dropped
+# underscore lands on the parameter. That is a real hazard, not a gap.
+#
+# NB: this file is sourced by bash, so values must not contain backticks or the
+# dollar sign.
+REPO=re2
+RULESET=member_snake_case
+EXPECT=pass

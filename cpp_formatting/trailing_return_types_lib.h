@@ -62,6 +62,12 @@ class TrailingReturnCallback
   /// (their text is carried into the "-> type" insertion).  Not owned.
   void setEmitReport(EditReport* Edits) { this->Emit = Edits; }
 
+  /// The files this pass may rewrite (Emit mode).  Without it only the TU's
+  /// own main file is rewritten, which is right for a direct run; in Emit mode
+  /// a header has no action of its own, so it must be edited by the TUs that
+  /// include it.  See isRewritableFile() in tu_driver.h.  Not owned.
+  void setOwnedFiles(const FileSet* Owned) { this->Owned = Owned; }
+
  private:
   /// Rewrites `int foo()` to `auto foo() -> int`.
   void runToTrailing(const clang::FunctionDecl& Func, clang::SourceManager& SM,
@@ -72,6 +78,7 @@ class TrailingReturnCallback
 
   clang::Rewriter& Rewrite;
   ReturnTypeStyle Style;
+  const FileSet* Owned = nullptr;
   LintReport* Report = nullptr;  // null outside Lint mode
   std::string RuleId;
   EditReport* Emit = nullptr;  // non-null in Emit mode

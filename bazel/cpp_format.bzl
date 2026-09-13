@@ -30,8 +30,9 @@ fragments into one file -- no second Bazel dependency needed for a
 compilation database.
 
 A second aspect, `cpp_index_aspect`, builds the symbol index the same way: one
-`cpp_format --emit-index` action per source file writes that file's
-`cpp_index.IndexUnit` (see cpp_formatting/index.proto), and
+`cpp_format --emit-index` action per translation unit writes its
+`cpp_index.IndexUnit` (see cpp_formatting/index.proto) -- the TU's own file
+plus every owned header it includes -- and
 `cpp_index_targets(name, deps)` defines `<name>.index`, whose action merges the
 transitive units into one `Index` with `cpp_format --merge-index`.  Unlike
 `.fix`, merging mutates nothing, so it is an ordinary cached build action and
@@ -61,7 +62,8 @@ CppFormatEditsInfo = provider(
 # sites, which would half-apply the rename. The cost is that declarations
 # living in a textual fragment are not formatted.
 _HDR_EXTS = ["h", "hh", "hpp", "hxx", "h++"]
-_SRC_EXTS = ["cc", "cpp", "cxx", "c++"] + _HDR_EXTS
+_TU_EXTS = ["cc", "cpp", "cxx", "c++"]
+_SRC_EXTS = _TU_EXTS + _HDR_EXTS
 
 def _own_files(ctx, exts, attrs = ("srcs", "hdrs")):
     out = []
@@ -86,6 +88,19 @@ def _own_files(ctx, exts, attrs = ("srcs", "hdrs")):
 
 def _own_sources(ctx):
     return _own_files(ctx, _SRC_EXTS)
+
+# The files that are actually translation units.  A header is not one: C++ has
+# no way to compile a header, only to include it, and parsing one standalone
+# assumes it is self-contained in *this* target's compilation context -- which
+# a build does not guarantee and Bazel does not check without layering_check.
+# protobuf is where that assumption breaks: arena_cleanup.h ends with
+# `#include "google/protobuf/port_def.inc"` while its target depends only on
+# abseil, because every TU that includes it has already pulled :port in; and
+# protobuf_headers globs every header with no deps at all.  So headers are
+# parsed where they are included, by the actions of the targets that include
+# them, and are reachable for rewriting through --owned-files.
+def _own_translation_units(ctx):
+    return _own_files(ctx, _TU_EXTS)
 
 def _record_path(ctx, src):
     # Under <name>.cpp_format/ so two targets' records never collide, and keyed
@@ -112,6 +127,17 @@ def _resource_dir(builtin_headers):
             return f.path[:idx] + "/staging"
     return None
 
+# The target's own `copts`, so the tool parses each file under the same
+# preprocessor conditions the compiler does.  abseil's randen_hwaes.cc is the
+# case: its body sits behind `#if ABSL_HAVE_ACCELERATED_AES`, which only
+# `-maes -msse4.1` from the target's copts turns on, so without them the tool
+# never saw the references it holds and the build broke where the tool had
+# looked at nothing.  A flag that still contains a make variable or a
+# `$(location)` is dropped rather than mis-expanded; `cc_ctx.defines` and
+# `local_defines` already arrive through the compilation context.
+def _rule_copts(ctx):
+    return [c for c in getattr(ctx.rule.attr, "copts", []) if "$(" not in c and "$" + "{" not in c]
+
 def _compile_flags(ctx, cc_toolchain, cc_ctx):
     feature_config = cc_common.configure_features(
         ctx = ctx,
@@ -122,7 +148,7 @@ def _compile_flags(ctx, cc_toolchain, cc_ctx):
     variables = cc_common.create_compile_variables(
         feature_configuration = feature_config,
         cc_toolchain = cc_toolchain,
-        user_compile_flags = ctx.fragments.cpp.copts + ctx.fragments.cpp.cxxopts,
+        user_compile_flags = ctx.fragments.cpp.copts + ctx.fragments.cpp.cxxopts + _rule_copts(ctx),
         include_directories = cc_ctx.includes,
         quote_include_directories = cc_ctx.quote_includes,
         system_include_directories = cc_ctx.system_includes,
@@ -227,6 +253,25 @@ def _aspect_impl(target, ctx):
             OutputGroupInfo(cpp_format_compile_commands = cc_group),
         ]
     mine_headers = depset(direct = _owned_headers(ctx), transitive = [dep_headers])
+
+    # A target with no translation unit of its own -- a header-only library --
+    # emits no records.  Its headers are still propagated as owned, which is
+    # what makes their declarations renameable, and their uses rewritten, in
+    # every TU that includes them.  The one thing lost is a header that *no*
+    # TU in the formatted set includes: nothing parses it, so nothing renames
+    # it -- and nothing renames its members anywhere either, so the result is
+    # less reach, never a half-applied rename.
+    tus = _own_translation_units(ctx)
+    if not tus:
+        return [
+            CppFormatEditsInfo(
+                records = depset(transitive = transitive),
+                headers = mine_headers,
+                compile_commands = mine_cc,
+            ),
+            OutputGroupInfo(cpp_format_compile_commands = cc_group),
+        ]
+
     builtin = ctx.files._builtin_headers
     res_dir = _resource_dir(builtin)
 
@@ -262,7 +307,7 @@ def _aspect_impl(target, ctx):
         compile_args.add("-resource-dir=" + res_dir)
 
     records = []
-    for src in srcs:
+    for src in tus:
         rec = ctx.actions.declare_file(_record_path(ctx, src))
         args = ctx.actions.args()
         args.add("--config", ctx.file._config)
@@ -535,22 +580,26 @@ def cpp_format_targets(name, deps, **kwargs):
 # ---------------------------------------------------------------------------
 
 CppIndexInfo = provider(
-    doc = "Transitive symbol-index state: per-source-file index units.",
+    doc = "Transitive symbol-index state: per-translation-unit index units, and " +
+          "the first-party headers the dep closure owns (indexed by the TUs that " +
+          "include them).",
     fields = {
-        "units": "depset of per-source-file cpp_index.IndexUnit files (binary protobuf)",
+        "units": "depset of per-translation-unit cpp_index.IndexUnit files (binary protobuf)",
+        "headers": "depset of first-party header source files in the dep closure",
     },
 )
 
 def _index_unit_path(ctx, src):
     return ctx.label.name + ".cpp_index/" + src.short_path + ".pb"
 
-# The files whose occurrences a target's index actions record: its own srcs,
-# hdrs *and* textual_hdrs.  The formatter's owned set differs on both ends.
-# Textual headers are included because nothing is rewritten, and an .inc is
-# only ever parsed through its includer -- this is the one place the tool can
-# see what is in it.  The dep closure's headers are left out because every one
-# of them is the main file of its own target's action; recording them from
-# every dependent as well would only give the merge duplicates to drop.
+# The target's own files whose occurrences its index actions record: srcs,
+# hdrs *and* textual_hdrs -- plus, added by the caller, the dep closure's
+# headers, exactly as for the formatter.  A header is not a translation unit
+# (see _own_translation_units), so it is indexed by every TU that includes it,
+# its own target's and its dependents'; the merge dedups what they agree on.
+# Textual headers are the one addition over the formatter's set: nothing is
+# rewritten, and an .inc is only ever parsed through its includer -- this is
+# the one place the tool can see what is in it.
 def _index_owned(ctx):
     out = _own_sources(ctx)
     seen = {f.path: True for f in out}
@@ -562,21 +611,29 @@ def _index_owned(ctx):
     return out
 
 def _index_aspect_impl(target, ctx):
-    dep_units = [
-        d[CppIndexInfo].units
+    dep_infos = [
+        d[CppIndexInfo]
         for d in getattr(ctx.rule.attr, "deps", [])
         if CppIndexInfo in d
     ]
-    transitive = depset(transitive = dep_units)
+    transitive = depset(transitive = [i.units for i in dep_infos])
+    dep_headers = depset(transitive = [i.headers for i in dep_infos])
 
-    # First-party cc_* targets with sources only, as for the formatter.  A
-    # `no-cpp-index` target is skipped; `no-cpp-format` does not apply -- an
-    # index wants the whole repository, formatted or not.
+    # First-party cc_* targets only, as for the formatter.  A `no-cpp-index`
+    # target is skipped and contributes no headers; `no-cpp-format` does not
+    # apply -- an index wants the whole repository, formatted or not.
     if ctx.label.workspace_name != "" or CcInfo not in target:
-        return [CppIndexInfo(units = transitive)]
-    srcs = _own_sources(ctx)
-    if not srcs or "no-cpp-index" in getattr(ctx.rule.attr, "tags", []):
-        return [CppIndexInfo(units = transitive)]
+        return [CppIndexInfo(units = transitive, headers = dep_headers)]
+    if "no-cpp-index" in getattr(ctx.rule.attr, "tags", []):
+        return [CppIndexInfo(units = transitive, headers = dep_headers)]
+    mine_headers = depset(direct = _owned_headers(ctx), transitive = [dep_headers])
+
+    # A header-only target has no translation unit and emits nothing; its
+    # headers are indexed by the TUs that include them (see
+    # _own_translation_units), which is what the propagated set is for.
+    tus = _own_translation_units(ctx)
+    if not tus:
+        return [CppIndexInfo(units = transitive, headers = mine_headers)]
 
     cc_toolchain = find_cc_toolchain(ctx)
     cc_ctx = target[CcInfo].compilation_context
@@ -586,7 +643,7 @@ def _index_aspect_impl(target, ctx):
 
     owned_list = ctx.actions.declare_file(ctx.label.name + ".cpp_index/owned-files.txt")
     owned = ctx.actions.args()
-    owned.add_all(_index_owned(ctx))
+    owned.add_all(depset(direct = _index_owned(ctx), transitive = [dep_headers]))
     owned.set_param_file_format("multiline")
     ctx.actions.write(owned_list, owned)
 
@@ -598,12 +655,12 @@ def _index_aspect_impl(target, ctx):
     if res_dir:
         compile_args.add("-resource-dir=" + res_dir)
 
-    # One action per source file, exactly like the emit-edits actions: parsed
-    # once, cached per file, and every occurrence in this file and the
-    # target's other files recorded against paths relative to the exec root
-    # (so the unit is usable from a remote cache on another machine).
+    # One action per translation unit, exactly like the emit-edits actions:
+    # parsed once, cached per file, and every occurrence in this file and in
+    # every owned header it includes recorded against paths relative to the
+    # exec root (so the unit is usable from a remote cache on another machine).
     units = []
-    for src in srcs:
+    for src in tus:
         unit = ctx.actions.declare_file(_index_unit_path(ctx, src))
         args = ctx.actions.args()
         args.add("--emit-index", unit)
@@ -628,9 +685,9 @@ def _index_aspect_impl(target, ctx):
     manifest = ctx.actions.declare_file(ctx.label.name + ".cpp_index.manifest")
     ctx.actions.write(manifest, "".join([u.path + "\n" for u in units]))
 
-    mine = depset(direct = units, transitive = dep_units)
+    mine = depset(direct = units, transitive = [transitive])
     return [
-        CppIndexInfo(units = mine),
+        CppIndexInfo(units = mine, headers = mine_headers),
         OutputGroupInfo(cpp_index = depset(direct = [manifest], transitive = [mine])),
     ]
 

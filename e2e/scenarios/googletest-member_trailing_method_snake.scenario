@@ -1,32 +1,27 @@
-# Members and methods renamed in one run. The styles are chosen so the two
-# rules cannot land on the same name -- see the ruleset -- and cpp_format now
-# refuses the combinations that can, so this is the shape that gets to run.
+# Members and methods renamed in one run: 3024 edits across 68 files apply with
+# 0 conflicts, //... rebuilds clean, and a second pass has nothing left to do.
+# The styles are chosen so the two rules cannot land on the same name (see the
+# ruleset), and cpp_format refuses the combinations that can.
 #
-# The member half is fine: this found and fixed a real defect in it, where one
-# rule's veto cancelled another rule's dependent-token resolution because the
-# sidecar records had no rule index, so a member's declaration was renamed and
-# its dependent use left behind. googletest's MatcherBase VTable is the case.
+# This is the only scenario that renames member functions, and the trail from
+# 14868 errors is the method half growing up. 11044 once the dependent-token
+# sidecar carried a rule index (one rule's veto had been cancelling another
+# rule's resolution); 3771 once member function templates mapped back to their
+# pattern and the spelling audit started declining every unresolved overload
+# set a template leaves behind (Init(p) with dependent arguments, a
+# using-declaration of a dependent base's member, gmock's MOCK_METHOD argument
+# that only ever exists pasted into gmock_DoThis); 10 once a derived class
+# declaring the new name was checked per use; green once a declaration spelled
+# as an argument of a macro that also pastes with ## was declined outright --
+# ACTION_P3(Plus, foo, bar, baz) makes a member foo and a typedef foo_type that
+# renaming foo would have turned into foo__type.
 #
-# What remains is the method half, and it is not a near miss: 11044 errors.
-# Renaming member functions misses every reference that carries an *unresolved
-# overload set* rather than a resolved declaration. Two shapes dominate:
-# a call inside a template whose arguments are dependent, so overload
-# resolution is deferred and the callee is an UnresolvedMemberExpr rather than
-# a MemberExpr -- gtest-matchers.h calls Init(impl) from a constructor
-# template, and Init is renamed at its declaration but not at the call -- and a
-# using-declaration naming a member of a dependent base, as in
-# using FlatTuple::FlatTupleBase::Get. Both are node kinds the cross-TU
-# dependent-token path does not visit; it covers x.member and Helper<T>::member
-# only. Sample counts: Init 1108, Apply 419, CastImpl 314, Get 164.
-#
-# So this is a real gap in the method scope, not in the combination: the ruleset
-# is sound and the member half of it is green. Promote when the unresolved-
-# overload shapes are handled.
+# Every one of those was found here rather than by inspection. The method
+# names that stay put are declined and reported -- the protocol names the
+# language calls implicitly, and everything the audit could not account for.
 #
 # NB: this file is sourced by bash, so values must not contain backticks or the
 # dollar sign.
 REPO=googletest
 RULESET=member_trailing_method_snake
-EXPECT=known_fail
-EXPECT_FAIL_PHASE=rebuild
-EXPECT_FAIL_REASON='Renaming member functions misses references that carry an unresolved overload set: a call with dependent arguments (UnresolvedMemberExpr, not MemberExpr) and a using-declaration naming a dependent base member. The declaration is renamed and those uses are left spelling the old name. Minimal shape: template <class T> struct B { template <class U> B(U* p) { Init(p); } template <class M> void Init(M&& m); };'
+EXPECT=pass

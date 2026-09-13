@@ -31,6 +31,15 @@ void mergeDependentResolutions(DependentResolutions& Into,
     } else if (R.HasName) {
       recordResolution(Into, Key, R.NewName, R.OldName, R.Length,
                        {R.OwnerFile, R.OwnerOffset});
+    } else if (!R.OldName.empty()) {
+      // Pending: some TU spelled the token, none has resolved it (yet). Carried
+      // by name so the driver and aggregation can tell "never resolved" from
+      // "never seen" -- the former has to decline the name (see nameVetoKey).
+      DependentResolution& T = Into[Key];
+      if (!T.HasName && !T.Vetoed && T.OldName.empty()) {
+        T.OldName = R.OldName;
+        T.Length = R.Length;
+      }
     }
   }
 }

@@ -4,6 +4,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -20,6 +21,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 namespace clang {
+class Preprocessor;
 class ASTConsumer;
 class ASTContext;
 class CompilerInstance;
@@ -36,7 +38,9 @@ class Rewriter;
 // in a .cpp even when the declaration lives in a header that is also in the
 // set. An empty FileSet falls back to the original behaviour (main-file-only
 // collection).
-using FileSet = std::unordered_set<std::string>;
+// FileSet lives in tu_driver.h: it is what an action may rewrite, which the
+// driver and every pass share.
+using ::FileSet;
 
 // ---------------------------------------------------------------------------
 // Rename callback
@@ -210,6 +214,11 @@ class RenameActionFactory : public TUSlotClient {
 /// rewrite (see RenameVetoes), those declarations are dropped from this TU's
 /// rename set before anything is applied, and declarations vetoed by an earlier
 /// TU are never collected in the first place.
+/// \p RenamedNames, when non-null, receives the old spelling of every
+/// declaration this TU set out to rename; the TU driver intersects it with the
+/// dependent tokens no TU resolved to decline those names (see nameVetoKey).
+/// \p PP, when non-null, lets the scan pass read macro definitions, to decline
+/// a declaration spelled as an argument of a macro that pastes with `##`.
 void runRenameRuleOnAST(clang::ASTContext& Ctx, clang::Rewriter& RW,
                         const VariableRenameCallback& CB, VariableScope Scope,
                         const FileSet& CollectFrom,
@@ -218,7 +227,9 @@ void runRenameRuleOnAST(clang::ASTContext& Ctx, clang::Rewriter& RW,
                         DependentResolutions* DepRes = nullptr,
                         EditReport* Edits = nullptr,
                         RenameConflicts* Conflicts = nullptr,
-                        RenameVetoes* Vetoes = nullptr);
+                        RenameVetoes* Vetoes = nullptr,
+                        std::set<std::string>* RenamedNames = nullptr,
+                        clang::Preprocessor* PP = nullptr);
 
 // ---------------------------------------------------------------------------
 // Convenience factories
