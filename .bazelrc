@@ -64,6 +64,12 @@ build:windows --cxxopt=/bigobj
 build:windows --host_cxxopt=/bigobj
 build:windows --host_cxxopt=/Zc:preprocessor
 
+# link.exe reports unresolved externals one line per symbol, which for a failed
+# static link of LLVM runs to well over the 1 MB Bazel prints by default -- the
+# whole diagnostic then gets replaced by "exceeds maximum size ... skipping",
+# leaving a bare "Exit 1120" and nothing to act on.
+build:windows --experimental_ui_max_stdouterr_bytes=33554432
+
 # Silence the MSVC warnings LLVM headers trigger in volume (C4624 alone fired
 # ~10k times per build); LLVM's own CMake build suppresses the same set on
 # MSVC. Kept to warnings actually observed in CI logs.
