@@ -779,7 +779,8 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
       Key = primaryTemplateMethod(MD)->getCanonicalDecl();
       OldName = MD->getName();
     }
-    handle(E->getLocation(), Key, OldName);
+    handle(E->getLocation(), Key, OldName,
+           /*Unqualified=*/E->getQualifier() == nullptr);
     return true;
   }
 
@@ -793,7 +794,13 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
       // Member function calls: `obj.get()`, `ptr->get()`, implicit `this`.
       Key = primaryTemplateMethod(MD)->getCanonicalDecl();
     if (!Key || !E->getMemberDecl()->getDeclName().isIdentifier()) return true;
-    handle(E->getMemberLoc(), Key, E->getMemberDecl()->getName());
+    // `m` alone is an implicit `this->m`, and unqualified lookup finds it -- a
+    // local of the new name would capture it.  Anything with a base or a
+    // qualifier written out (`this->m`, `obj.m`, `Base::m`) cannot be captured.
+    const auto* This = dyn_cast<CXXThisExpr>(E->getBase()->IgnoreImpCasts());
+    const bool Unqualified =
+        This != nullptr && This->isImplicit() && E->getQualifier() == nullptr;
+    handle(E->getMemberLoc(), Key, E->getMemberDecl()->getName(), Unqualified);
     return true;
   }
 
@@ -867,12 +874,18 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
 
  private:
   // One reference site, in whichever mode this pass is running.
-  void handle(SourceLocation Loc, const Decl* Key, StringRef OldName) {
+  // \p Unqualified says the reference finds the member by unqualified name
+  // lookup, so a local of the new name would capture it.  False for anything
+  // written with an explicit qualifier or base (`this->m`, `obj.m`, `S::m`),
+  // for declarations, and for the member name in a mem-initializer or a field
+  // designator -- those are looked up in the class, never in the local scope.
+  void handle(SourceLocation Loc, const Decl* Key, StringRef OldName,
+              bool Unqualified = false) {
     if (!Key || Loc.isInvalid()) return;
     auto It = Renames.find(Key);
     if (It == Renames.end()) return;
     if (Mode == ApplyMode::Scan) {
-      scan(Loc, Key, OldName, It->second);
+      scan(Loc, Key, OldName, It->second, Unqualified);
       return;
     }
     if (!owns(Loc)) return;
@@ -881,7 +894,7 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
 
   // Two ways a reference can make a rename unsafe.
   void scan(SourceLocation Loc, const Decl* Key, StringRef OldName,
-            const std::string& NewName) {
+            const std::string& NewName, bool Unqualified) {
     if (!Vetoes) return;
     // (a) No rewritable spelling, so the reference would keep the old name.
     // This deliberately ignores file ownership: a macro in a header we do not
@@ -902,12 +915,14 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
       veto(Key, OldName, NewName, Reason);
       return;
     }
-    // (b) The token can be rewritten, but would no longer name the member: a
-    // local or parameter of that name is in scope here, so the rewrite silently
-    // rebinds the use.  googletest's OnCallSpec::action_ -> action, inside
-    // WillByDefault(const Action<F>& action), turns `action_ = action` into the
-    // self-assignment `action = action`.  Every enclosing function is checked,
-    // not just the innermost, since a lambda body can name either.
+    // (b) The token can be rewritten, but would no longer name the member: it
+    // is found by unqualified lookup and a local or parameter of the new name
+    // is in scope here, so the rewrite silently rebinds the use.  googletest's
+    // OnCallSpec::action_ -> action, inside WillByDefault(const Action<F>&
+    // action), turns `action_ = action` into the self-assignment `action =
+    // action`.  Every enclosing function is checked, not just the innermost,
+    // since a lambda body can name either.
+    if (!Unqualified) return;
     for (const std::set<std::string>& Frame : LocalNames) {
       if (Frame.find(NewName) == Frame.end()) continue;
       veto(Key, OldName, NewName,

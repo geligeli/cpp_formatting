@@ -1174,3 +1174,28 @@ TEST(RenameUnsafeNewName, ShadowInAnUnrelatedFunctionDoesNotBlock) {
       "};\n"
       "void elsewhere() { int action = 1; (void)action; }\n");
 }
+
+TEST(RenameUnsafeNewName, QualifiedUseIsNotCapturedByALocal) {
+  // Only unqualified lookup can be captured.  `this->action_` names the member
+  // whatever else is in scope, so the parameter does not block the rename --
+  // the distinction that keeps this check from refusing most of googletest.
+  EXPECT_EQ(rewriteMember("struct S {\n"
+                          "  int action_;\n"
+                          "  void f(const int& action) { this->action_ = "
+                          "action; }\n"
+                          "};\n",
+                          renameOne("action_", "action")),
+            "struct S {\n"
+            "  int action;\n"
+            "  void f(const int& action) { this->action = action; }\n"
+            "};\n");
+}
+
+TEST(RenameUnsafeNewName, MemberOnAnotherObjectIsNotCapturedByALocal) {
+  EXPECT_EQ(rewriteMember("struct S { int action_; };\n"
+                          "void f(S& s, const int& action) { s.action_ = "
+                          "action; }\n",
+                          renameOne("action_", "action")),
+            "struct S { int action; };\n"
+            "void f(S& s, const int& action) { s.action = action; }\n");
+}
