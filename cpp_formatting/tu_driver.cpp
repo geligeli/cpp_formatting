@@ -36,6 +36,7 @@ void TUSlot::clearOutputs() {
   Vetoes.clear();
   for (DependentResolutions& M : DepRes) M.clear();
   Report.clear();
+  IndexBytes.clear();
   Diagnostics.clear();
   Rc = 0;
 }

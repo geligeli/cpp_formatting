@@ -284,6 +284,38 @@ auto RenameAllMemberFunctions(VariableRenameCallback CB,
     -> std::unique_ptr<RenameActionFactory>;
 
 // ---------------------------------------------------------------------------
+// Dependent tokens (shared with the symbol index)
+// ---------------------------------------------------------------------------
+
+/// A template-dependent token with a spelling of its own: a member access
+/// through a template parameter (`t.m`, `t.f(x)`), a qualified name whose
+/// lookup is deferred to instantiation (`Helper<T>::k`), or an unqualified
+/// call with dependent arguments (`f(t)`).  \p Loc is the token as written
+/// (for a macro argument, the expansion location; the spelling is at the call
+/// site); a token spelled in a macro body or formed by `##` has no spelling of
+/// its own and is not reported.
+struct DependentToken {
+  clang::SourceLocation Loc;
+  std::string Name;
+};
+
+/// Every dependent token in the TU's pattern code, in any file.
+auto collectDependentTokens(clang::ASTContext& Ctx)
+    -> std::vector<DependentToken>;
+
+/// Walks the TU's template instantiations and, for every resolved reference
+/// whose *spelling* location \p IsToken accepts, calls \p OnBinding with that
+/// spelling and the declaration it resolved to -- mapped back to the template
+/// pattern when it is an instantiated member or function, so the binding
+/// names the declaration as written.  Nothing is called for a token no
+/// instantiation in this TU resolves.
+void forEachDependentBinding(
+    clang::ASTContext& Ctx,
+    llvm::function_ref<bool(clang::SourceLocation)> IsToken,
+    llvm::function_ref<void(clang::SourceLocation, const clang::Decl*)>
+        OnBinding);
+
+// ---------------------------------------------------------------------------
 // Source ordering helper
 // ---------------------------------------------------------------------------
 

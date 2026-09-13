@@ -5,6 +5,8 @@
 #include "clang/Tooling/CommonOptionsParser.h"
 #include "cpp_formatting/const_placement_lib.h"
 #include "cpp_formatting/cpp_format_lib.h"
+#include "cpp_formatting/cpp_index_lib.h"
+#include "cpp_formatting/cpp_index_merge.h"
 #include "cpp_formatting/embedded_clang_resource.h"
 #include "cpp_formatting/lint_lib.h"
 #include "cpp_formatting/naming_convention.h"
@@ -131,6 +133,16 @@ static cl::opt<std::string> EmitEditsOpt(
              "aggregation. Modifies no source files."),
     cl::init(""), cl::cat(CppFormatCategory));
 
+static cl::opt<std::string> EmitIndexOpt(
+    "emit-index",
+    cl::desc("Index mode: parse every translation unit and write one "
+             "cpp_index.IndexUnit (binary protobuf, see index.proto) to the "
+             "given file -- every symbol's declarations, definitions and "
+             "references, as byte ranges, in the main file and every owned "
+             "file. Runs no formatting pass; combine the units with "
+             "--merge-index."),
+    cl::init(""), cl::cat(CppFormatCategory));
+
 static cl::opt<std::string> OwnedFilesOpt(
     "owned-files",
     cl::desc("File holding newline-separated paths that this invocation owns "
@@ -219,6 +231,111 @@ auto runAggregate(int argc, const char** argv) -> int {
   return runEditAggregation(Inputs, Root, Apply, Check);
 }
 
+// Index modes: `--merge-index` unions per-TU index units (from --emit-index)
+// into one repository index; `--dump-index` prints a unit or an index, or
+// answers a (file, offset) lookup against it.  Like --aggregate, neither
+// parses any C++, so both are dispatched before CommonOptionsParser and parse
+// their own small flag sets by hand.
+auto parseFormatFlag(StringRef Value, IndexFormat& Out) -> bool {
+  if (parseIndexFormat(Value, Out)) return true;
+  llvm::errs() << "Unknown index format '" << Value
+               << "'. Valid formats: binary, text, json\n";
+  return false;
+}
+
+auto runMergeIndexCli(int argc, const char** argv) -> int {
+  std::string Output;
+  IndexFormat Format = IndexFormat::Binary;
+  std::vector<std::string> Inputs;
+  for (int i = 1; i < argc; ++i) {
+    StringRef Arg(argv[i]);
+    if (Arg == "--merge-index") continue;
+    if (Arg == "--output" || Arg == "-o") {
+      if (i + 1 >= argc) {
+        llvm::errs() << Arg << " requires a file argument\n";
+        return 2;
+      }
+      Output = argv[++i];
+    } else if (Arg.starts_with("--output=")) {
+      Output = Arg.drop_front(std::string("--output=").size()).str();
+    } else if (Arg.starts_with("--format=")) {
+      if (!parseFormatFlag(Arg.drop_front(std::string("--format=").size()),
+                           Format))
+        return 2;
+    } else if (Arg == "--records-from") {
+      if (i + 1 >= argc) {
+        llvm::errs() << "--records-from requires a file argument\n";
+        return 2;
+      }
+      if (!appendRecordListFrom(argv[++i], Inputs)) return 2;
+    } else if (Arg.starts_with("--records-from=")) {
+      if (!appendRecordListFrom(
+              Arg.drop_front(std::string("--records-from=").size()), Inputs))
+        return 2;
+    } else if (Arg.starts_with("-")) {
+      llvm::errs() << "unknown --merge-index flag '" << Arg
+                   << "' (expected --output=<file>, --format=<binary|text|"
+                      "json>, or --records-from=<file>)\n";
+      return 2;
+    } else {
+      Inputs.push_back(Arg.str());
+    }
+  }
+  if (Output.empty()) {
+    llvm::errs() << "--merge-index requires --output=<file>\n";
+    return 2;
+  }
+  if (Inputs.empty()) {
+    llvm::errs() << "--merge-index requires one or more <unit.pb> inputs "
+                    "(positional, or listed in --records-from=<file>)\n";
+    return 2;
+  }
+  return runMergeIndex(Inputs, Output, Format);
+}
+
+auto runDumpIndexCli(int argc, const char** argv) -> int {
+  std::string Input;
+  IndexFormat Format = IndexFormat::Text;
+  std::optional<std::pair<std::string, uint32_t>> Lookup;
+  for (int i = 1; i < argc; ++i) {
+    StringRef Arg(argv[i]);
+    if (Arg == "--dump-index") continue;
+    if (Arg.starts_with("--format=")) {
+      if (!parseFormatFlag(Arg.drop_front(std::string("--format=").size()),
+                           Format))
+        return 2;
+    } else if (Arg.starts_with("--lookup=")) {
+      // <path>:<offset>; the last colon separates them, so a path may hold
+      // one.
+      StringRef Spec = Arg.drop_front(std::string("--lookup=").size());
+      const size_t Colon = Spec.rfind(':');
+      uint32_t Offset = 0;
+      if (Colon == StringRef::npos || Colon == 0 ||
+          Spec.drop_front(Colon + 1).getAsInteger(10, Offset)) {
+        llvm::errs() << "--lookup expects <path>:<byte offset>, got '" << Spec
+                     << "'\n";
+        return 2;
+      }
+      Lookup = std::make_pair(Spec.take_front(Colon).str(), Offset);
+    } else if (Arg.starts_with("-")) {
+      llvm::errs() << "unknown --dump-index flag '" << Arg
+                   << "' (expected --format=<binary|text|json> or "
+                      "--lookup=<path>:<offset>)\n";
+      return 2;
+    } else if (!Input.empty()) {
+      llvm::errs() << "--dump-index takes exactly one <index.pb> input\n";
+      return 2;
+    } else {
+      Input = Arg.str();
+    }
+  }
+  if (Input.empty()) {
+    llvm::errs() << "--dump-index requires an <index.pb> input\n";
+    return 2;
+  }
+  return runDumpIndex(Input, Format, Lookup, llvm::outs());
+}
+
 void insertRealPath(FileSet& FS, const std::string& P) {
   SmallString<256> Real;
   if (!sys::fs::real_path(P, Real))
@@ -261,10 +378,14 @@ bool addOwnedFilesFrom(StringRef ListFile, FileSet& FS) {
 // ---------------------------------------------------------------------------
 
 auto main(int argc, const char** argv) -> int {
-  // Aggregate mode is a distinct sub-tool that does not use the LibTooling
-  // compilation-database machinery; dispatch it before CommonOptionsParser.
-  for (int i = 1; i < argc; ++i)
-    if (StringRef(argv[i]) == "--aggregate") return runAggregate(argc, argv);
+  // Aggregate and the two index sub-tools do not use the LibTooling
+  // compilation-database machinery; dispatch them before CommonOptionsParser.
+  for (int i = 1; i < argc; ++i) {
+    const StringRef Arg(argv[i]);
+    if (Arg == "--aggregate") return runAggregate(argc, argv);
+    if (Arg == "--merge-index") return runMergeIndexCli(argc, argv);
+    if (Arg == "--dump-index") return runDumpIndexCli(argc, argv);
+  }
 
   auto ExpectedParser =
       CommonOptionsParser::create(argc, argv, CppFormatCategory);
@@ -275,6 +396,36 @@ auto main(int argc, const char** argv) -> int {
   CommonOptionsParser& OptionsParser = ExpectedParser.get();
   const std::vector<std::string>& SourcePaths =
       OptionsParser.getSourcePathList();
+
+  // Index mode: parse every TU and write one IndexUnit.  No formatting pass
+  // runs, so no config is read and none of the rewrite/lint flags applies --
+  // it is handled before the config block, whose "nothing to do" check would
+  // otherwise reject a config-less run.
+  if (!EmitIndexOpt.empty()) {
+    if (!ConfigFile.empty() || InPlace || LintOpt || FormatOpt != "text" ||
+        !EmitEditsOpt.empty() || TrailingReturnOpt || !ReturnTypesOpt.empty() ||
+        !ConstPlacementOpt.empty() || !NormScopeOpt.empty() ||
+        !NormStyleOpt.empty()) {
+      llvm::errs() << "--emit-index runs no formatting pass and cannot be "
+                      "combined with --config, a rule flag, --in-place, "
+                      "--lint/--format or --emit-edits\n";
+      return 1;
+    }
+    // The owned set decides which files' occurrences are recorded besides
+    // the main file's: every source given, plus --owned-files.
+    FileSet Files = buildFileSet(SourcePaths);
+    if (!OwnedFilesOpt.empty() && !addOwnedFilesFrom(OwnedFilesOpt, Files))
+      return 1;
+    const std::string ResourceDir = ensureClangResourceDir();
+    IndexActionFactory Factory(std::move(Files));
+    TUDriverOptions DriverOpts;
+    DriverOpts.Jobs = JobsOpt;
+    if (int rc = runTranslationUnits(
+            OptionsParser.getCompilations(), SourcePaths,
+            makeStandardArgumentsAdjuster(ResourceDir), DriverOpts, Factory))
+      return rc;
+    return Factory.writeUnit(EmitIndexOpt) ? 0 : 1;
+  }
 
   // Build config: from YAML file if --config given, else from CLI flags.
   Config cfg;
