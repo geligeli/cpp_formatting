@@ -480,6 +480,22 @@ static const Decl* memberExprKey(const MemberExpr* E) {
   return nullptr;
 }
 
+// The canonical rename-map key for what a DeclRefExpr refers to, or null if it
+// is not one of the kinds we rename.  Mirrors the dispatch in
+// ApplyRenamesVisitor::VisitDeclRefExpr.
+static const Decl* declRefKey(const DeclRefExpr* E) {
+  const ValueDecl* D = E->getDecl();
+  if (!D->getDeclName().isIdentifier()) return nullptr;
+  if (const auto* VD = dyn_cast<VarDecl>(D))
+    return VD->isStaticDataMember()
+               ? primaryTemplateStaticMember(VD)->getCanonicalDecl()
+               : VD->getCanonicalDecl();
+  if (const auto* FD = dyn_cast<FieldDecl>(D)) return primaryTemplateMember(FD);
+  if (const auto* MD = dyn_cast<CXXMethodDecl>(D))
+    return primaryTemplateMethod(MD)->getCanonicalDecl();
+  return nullptr;
+}
+
 // Pass A (cheap, no instantiations): find the locations of template-dependent
 // member tokens (`x.val` where x is dependent) that live in files we own.  If
 // none exist we can skip the expensive instantiation walk of Pass B entirely.
@@ -497,6 +513,17 @@ class DependentTokenCollector
     // TYPED_TEST is the common shape.  ownedKey() keys by the spelling, so the
     // recorder and the applier agree on the same location.  Only a token with
     // no spelling of its own (macro body, ## paste) is skipped.
+    if (!rewriteLocFor(Loc, SM).isValid()) return true;
+    if (auto Key = ownedKey(Loc, SM, CollectFrom)) Locs.insert(*Key);
+    return true;
+  }
+
+  // `Helper<T>::member` -- a qualified *name* whose lookup is deferred to
+  // instantiation, not a member access on an object.  Same problem and same
+  // treatment as `x.member`: the token is spelled here, and which entity it
+  // names is only learned from an instantiation, usually in another TU.
+  bool VisitDependentScopeDeclRefExpr(DependentScopeDeclRefExpr* E) {
+    SourceLocation Loc = E->getLocation();
     if (!rewriteLocFor(Loc, SM).isValid()) return true;
     if (auto Key = ownedKey(Loc, SM, CollectFrom)) Locs.insert(*Key);
     return true;
@@ -541,6 +568,28 @@ class RecordDependentResolutionsVisitor
     auto It = Renames.find(MemberKey);
     if (It != Renames.end()) {
       std::pair<std::string, unsigned> Owner = renameOwnerKey(MemberKey, SM);
+      recordResolution(DepRes, *Key, It->second, Old, Old.size(),
+                       {relativizeToCwd(Owner.first), Owner.second});
+    } else {
+      vetoResolution(DepRes, *Key);
+    }
+    return true;
+  }
+
+  // The resolved form of a qualified dependent name: in an instantiation
+  // `Helper<T>::member` becomes an ordinary DeclRefExpr whose location still
+  // points at the token in the pattern.
+  bool VisitDeclRefExpr(DeclRefExpr* E) {
+    SourceLocation Loc = E->getLocation();
+    if (!rewriteLocFor(Loc, SM).isValid()) return true;
+    auto Key = ownedKey(Loc, SM, CollectFrom);
+    if (!Key || DependentLocs.find(*Key) == DependentLocs.end()) return true;
+    const Decl* RefKey = declRefKey(E);
+    if (!RefKey) return true;
+    llvm::StringRef Old = E->getDecl()->getName();
+    auto It = Renames.find(RefKey);
+    if (It != Renames.end()) {
+      std::pair<std::string, unsigned> Owner = renameOwnerKey(RefKey, SM);
       recordResolution(DepRes, *Key, It->second, Old, Old.size(),
                        {relativizeToCwd(Owner.first), Owner.second});
     } else {
@@ -743,6 +792,24 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
     if (It == DepRes->end() || It->second.Vetoed || !It->second.HasName)
       return true;
     const IdentifierInfo* II = E->getMember().getAsIdentifierInfo();
+    if (!II) return true;
+    renameAt(Loc, nullptr, II->getName(), It->second.NewName);
+    return true;
+  }
+
+  // The qualified-name counterpart (`Helper<T>::member`).  Same deal: rewritten
+  // from the resolution the instantiating TUs recorded, in its own main file.
+  bool VisitDependentScopeDeclRefExpr(DependentScopeDeclRefExpr* E) {
+    if (Mode == ApplyMode::Scan) return true;
+    if (!DepRes || Edits) return true;
+    SourceLocation Loc = E->getLocation();
+    if (!owns(Loc)) return true;
+    auto Key = ownedKey(Loc, SM, CollectFrom);
+    if (!Key) return true;
+    auto It = DepRes->find(*Key);
+    if (It == DepRes->end() || It->second.Vetoed || !It->second.HasName)
+      return true;
+    const IdentifierInfo* II = E->getDeclName().getAsIdentifierInfo();
     if (!II) return true;
     renameAt(Loc, nullptr, II->getName(), It->second.NewName);
     return true;

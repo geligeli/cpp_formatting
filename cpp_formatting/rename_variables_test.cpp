@@ -1061,3 +1061,65 @@ TEST(RenameNestedTemplateClass,
             "template <> struct Box<int> { int otherValueX; };\n"
             "int use() { Box<int> b{1}; return b.otherValueX; }\n");
 }
+
+// ---------------------------------------------------------------------------
+// Qualified dependent names.  `Helper<T>::member` is a
+// DependentScopeDeclRefExpr
+// -- a dependent *name*, not a member access on an object -- so it needs the
+// same cross-TU resolution `x.member` gets.
+// ---------------------------------------------------------------------------
+
+TEST(RenameQualifiedDependentName, StaticDataMemberIsRenamed) {
+  // gtest-internal.h's `&(TypeIdHelper<T>::dummy_)` shape.
+  EXPECT_EQ(rewriteMember(
+                "template <class T> struct Helper { static int dummyValue; };\n"
+                "template <class T> int Helper<T>::dummyValue = 0;\n"
+                "template <class T> int* get() { return "
+                "&Helper<T>::dummyValue; }\n"
+                "int* use() { return get<int>(); }\n",
+                renameOne("dummyValue", "dummy_value")),
+            "template <class T> struct Helper { static int dummy_value; };\n"
+            "template <class T> int Helper<T>::dummy_value = 0;\n"
+            "template <class T> int* get() { return "
+            "&Helper<T>::dummy_value; }\n"
+            "int* use() { return get<int>(); }\n");
+}
+
+TEST(RenameQualifiedDependentName, StaticMemberFunctionIsRenamed) {
+  EXPECT_EQ(rewriteMethod("template <class T> struct Helper { static int "
+                          "computeIt() { return 0; } };\n"
+                          "template <class T> int get() { return "
+                          "Helper<T>::computeIt(); }\n"
+                          "int use() { return get<int>(); }\n",
+                          renameOne("computeIt", "compute_it")),
+            "template <class T> struct Helper { static int compute_it() { "
+            "return 0; } };\n"
+            "template <class T> int get() { return "
+            "Helper<T>::compute_it(); }\n"
+            "int use() { return get<int>(); }\n");
+}
+
+TEST(RenameQualifiedDependentName, TwoInstantiationsAgree) {
+  EXPECT_EQ(rewriteMember(
+                "template <class T> struct Helper { static int dummyValue; };\n"
+                "template <class T> int Helper<T>::dummyValue = 0;\n"
+                "template <class T> int get() { return Helper<T>::dummyValue; "
+                "}\n"
+                "int use() { return get<int>() + get<char>(); }\n",
+                renameOne("dummyValue", "dummy_value")),
+            "template <class T> struct Helper { static int dummy_value; };\n"
+            "template <class T> int Helper<T>::dummy_value = 0;\n"
+            "template <class T> int get() { return Helper<T>::dummy_value; }\n"
+            "int use() { return get<int>() + get<char>(); }\n");
+}
+
+TEST(RenameQualifiedDependentName, UninstantiatedLeftAlone) {
+  // Nothing instantiates get(), so no instantiation resolves the token and it
+  // is left alone -- the same bound the member-access path has.
+  EXPECT_EQ(rewriteMember(
+                "template <class T> struct Helper { static int dummyValue; };\n"
+                "template <class H> int get() { return H::dummyValue; }\n",
+                renameOne("dummyValue", "dummy_value")),
+            "template <class T> struct Helper { static int dummy_value; };\n"
+            "template <class H> int get() { return H::dummyValue; }\n");
+}
