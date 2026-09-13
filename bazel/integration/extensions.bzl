@@ -89,21 +89,30 @@ _release = tag_class(attrs = {
 })
 
 def _ext_impl(mctx):
-    version = None
-    base_url = "https://github.com/geligeli/cpp_formatting/releases/download"
-    sha = {}
+    # `@cpp_format_bin` is one repo shared by every module that uses this
+    # extension, so exactly one `release()` tag can win -- and it must be the
+    # **root** module's.  When the kit is imported by URL, cpp_formatting itself
+    # is a dependency module whose own MODULE.bazel also calls `release()`; a
+    # last-tag-wins loop lets that stale pin silently replace the consumer's,
+    # which then downloads a binary older than the aspect that drives it (an
+    # older binary rejects `--owned-files`).  Same root-vs-dependency trap as
+    # `_config`'s `@@//:cpp_format.yaml` default in cpp_format.bzl.
+    root = None
+    dep = None
     for mod in mctx.modules:
         for r in mod.tags.release:
-            version = r.version
-            base_url = r.base_url
-            sha = r.sha256
-    if not version:
+            if mod.is_root:
+                root = r
+            elif dep == None:
+                dep = r
+    rel = root or dep
+    if rel == None:
         fail("cpp_format: add `cpp_format.release(version = ...)` to MODULE.bazel")
     _binary_repo(
         name = "cpp_format_bin",
-        version = version,
-        base_url = base_url,
-        sha256 = sha,
+        version = rel.version,
+        base_url = rel.base_url,
+        sha256 = rel.sha256,
     )
 
 # use_extension(...) target in the consumer's MODULE.bazel.

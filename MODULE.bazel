@@ -21,7 +21,7 @@ use_repo(llvm, "llvm-project", "llvm-raw", "llvm_zlib", "llvm_zstd")
 
 cpp_format = use_extension("//bazel/integration:extensions.bzl", "cpp_format")
 cpp_format.release(
-    version = "20260721-eec734d",
+    version = "20260913-5ea87d3",
     # Optional but recommended for reproducible CI — pin per-asset hashes:
     # sha256 = {"cpp_format-linux-x86_64": "…"},
 )
