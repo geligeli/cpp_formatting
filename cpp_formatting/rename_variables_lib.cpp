@@ -101,8 +101,24 @@ bool matchesScope(const NamedDecl* D, VariableScope Scope) {
 // collected from the pattern) while every use in an instantiation was skipped,
 // and dependent uses were vetoed for binding to a member "not being renamed".
 static const CXXRecordDecl* instantiationPattern(const CXXRecordDecl* RD) {
-  if (const auto* Spec = dyn_cast<ClassTemplateSpecializationDecl>(RD))
-    return Spec->getSpecializedTemplate()->getTemplatedDecl();
+  if (const auto* Spec = dyn_cast<ClassTemplateSpecializationDecl>(RD)) {
+    // An explicit specialization is not an instantiation: its members are
+    // written out, and are their own pattern.  Mapping them anywhere would be
+    // matching two unrelated member lists by position.
+    const TemplateSpecializationKind Kind =
+        Spec->getTemplateSpecializationKind();
+    if (Kind == TSK_Undeclared || Kind == TSK_ExplicitSpecialization)
+      return nullptr;
+    // An instantiation of a *partial* specialization must map back to that
+    // specialization's own members, not the primary template's: they are
+    // different classes with different member lists, so matching by index
+    // across them rebinds a use to an unrelated member.
+    auto From = Spec->getSpecializedTemplateOrPartial();
+    if (const auto* Partial =
+            dyn_cast<ClassTemplatePartialSpecializationDecl*>(From))
+      return Partial;
+    return cast<ClassTemplateDecl*>(From)->getTemplatedDecl();
+  }
   return RD->getInstantiatedFromMemberClass();
 }
 

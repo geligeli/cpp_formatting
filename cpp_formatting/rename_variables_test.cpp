@@ -1025,3 +1025,39 @@ TEST(RenameNestedTemplateClass, MethodAndStaticMemberAlreadyMapBack) {
                 .find("Outer<int>::Inner::shared_count"),
             std::string::npos);
 }
+
+TEST(RenameNestedTemplateClass, PartialSpecializationFieldsAreNotCrossMatched) {
+  // A partial specialization is a different class with its own member list.
+  // Matching its fields by index against the *primary* template rebinds uses to
+  // an unrelated member -- `a.otherValue` became `a.primary_field` -- which is
+  // a miscompile, not a missed rename.
+  EXPECT_EQ(rewriteMember("template <class T> struct Action { int "
+                          "primaryField; };\n"
+                          "template <class T> struct Action<T*> {\n"
+                          "  int otherValue;\n"
+                          "  explicit Action(int v) : otherValue(v) {}\n"
+                          "};\n"
+                          "int use() { Action<int*> a(1); return a.otherValue; "
+                          "}\n",
+                          addSuffix("X")),
+            "template <class T> struct Action { int primaryFieldX; };\n"
+            "template <class T> struct Action<T*> {\n"
+            "  int otherValueX;\n"
+            "  explicit Action(int v) : otherValueX(v) {}\n"
+            "};\n"
+            "int use() { Action<int*> a(1); return a.otherValueX; }\n");
+}
+
+TEST(RenameNestedTemplateClass,
+     ExplicitSpecializationFieldsAreTheirOwnPattern) {
+  // An explicit specialization is not an instantiation at all: its members are
+  // written out, so they must not be mapped onto the primary template's.
+  EXPECT_EQ(rewriteMember("template <class T> struct Box { int primaryField; "
+                          "};\n"
+                          "template <> struct Box<int> { int otherValue; };\n"
+                          "int use() { Box<int> b{1}; return b.otherValue; }\n",
+                          addSuffix("X")),
+            "template <class T> struct Box { int primaryFieldX; };\n"
+            "template <> struct Box<int> { int otherValueX; };\n"
+            "int use() { Box<int> b{1}; return b.otherValueX; }\n");
+}
