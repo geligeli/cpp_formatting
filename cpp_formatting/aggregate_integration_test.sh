@@ -2,7 +2,10 @@
 # Integration tests for the per-TU emit + aggregate pipeline:
 #   * `cpp_format --emit-edits=<records.json> ...` (per-TU record emission)
 #   * `cpp_format --aggregate [--check|--apply] <records.json>...`
-#   * equivalence with the standalone `aggregate_edits` binary.
+#   * equivalence with the standalone `aggregate_edits` binary
+#   * the per-source-file shape the Bazel aspect runs: one emit invocation per
+#     file, told via --owned-files that the target's other files are
+#     renameable, and record lists passed with --records-from.
 #
 # Exercises the cross-TU template-dependent-token path: a header-only template
 # whose member token is resolved from the instantiating .cpp's records.
@@ -83,6 +86,48 @@ grep -q '+  int item_count;' diff_folded.patch \
 grep -q '+  return w.item_count;' diff_folded.patch \
   || fail "aggregate: cross-TU dependent token not rewritten in diff"
 echo "PASS: cpp_format --aggregate diff matches aggregate_edits (incl. dependent token)"
+
+# ---------------------------------------------------------------------------
+# Test 1b — one emit action per source file, as the Bazel aspect runs them
+#
+# Each invocation parses exactly one file and is told via --owned-files that
+# every file of the target is renameable.  The records must merge to the same
+# change as one invocation over the whole target: the .cpp's records carry the
+# dependent-token resolution, the header's action rewrites the declaration, and
+# aggregation joins them.  The list of records goes through --records-from,
+# which is how the rules pass a repository's worth of them.
+# ---------------------------------------------------------------------------
+realpath widget.cpp > owned.txt
+realpath widget.h >> owned.txt
+"$cpp_format" --config=cpp_format.yaml --owned-files=owned.txt \
+  --emit-edits=pf_widget_cpp.json widget.cpp -- -x c++ -std=c++17 -I.
+"$cpp_format" --config=cpp_format.yaml --owned-files=owned.txt \
+  --emit-edits=pf_widget_h.json widget.h -- -x c++ -std=c++17 -I.
+# The header's dependent token shows up in the .cpp's records only as a
+# resolution (the "resolutions" sidecar names the token's file), never as an
+# edit: each action rewrites its own file alone.
+if sed -n '/"edits"/,/"resolutions"/p' pf_widget_cpp.json | grep -q '"file": ".*widget\.h"'; then
+  fail "per-file: the .cpp's action emitted edits for the header"
+fi
+sed -n '/"resolutions"/,/"vetoes"/p' pf_widget_cpp.json | grep -q '"file": ".*widget\.h"' \
+  || fail "per-file: the .cpp's action recorded no dependent-token resolution"
+printf '%s\n\n  %s  \n' pf_widget_cpp.json pf_widget_h.json > records.txt
+"$cpp_format" --aggregate --root="$tmpdir" --records-from=records.txt > diff_perfile.patch
+diff -u diff_folded.patch diff_perfile.patch \
+  || fail "per-file: records from one action per file merge differently than one action per target"
+"$aggregate_edits" --root="$tmpdir" --records-from=records.txt > diff_perfile_standalone.patch
+diff -u diff_folded.patch diff_perfile_standalone.patch \
+  || fail "per-file: aggregate_edits --records-from disagrees"
+"$cpp_format" --aggregate --root="$tmpdir" --records-from records.txt pf_widget_h.json \
+  > diff_perfile_dup.patch
+diff -u diff_folded.patch diff_perfile_dup.patch \
+  || fail "per-file: a record listed twice should dedup, not conflict"
+set +e
+"$cpp_format" --aggregate --root="$tmpdir" --records-from=missing.txt >/dev/null 2>&1
+rc=$?
+set -e
+[[ $rc -eq 2 ]] || fail "per-file: a missing record list should exit 2, got $rc"
+echo "PASS: one emit action per source file merges to the same change (via --records-from)"
 
 # ---------------------------------------------------------------------------
 # Test 2 — `--aggregate --check` reports violations and exits 1
@@ -261,3 +306,18 @@ grep -q '+  int other_count;' veto.patch \
 diff -u veto.patch veto_standalone.patch \
   || fail "veto: standalone aggregate_edits disagrees with --aggregate"
 echo "PASS: a veto from one target suppresses another target's edits"
+
+# The same with the library split into one action per file, as the aspect runs
+# it: the header's action renames the declaration, counter.cpp's action renames
+# its use, main.cpp's action vetoes, and aggregation still drops all of it.
+realpath counter.cpp > lib_owned.txt
+realpath counter.h >> lib_owned.txt
+"$cpp_format" --config=cpp_format.yaml --owned-files=lib_owned.txt \
+  --emit-edits=pf_counter_cpp.json counter.cpp -- -x c++ -std=c++17 -I.
+"$cpp_format" --config=cpp_format.yaml --owned-files=lib_owned.txt \
+  --emit-edits=pf_counter_h.json counter.h -- -x c++ -std=c++17 -I.
+"$cpp_format" --aggregate --root="$tmpdir/macro" \
+  pf_counter_cpp.json pf_counter_h.json main.json > veto_perfile.patch
+diff -u veto.patch veto_perfile.patch \
+  || fail "veto: per-file records merge differently than per-target records"
+echo "PASS: the cross-target veto holds with one action per file"

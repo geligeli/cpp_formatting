@@ -187,6 +187,13 @@ auto aggregateEdits(
     std::map<std::string, std::string>& Out,
     std::vector<std::string>& Conflicts) -> bool;
 
+// Appends every non-blank line of \p ListFile -- a newline-separated list of
+// record files, as the Bazel rules and cpp_format.sh write it: a repository's
+// worth of per-file records does not fit on a command line -- to \p Out.
+// Returns false, after printing a diagnostic, when the file cannot be read.
+auto appendRecordListFrom(llvm::StringRef ListFile,
+                          std::vector<std::string>& Out) -> bool;
+
 // Shared command-line aggregation entry point used by both the standalone
 // `aggregate_edits` binary and `cpp_format --aggregate`.  Reads and parses
 // every record file named in \p InputPaths, merges them, and then:

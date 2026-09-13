@@ -28,13 +28,26 @@ static cl::opt<std::string> Root(
     "root",
     cl::desc("Directory that record file keys resolve against (default: cwd)."),
     cl::init(""));
+static cl::list<std::string> RecordsFrom(
+    "records-from",
+    cl::desc("File listing record files, one per line (may repeat). A "
+             "repository's worth of per-file records does not fit on a "
+             "command line, so the Bazel rules pass them this way."),
+    cl::value_desc("file"));
 static cl::list<std::string> Inputs(cl::Positional,
                                     cl::desc("<records.json>..."),
-                                    cl::OneOrMore);
+                                    cl::ZeroOrMore);
 
 int main(int argc, char** argv) {
   cl::ParseCommandLineOptions(argc, argv,
                               "cpp_format per-TU edit-record aggregator\n");
   std::vector<std::string> InputPaths(Inputs.begin(), Inputs.end());
+  for (const std::string& List : RecordsFrom)
+    if (!appendRecordListFrom(List, InputPaths)) return 2;
+  if (InputPaths.empty()) {
+    llvm::errs() << "aggregate_edits: no record files given (positional, or "
+                    "listed in --records-from=<file>)\n";
+    return 2;
+  }
   return runEditAggregation(InputPaths, Root, Apply, Check);
 }

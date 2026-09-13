@@ -2,20 +2,21 @@
 
 Vendored integration kit — see `extensions.bzl` for how the binary is fetched.
 
-A per-target **aspect** derives each `cc_*` target's compile flags from its
-`CcInfo.compilation_context` + the C++ toolchain and runs `cpp_format
---emit-edits`, declaring the target's sources **and its transitive headers** as
-action inputs.  Declaring the transitive headers is what makes every include
-reachable under sandboxing — no `compile_commands.json` needed.  The prebuilt
+An **aspect** derives each `cc_*` target's compile flags from its
+`CcInfo.compilation_context` + the C++ toolchain and runs one `cpp_format
+--emit-edits` action per source file, declaring that file **and the target's
+transitive headers** as action inputs.  Declaring the transitive headers is
+what makes every include reachable under sandboxing — no
+`compile_commands.json` needed.  The prebuilt
 binary embeds and self-extracts the Clang builtin headers, so unlike the
 from-source build this kit stages no resource directory of its own.
 
-Each action parses its target's sources on several threads (`--jobs`, sized by
-the number of sources and declared to Bazel via `resource_set`) and writes a
-structured edit-record JSON file (offset-level edits plus a
-template-dependent-token resolution sidecar).  `cpp_format --aggregate` merges
-the per-target records into one repository change, resolving dependent tokens
-across targets.  `cpp_format_targets(name, deps)` generates three targets:
+One action per source file -- like CppCompile, so Bazel parallelises, caches
+and remotely executes at file granularity -- writes a structured edit-record
+JSON file (offset-level edits plus a template-dependent-token resolution
+sidecar).  `cpp_format --aggregate` merges the per-file records into one
+repository change, resolving dependent tokens across files and targets.
+`cpp_format_targets(name, deps)` generates three targets:
 
   * `<name>.check` — a test that fails when any edit would be applied (lint gate),
   * `<name>.diff`  — `bazel run` prints the merged unified diff (review),
@@ -29,10 +30,10 @@ load("@rules_cc//cc:action_names.bzl", "CPP_COMPILE_ACTION_NAME")
 load("@rules_cc//cc:find_cc_toolchain.bzl", "find_cc_toolchain", "use_cc_toolchain")
 
 CppFormatEditsInfo = provider(
-    doc = "Transitive cpp_format state: per-target edit-record JSON files, and " +
+    doc = "Transitive cpp_format state: per-source-file edit-record JSON files, and " +
           "the first-party headers the dep closure owns (see `_owned_headers`).",
     fields = {
-        "records": "depset of .cpp_format.json files",
+        "records": "depset of per-source-file edit-record JSON files",
         "headers": "depset of first-party header source files in the dep closure",
     },
 )
@@ -48,40 +49,6 @@ CppFormatEditsInfo = provider(
 _HDR_EXTS = ["h", "hh", "hpp", "hxx", "h++"]
 _SRC_EXTS = ["cc", "cpp", "cxx", "c++"] + _HDR_EXTS
 
-# One emit action per target parses all of that target's sources, on this many
-# threads (`cpp_format --jobs`).  Bazel is told the same number through
-# `resource_set`, so a 16-file target takes 16 of the local CPUs instead of
-# looking like a one-CPU action that then oversubscribes the box.  Buckets
-# rather than the exact count because a resource_set callback must be a
-# top-level function -- no lambdas -- and one per possible count is silly.  The
-# memory figure is a scheduling hint (roughly one Clang AST per thread).  The
-# binary caps --jobs at the CPU count itself, so a 16-bucket target on a 4-CPU
-# machine runs 4 threads.
-_JOB_BUCKETS = [16, 8, 4, 2, 1]
-
-def _jobs_for(num_sources):
-    for b in _JOB_BUCKETS:
-        if num_sources >= b:
-            return b
-    return 1
-
-def _rs_1(_os, _inputs_size):
-    return {"cpu": 1, "memory": 300}
-
-def _rs_2(_os, _inputs_size):
-    return {"cpu": 2, "memory": 600}
-
-def _rs_4(_os, _inputs_size):
-    return {"cpu": 4, "memory": 1200}
-
-def _rs_8(_os, _inputs_size):
-    return {"cpu": 8, "memory": 2400}
-
-def _rs_16(_os, _inputs_size):
-    return {"cpu": 16, "memory": 4800}
-
-_RESOURCE_SETS = {1: _rs_1, 2: _rs_2, 4: _rs_4, 8: _rs_8, 16: _rs_16}
-
 def _own_files(ctx, exts):
     out = []
     seen = {}
@@ -94,13 +61,23 @@ def _own_files(ctx, exts):
                 # second pass then reads back the first pass's rewrite, so the
                 # target emits duplicate -- and mutually conflicting -- records
                 # for one source location.
-                if f.is_source and f.extension in exts and f.path not in seen:
+                # A first-party target may list a file from an external repo;
+                # it is not ours to rewrite, and its `../` short_path could not
+                # name a record file anyway.
+                if (f.is_source and f.extension in exts and f.path not in seen and
+                    not f.short_path.startswith("../")):
                     seen[f.path] = True
                     out.append(f)
     return out
 
 def _own_sources(ctx):
     return _own_files(ctx, _SRC_EXTS)
+
+def _record_path(ctx, src):
+    # Under <name>.cpp_format/ so two targets' records never collide, and keyed
+    # by the source's workspace-relative path so two sources sharing a basename
+    # in different packages do not either.
+    return ctx.label.name + ".cpp_format/" + src.short_path + ".json"
 
 # Headers this target owns, propagated to dependents as `--owned-files`.  A
 # target's action parses only its own sources, so without this a declaration in
@@ -166,23 +143,23 @@ def _aspect_impl(target, ctx):
     flags = _compile_flags(ctx, cc_toolchain, cc_ctx)
     binary = ctx.file._cpp_format
 
-    records = ctx.actions.declare_file(ctx.label.name + ".cpp_format.json")
-    jobs = _jobs_for(len(srcs))
-    args = ctx.actions.args()
-    args.add("--config", ctx.file._config)
-    args.add("--emit-edits", records)
-    args.add("--jobs=" + str(jobs))
-    args.add_all(srcs)
-
-    # The dep closure's headers are renameable here even though they are not
-    # parsed as TUs, so uses of their declarations get rewritten in this
-    # target's sources.  Written to a param file: the closure can be large
-    # enough to blow the command-line limit.  Must precede the `--` below, or it
-    # would be handed to the parser as a compile flag.
+    # One action per source file, like CppCompile: Bazel then parallelises and
+    # caches at file granularity -- editing one .cpp re-parses one file, not
+    # its whole target -- and remote execution spreads the parses across
+    # workers.  Each action parses exactly one file and is told, via
+    # --owned-files, that every file of this target and every header of its dep
+    # closure is renameable, so a declaration anywhere in that set is rewritten
+    # at its use sites here, while the declaration itself is rewritten only by
+    # the action for the file that holds it.  Splitting a target's TUs across
+    # processes changes nothing else: the records were always merged by
+    # aggregation, which resolves dependent tokens and vetoes across processes.
+    # The owned list is written once per target (the closure can be large) and
+    # shared by every action.
+    owned_list = ctx.actions.declare_file(ctx.label.name + ".cpp_format/owned-files.txt")
     owned = ctx.actions.args()
-    owned.add_all(dep_headers)
-    owned.use_param_file("--owned-files=%s", use_always = True)
+    owned.add_all(depset(direct = srcs, transitive = [dep_headers]))
     owned.set_param_file_format("multiline")
+    ctx.actions.write(owned_list, owned)
 
     # Force C++ so headers (.h) parse as C++ rather than C, and carry the
     # derived compile command.  cpp_format drops -fno-canonical-system-headers
@@ -196,23 +173,39 @@ def _aspect_impl(target, ctx):
     compile_args.add("c++")
     compile_args.add_all(flags)
 
-    ctx.actions.run(
-        executable = binary,
-        arguments = [args, owned, compile_args],
-        tools = [binary],
-        inputs = depset(
-            direct = srcs + [ctx.file._config],
-            transitive = [cc_ctx.headers, cc_toolchain.all_files],
-        ),
-        outputs = [records],
-        mnemonic = "CppFormatEmit",
-        progress_message = "cpp_format: emitting edits for %{label}",
-        resource_set = _RESOURCE_SETS[jobs],
-    )
-    mine = depset(direct = [records], transitive = transitive)
+    records = []
+    for src in srcs:
+        rec = ctx.actions.declare_file(_record_path(ctx, src))
+        args = ctx.actions.args()
+        args.add("--config", ctx.file._config)
+        args.add("--emit-edits", rec)
+        args.add("--owned-files", owned_list)
+        args.add(src)
+        ctx.actions.run(
+            executable = binary,
+            tools = [binary],
+            arguments = [args, compile_args],
+            inputs = depset(
+                direct = [src, ctx.file._config, owned_list],
+                transitive = [cc_ctx.headers, cc_toolchain.all_files],
+            ),
+            outputs = [rec],
+            mnemonic = "CppFormatEmit",
+            progress_message = "cpp_format: emitting edits for " + src.short_path,
+        )
+        records.append(rec)
+
+    # cpp_format.sh finds a target's records through this manifest rather than
+    # by globbing the records directory: Bazel never deletes the record of a
+    # source that was since removed from the target, and a stale record would
+    # apply stale edits.  Paths are exec-root relative, as File.path is.
+    manifest = ctx.actions.declare_file(ctx.label.name + ".cpp_format.manifest")
+    ctx.actions.write(manifest, "".join([r.path + "\n" for r in records]))
+
+    mine = depset(direct = records, transitive = transitive)
     return [
         CppFormatEditsInfo(records = mine, headers = mine_headers),
-        OutputGroupInfo(cpp_format_edits = mine),
+        OutputGroupInfo(cpp_format_edits = depset(direct = [manifest], transitive = [mine])),
     ]
 
 cpp_format_aspect = aspect(
@@ -237,7 +230,7 @@ cpp_format_aspect = aspect(
 # ---------------------------------------------------------------------------
 
 # Bash runfiles library bootstrap (Bazel v3 snippet) so `rlocation` resolves the
-# cpp_format binary and the per-target record files at run/test time.
+# cpp_format binary and the per-file record files at run/test time.
 _RUNFILES_PREAMBLE = """#!/usr/bin/env bash
 # --- begin runfiles.bash initialization v3 ---
 set -uo pipefail; set +e; f=bazel_tools/tools/bash/runfiles/runfiles.bash
@@ -249,6 +242,12 @@ source "${RUNFILES_DIR:-/dev/null}/$f" 2>/dev/null || \\
   { echo>&2 "ERROR: cannot find $f"; exit 1; }; f=; set -e
 # --- end runfiles.bash initialization v3 ---
 records=()
+"""
+
+# A repository's worth of per-file records does not fit on a command line, so
+# the generated scripts hand the aggregator a list file.
+_RECORD_LIST_SNIPPET = """list="$(mktemp "${TEST_TMPDIR:-${TMPDIR:-/tmp}}/cpp_format_records.XXXXXX")"
+printf '%s\\n' "${records[@]}" > "$list"
 """
 
 def _rlocation_path(f):
@@ -279,8 +278,12 @@ def _aggregator_impl(ctx):
         content = (
             _RUNFILES_PREAMBLE + rec_lines +
             'BIN="$(rlocation "' + _rlocation_path(binary) + '")"\n' +
-            'exec "$BIN" --aggregate ' + ctx.attr.mode_flags +
-            ' --root="${BUILD_WORKSPACE_DIRECTORY:-$PWD}" "${records[@]}"\n'
+            _RECORD_LIST_SNIPPET +
+            "rc=0\n" +
+            '"$BIN" --aggregate ' + ctx.attr.mode_flags +
+            ' --root="${BUILD_WORKSPACE_DIRECTORY:-$PWD}" --records-from="$list" || rc=$?\n' +
+            'rm -f "$list"\n' +
+            "exit $rc\n"
         ),
     )
     runfiles = ctx.runfiles(files = recs + [binary])

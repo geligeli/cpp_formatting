@@ -4,7 +4,9 @@
 
 #include <string>
 
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/JSON.h"
+#include "llvm/Support/raw_ostream.h"
 
 namespace {
 
@@ -309,6 +311,31 @@ TEST(AggregateEdits, ReportsConflictOnOverlappingDistinctEdits) {
   EXPECT_FALSE(
       aggregateEdits({A, B}, filesFrom({{"a.cpp", "int"}}), Out, Conflicts));
   EXPECT_FALSE(Conflicts.empty());
+}
+
+// ---------------------------------------------------------------------------
+// Record lists (--records-from)
+// ---------------------------------------------------------------------------
+
+TEST(RecordList, ReadsNonBlankTrimmedLines) {
+  llvm::SmallString<128> Path;
+  int FD = -1;
+  ASSERT_FALSE(llvm::sys::fs::createTemporaryFile("records", "txt", FD, Path));
+  {
+    llvm::raw_fd_ostream OS(FD, /*shouldClose=*/true);
+    OS << "a/one.json\n\n  b/two.json  \nc/three.json";
+  }
+  std::vector<std::string> Out{"zero.json"};
+  EXPECT_TRUE(appendRecordListFrom(Path, Out));
+  EXPECT_EQ(Out, (std::vector<std::string>{"zero.json", "a/one.json",
+                                           "b/two.json", "c/three.json"}));
+  llvm::sys::fs::remove(Path);
+}
+
+TEST(RecordList, MissingFileIsAnError) {
+  std::vector<std::string> Out;
+  EXPECT_FALSE(appendRecordListFrom("/nonexistent/records.txt", Out));
+  EXPECT_TRUE(Out.empty());
 }
 
 }  // namespace

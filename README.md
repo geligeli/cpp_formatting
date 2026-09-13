@@ -14,18 +14,25 @@ include is reachable under sandboxing with **no `compile_commands.json`**. The
 binary embeds and self-extracts the Clang builtin headers, so nothing else is
 fetched.
 
-**1. Import the kit in `MODULE.bazel`.** Pick a release tag from the
-[Releases](https://github.com/geligeli/cpp_formatting/releases) page (tags are
-`<YYYYMMDD>-<shortsha>`) and put it in `CPP_FORMAT_VERSION`. `archive_override`
-pulls the Bazel glue by URL; the `cpp_format` extension downloads the prebuilt
-binary for your host platform. **Both must come from the same tag** — the aspect
-passes flags that only a matching binary understands — so the tag is written
-*once* and every use derives from it:
+**1. Import the kit in `MODULE.bazel`.** Take the **latest** release tag from
+the [Releases](https://github.com/geligeli/cpp_formatting/releases) page (tags
+are `<YYYYMMDD>-<shortsha>`) and put it in `CPP_FORMAT_VERSION`.
+`archive_override` pulls the Bazel glue by URL; the `cpp_format` extension
+downloads the prebuilt binary for your host platform. **Both must come from the
+same tag** — the aspect passes flags that only a matching binary understands —
+so the tag is written *once* and every use derives from it. **Mark it a dev
+dependency** (`dev_dependency = True` on both the `bazel_dep` and the
+`use_extension`): the formatter is a tool of *your* repository, and modules
+that depend on yours must not have to fetch the glue or the release binary:
 
 ```starlark
-bazel_dep(name = "cpp_formatting", version = "0.1.0")
+# dev_dependency: a tool of this repo, invisible to modules that depend on it.
+bazel_dep(name = "cpp_formatting", version = "0.1.0", dev_dependency = True)
 
-CPP_FORMAT_VERSION = "20260913-5ea87d3"
+# The latest tag on https://github.com/geligeli/cpp_formatting/releases,
+# e.g. "20260913-5ea87d3".  Always the latest: older tags predate flags the
+# current Bazel glue relies on.
+CPP_FORMAT_VERSION = "<latest release tag>"
 
 archive_override(
     module_name = "cpp_formatting",
@@ -34,7 +41,11 @@ archive_override(
     strip_prefix = "cpp_formatting-" + CPP_FORMAT_VERSION,
 )
 
-cpp_format = use_extension("@cpp_formatting//bazel/integration:extensions.bzl", "cpp_format")
+cpp_format = use_extension(
+    "@cpp_formatting//bazel/integration:extensions.bzl",
+    "cpp_format",
+    dev_dependency = True,
+)
 cpp_format.release(
     version = CPP_FORMAT_VERSION,
     # Optional but recommended for reproducible CI — pin per-asset hashes:
@@ -82,11 +93,12 @@ tools/cpp_format.sh fix //app/...  # scope to a package tree
 ```
 
 Commit the placed script (it's a normal, editable file). It queries the
-matching first-party `cc_*` targets, runs the aspect over them
-(each emits an edit-record file — parallel and cached), and merges every
-target's records into one repository-wide change — deduping, resolving
-template-dependent member tokens across translation units, and flagging genuine
-conflicts. Tag a target `no-cpp-format` to exclude it.
+matching first-party `cc_*` targets, runs the aspect over them (one action per
+source file emits that file's edit records — parallel, cached, and incremental
+per file, like compilation), and merges every record into one repository-wide
+change — deduping, resolving template-dependent member tokens across
+translation units, and flagging genuine conflicts. Tag a target
+`no-cpp-format` to exclude it.
 
 *A pinned CI gate* — `cpp_format_targets` needs **no local script** (pure URL
 import), and gives a `bazel test` gate over a specific, reviewed dep set:
@@ -655,46 +667,51 @@ owned by other targets.
 
 **How it works.** A per-target **aspect** derives each `cc_*` target's compile
 flags from `CcInfo.compilation_context` + the toolchain
-(`cc_common.get_memory_inefficient_command_line`) and runs `cpp_format
---emit-edits`, declaring the target's sources **plus its transitive headers** as
-action inputs — that declaration is what makes headers reachable under
-sandboxing. Each action is parallel and cached; first-party targets only.
-Inside an action the target's sources are parsed on several threads: the
-aspect passes `--jobs=<bucket>` (the largest of 1/2/4/8/16 not above the
-number of sources) and declares the same count to Bazel's scheduler through
-`resource_set`, so a 60-file target no longer runs as a serial tail behind
-sixty one-file actions. Because the aspect passes a flag, it and the published
-binary are versioned together (see the release pin in `MODULE.bazel`).
+(`cc_common.get_memory_inefficient_command_line`) and runs one `cpp_format
+--emit-edits` action **per source file** — like `CppCompile` — declaring that
+file **plus the target's transitive headers** as action inputs; that
+declaration is what makes headers reachable under sandboxing. Because the unit
+is a file, Bazel parallelizes, caches and remotely executes at file
+granularity: editing one `.cpp` re-parses one file, not its whole target.
+First-party targets only.
 
-**Renaming across targets.** An action parses only its own target's sources, but
-a rename must reach *every* use of a declaration — including uses in targets
-that merely depend on the header declaring it. So the aspect also passes the dep
-closure's first-party headers as `--owned-files`: those files are renameable but
-are **not** parsed as extra translation units, so each file is still rewritten by
-exactly one action (the target that lists it) while its uses are rewritten
-wherever they appear. Without this a `cc_binary`'s use of a `cc_library` member
-would be left behind when the member is renamed, breaking the build. Headers of
-a `no-cpp-format` target are excluded, so an unformatted target's declarations
-are never renamed at their use sites either.
+**Renaming across targets.** An action parses one file, but a rename must reach
+*every* use of a declaration — the target's other files, and targets that
+merely depend on the header declaring it. So every action is told, via
+`--owned-files`, that the target's own sources and the dep closure's
+first-party headers are renameable: those files are **not** parsed as extra
+translation units, so each file is still rewritten by exactly one action (its
+own) while its uses are rewritten wherever they appear. Without this a
+`cc_binary`'s use of a `cc_library` member would be left behind when the member
+is renamed, breaking the build. Headers of a `no-cpp-format` target are
+excluded, so an unformatted target's declarations are never renamed at their
+use sites either.
 
 **Records, not diffs.** Each emit action writes offset-level **edit records**
 (`{file, offset, length, old, new}`) plus a template-dependent-token resolution
 sidecar — never a rendered diff, which cannot be merged because hunk offsets
-don't compose. `cpp_format --aggregate` unions all targets' records, resolves
+don't compose. `cpp_format --aggregate` unions every file's records, resolves
 dependent tokens across TUs (agreeing instantiations → an edit; a veto or
 disagreement → dropped), merges per file (dedup identical, flag
 overlapping-distinct conflicts), and renders or applies the result. This is the
-clang-tidy `--export-fixes` + `clang-apply-replacements` model.
+clang-tidy `--export-fixes` + `clang-apply-replacements` model. Splitting a
+target's translation units across actions changes nothing in it: the records
+were always merged across processes.
 
 **Entry points.** `cpp_format.sh <check|diff|fix> [pattern]` is the ergonomic
 front door: it `bazel query`s the first-party `cc_*` targets under `pattern`
 (default `//...`), builds them with `--aspects=…%cpp_format_aspect
---output_groups=+cpp_format_edits` to materialize each target's record file,
-derives the record paths (`//pkg:name` → `<bazel-bin>/pkg/name.cpp_format.json`),
-and runs `cpp_format --aggregate` over them. It is a plain script, not a `bazel
-run` target, precisely so it can invoke `bazel build` without nesting a Bazel
-server inside a running one. For a pinned CI gate, `cpp_format_targets(name,
-deps)` instead generates three graph targets:
+--output_groups=+cpp_format_edits` to materialize each file's record, reads
+each target's manifest (`//pkg:name` → `<bazel-bin>/pkg/name.cpp_format.manifest`,
+which lists that target's current records — never a glob, which would pick up
+the stale record of a removed source), and runs `cpp_format --aggregate
+--records-from=<list>` over them. It is a plain script, not a `bazel run`
+target, precisely so it can invoke `bazel build` without nesting a Bazel server
+inside a running one. Because the aspect and the wrapper rely on flags of the
+binary (`--owned-files`, `--aggregate --records-from`), the kit and the
+published binary are versioned together (see the release pin in
+`MODULE.bazel`). For a pinned CI gate, `cpp_format_targets(name, deps)`
+instead generates three graph targets:
 
 | Target | Kind | Purpose |
 |---|---|---|

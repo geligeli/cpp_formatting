@@ -181,16 +181,30 @@ auto runAggregate(int argc, const char** argv) -> int {
       Root = argv[++i];
     } else if (Arg.starts_with("--root=")) {
       Root = Arg.drop_front(std::string("--root=").size()).str();
+    } else if (Arg == "--records-from") {
+      // A list file: the Bazel rules and cpp_format.sh pass a repository's
+      // worth of per-file records this way, which no command line holds.
+      if (i + 1 >= argc) {
+        llvm::errs() << "--records-from requires a file argument\n";
+        return 2;
+      }
+      if (!appendRecordListFrom(argv[++i], Inputs)) return 2;
+    } else if (Arg.starts_with("--records-from=")) {
+      if (!appendRecordListFrom(
+              Arg.drop_front(std::string("--records-from=").size()), Inputs))
+        return 2;
     } else if (Arg.starts_with("-")) {
       llvm::errs() << "unknown --aggregate flag '" << Arg
-                   << "' (expected --apply, --check, or --root=<dir>)\n";
+                   << "' (expected --apply, --check, --root=<dir>, or "
+                      "--records-from=<file>)\n";
       return 2;
     } else {
       Inputs.push_back(Arg.str());
     }
   }
   if (Inputs.empty()) {
-    llvm::errs() << "--aggregate requires one or more <records.json> inputs\n";
+    llvm::errs() << "--aggregate requires one or more <records.json> inputs "
+                    "(positional, or listed in --records-from=<file>)\n";
     return 2;
   }
   return runEditAggregation(Inputs, Root, Apply, Check);

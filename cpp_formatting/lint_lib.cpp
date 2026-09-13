@@ -558,6 +558,24 @@ auto aggregateEdits(
   return Ok;
 }
 
+auto appendRecordListFrom(llvm::StringRef ListFile,
+                          std::vector<std::string>& Out) -> bool {
+  auto Buf = llvm::MemoryBuffer::getFile(ListFile);
+  if (!Buf) {
+    llvm::errs() << "cannot read record list '" << ListFile
+                 << "': " << Buf.getError().message() << "\n";
+    return false;
+  }
+  llvm::SmallVector<llvm::StringRef, 64> Lines;
+  (*Buf)->getBuffer().split(Lines, '\n', /*MaxSplit=*/-1,
+                            /*KeepEmpty=*/false);
+  for (llvm::StringRef Line : Lines) {
+    llvm::StringRef P = Line.trim();
+    if (!P.empty()) Out.push_back(P.str());
+  }
+  return true;
+}
+
 auto runEditAggregation(const std::vector<std::string>& InputPaths,
                         llvm::StringRef Root, bool Apply, bool Check) -> int {
   // Record keys are the file's real path.  Under Bazel that resolves to the
