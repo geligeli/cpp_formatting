@@ -18,6 +18,8 @@
 #include "clang/Basic/FileEntry.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Lex/Lexer.h"
+#include "clang/Lex/MacroInfo.h"
+#include "clang/Lex/Preprocessor.h"
 #include "clang/Rewrite/Core/Rewriter.h"
 #include "clang/Tooling/Tooling.h"
 #include "llvm/ADT/SmallPtrSet.h"
@@ -1057,6 +1059,11 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
     if (Mode == ApplyMode::Scan) ByOldName = indexByOldName(Renames);
   }
 
+  // Scan mode only: lets the scan read macro definitions (see
+  // declaredThroughPastingMacro).  Set after construction, when a
+  // Preprocessor is available.
+  void setPreprocessor(Preprocessor* P) { PP = P; }
+
   // While scanning, every function pushes the names it declares (parameters and
   // locals), so scan() can tell whether a rename would be captured by one.  The
   // whole function is collected up front rather than tracked as the walk
@@ -1134,16 +1141,18 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
     // The scan pass walks instantiations, where every field is a fresh
     // declaration whose location points back at the pattern; keying it by
     // itself would make it look like an unmapped member (see handle()).
-    handle(D->getLocation(), primaryTemplateMember(D), D->getName());
+    const Decl* Key = primaryTemplateMember(D);
+    declaredThroughPastingMacro(D, Key);
+    handle(D->getLocation(), Key, D->getName());
     return true;
   }
 
   bool VisitVarDecl(VarDecl* D) {
-    handle(D->getLocation(),
-           D->isStaticDataMember()
-               ? primaryTemplateStaticMember(D)->getCanonicalDecl()
-               : D->getCanonicalDecl(),
-           D->getName());
+    const Decl* Key = D->isStaticDataMember()
+                          ? primaryTemplateStaticMember(D)->getCanonicalDecl()
+                          : D->getCanonicalDecl();
+    declaredThroughPastingMacro(D, Key);
+    handle(D->getLocation(), Key, D->getName());
     return true;
   }
 
@@ -1152,8 +1161,9 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
     // plain identifier; getName() asserts on those.  They are never renamed
     // (isRenamableMethod), so they are never in the map either.
     if (!D->getDeclName().isIdentifier()) return true;
-    handle(D->getLocation(), primaryTemplateMethod(D)->getCanonicalDecl(),
-           D->getName());
+    const Decl* Key = primaryTemplateMethod(D)->getCanonicalDecl();
+    declaredThroughPastingMacro(D, Key);
+    handle(D->getLocation(), Key, D->getName());
     return true;
   }
 
@@ -1467,6 +1477,40 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
         PL.isValid() ? PL.getColumn() : 0, OldName.str(), NewName, Reason});
   }
 
+  // A declaration spelled as a macro *argument* renames fine -- unless the
+  // macro also pastes (`##`), because then the argument's spelling is part of
+  // other identifiers the macro forms.  gmock's ACTION_P3(Plus, foo, bar, baz)
+  // declares a member `foo` and a typedef `foo##_type`; renaming the member to
+  // `foo_` makes the typedef `foo__type`, and the action body -- which gmock
+  // documents as allowed to spell `foo_type` -- no longer compiles.  Those
+  // pasted names are never references the tool can see, so the declaration is
+  // declined outright when any macro on its expansion chain contains `##`.
+  void declaredThroughPastingMacro(const NamedDecl* D, const Decl* Key) {
+    if (Mode != ApplyMode::Scan || !Vetoes || !PP || !Key) return;
+    SourceLocation Loc = D->getLocation();
+    if (!Loc.isMacroID() || !D->getDeclName().isIdentifier()) return;
+    auto It = Renames.find(Key);
+    if (It == Renames.end()) return;
+    for (unsigned Guard = 0; Loc.isMacroID() && Guard < 64; ++Guard) {
+      const StringRef Name =
+          Lexer::getImmediateMacroName(Loc, SM, PP->getLangOpts());
+      if (!Name.empty()) {
+        if (const MacroInfo* MI =
+                PP->getMacroInfo(PP->getIdentifierInfo(Name))) {
+          for (const Token& T : MI->tokens()) {
+            if (!T.is(tok::hashhash)) continue;
+            veto(Key, D->getName(), It->second,
+                 "declared through an argument of macro " + Name.str() +
+                     ", which pastes tokens with ##; the spelling may be part "
+                     "of other names the macro forms");
+            return;
+          }
+        }
+      }
+      Loc = SM.getImmediateExpansionRange(Loc).getBegin();
+    }
+  }
+
   // Diagnostic detail for the backstop above: which class the unmapped member
   // belongs to and where the use is, so a new unmapped shape can be reduced.
   std::string unmappedContext(const Decl* Key, SourceLocation Loc) const {
@@ -1514,6 +1558,7 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
   RenamesByOldName ByOldName;                  // Scan mode only
   std::set<std::pair<FileID, unsigned>> Seen;  // Scan mode only
   unsigned InstantiationDepth = 0;             // Scan mode only
+  Preprocessor* PP = nullptr;                  // Scan mode only, may be null
 };
 
 // ---------------------------------------------------------------------------
@@ -1665,15 +1710,13 @@ class DebugTraceVisitor : public RecursiveASTVisitor<DebugTraceVisitor> {
 
 class RenameVariablesConsumer : public ASTConsumer {
  public:
-  RenameVariablesConsumer(Rewriter& RW, VariableRenameCallback CB,
-                          VariableScope Scope, FileSet CollectFrom,
-                          OutputMode Mode = OutputMode::DryRun,
-                          LintReport* Report = nullptr, std::string RuleId = "",
-                          DependentResolutions* DepRes = nullptr,
-                          EditReport* Edits = nullptr,
-                          RenameConflicts* Conflicts = nullptr,
-                          RenameVetoes* Vetoes = nullptr,
-                          std::set<std::string>* RenamedNames = nullptr)
+  RenameVariablesConsumer(
+      Rewriter& RW, VariableRenameCallback CB, VariableScope Scope,
+      FileSet CollectFrom, OutputMode Mode = OutputMode::DryRun,
+      LintReport* Report = nullptr, std::string RuleId = "",
+      DependentResolutions* DepRes = nullptr, EditReport* Edits = nullptr,
+      RenameConflicts* Conflicts = nullptr, RenameVetoes* Vetoes = nullptr,
+      std::set<std::string>* RenamedNames = nullptr, Preprocessor* PP = nullptr)
       : RW(RW),
         CB(std::move(CB)),
         Scope(Scope),
@@ -1685,7 +1728,8 @@ class RenameVariablesConsumer : public ASTConsumer {
         Edits(Edits),
         Conflicts(Conflicts),
         Vetoes(Vetoes),
-        RenamedNames(RenamedNames) {}
+        RenamedNames(RenamedNames),
+        PP(PP) {}
 
   void HandleTranslationUnit(ASTContext& Ctx) override {
     SourceManager& SM = Ctx.getSourceManager();
@@ -1718,7 +1762,7 @@ class RenameVariablesConsumer : public ASTConsumer {
     }
 
     runRenameRuleOnAST(Ctx, RW, CB, Scope, CollectFrom, Report, RuleId, DepRes,
-                       Edits, Conflicts, Vetoes, RenamedNames);
+                       Edits, Conflicts, Vetoes, RenamedNames, PP);
   }
 
  private:
@@ -1734,6 +1778,7 @@ class RenameVariablesConsumer : public ASTConsumer {
   RenameConflicts* Conflicts;    // non-null when collecting
   RenameVetoes* Vetoes;          // non-null when all-or-nothing is enabled
   std::set<std::string>* RenamedNames;  // names this TU set out to rename
+  Preprocessor* PP;                     // for the scan pass; may be null
 };
 
 // ---------------------------------------------------------------------------
@@ -1794,7 +1839,7 @@ class RenameVariablesAction : public ASTFrontendAction {
     TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
     return std::make_unique<RenameVariablesConsumer>(
         TheRewriter, CB, Scope, CollectFrom, Mode, Report, RuleId, DepRes,
-        Edits, Conflicts, Vetoes, RenamedNames);
+        Edits, Conflicts, Vetoes, RenamedNames, &CI.getPreprocessor());
   }
 
  private:
@@ -1835,7 +1880,8 @@ class CaptureAction : public ASTFrontendAction {
     return std::make_unique<RenameVariablesConsumer>(
         TheRewriter, CB, Scope, FileSet{}, OutputMode::DryRun,
         /*Report=*/nullptr, /*RuleId=*/"", &DepRes, /*Edits=*/nullptr,
-        /*Conflicts=*/nullptr, &Vetoes);
+        /*Conflicts=*/nullptr, &Vetoes, /*RenamedNames=*/nullptr,
+        &CI.getPreprocessor());
   }
 
  private:
@@ -1940,7 +1986,7 @@ void runRenameRuleOnAST(ASTContext& Ctx, Rewriter& RW,
                         llvm::StringRef RuleId, DependentResolutions* DepRes,
                         EditReport* Edits, RenameConflicts* Conflicts,
                         RenameVetoes* Vetoes,
-                        std::set<std::string>* RenamedNames) {
+                        std::set<std::string>* RenamedNames, Preprocessor* PP) {
   SourceManager& SM = Ctx.getSourceManager();
   Decl* TU = Ctx.getTranslationUnitDecl();
 
@@ -1977,6 +2023,7 @@ void runRenameRuleOnAST(ASTContext& Ctx, Rewriter& RW,
     ApplyRenamesVisitor Scanner(RW, SM, Renames, CollectFrom, DepRes, Report,
                                 RuleId.str(), Edits, ApplyMode::Scan, Vetoes,
                                 Conflicts);
+    Scanner.setPreprocessor(PP);
     Scanner.TraverseDecl(TU);
     Scanner.auditMainFileSpellings(Ctx.getLangOpts());
     if (Vetoes->size() != Before) PruneVetoed();

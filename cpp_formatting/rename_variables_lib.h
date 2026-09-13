@@ -21,6 +21,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 namespace clang {
+class Preprocessor;
 class ASTConsumer;
 class ASTContext;
 class CompilerInstance;
@@ -214,6 +215,8 @@ class RenameActionFactory : public TUSlotClient {
 /// \p RenamedNames, when non-null, receives the old spelling of every
 /// declaration this TU set out to rename; the TU driver intersects it with the
 /// dependent tokens no TU resolved to decline those names (see nameVetoKey).
+/// \p PP, when non-null, lets the scan pass read macro definitions, to decline
+/// a declaration spelled as an argument of a macro that pastes with `##`.
 void runRenameRuleOnAST(clang::ASTContext& Ctx, clang::Rewriter& RW,
                         const VariableRenameCallback& CB, VariableScope Scope,
                         const FileSet& CollectFrom,
@@ -223,7 +226,8 @@ void runRenameRuleOnAST(clang::ASTContext& Ctx, clang::Rewriter& RW,
                         EditReport* Edits = nullptr,
                         RenameConflicts* Conflicts = nullptr,
                         RenameVetoes* Vetoes = nullptr,
-                        std::set<std::string>* RenamedNames = nullptr);
+                        std::set<std::string>* RenamedNames = nullptr,
+                        clang::Preprocessor* PP = nullptr);
 
 // ---------------------------------------------------------------------------
 // Convenience factories

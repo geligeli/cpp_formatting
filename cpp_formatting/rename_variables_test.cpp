@@ -1483,3 +1483,19 @@ TEST(RenameSpellingAudit, UnrelatedDeclarationsWithTheSameNameDoNotCount) {
             "struct T { int Init; };\n"
             "int g(S& s, T& t) { s.init(); Init(); return t.Init; }\n");
 }
+
+TEST(RenameMacros, DeclarationThroughAPastingMacroIsDeclined) {
+  // gmock's ACTION_P shape: the argument declares a member *and* is pasted
+  // into a typedef the body may spell.  Renaming the member would change the
+  // typedef.  A declaration through a macro that does not paste still renames.
+  const char* code =
+      "#define PARAM(name) int name; typedef int name##_type;\n"
+      "#define FIELD(name) int name;\n"
+      "struct S { PARAM(foo) FIELD(other) foo_type f() const { return foo; } "
+      "};\n";
+  EXPECT_EQ(rewriteMember(code, addSuffix("_")),
+            "#define PARAM(name) int name; typedef int name##_type;\n"
+            "#define FIELD(name) int name;\n"
+            "struct S { PARAM(foo) FIELD(other_) foo_type f() const { return "
+            "foo; } };\n");
+}
