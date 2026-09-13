@@ -133,6 +133,31 @@ struct RenameVeto {
   std::string Reason;  ///< why the reference could not be rewritten
 };
 
+// A rename that was *not* applied, and why.  Either the new name was already
+// taken in the same scope, or some reference to the declaration cannot be
+// rewritten (spelled in a macro body, token-pasted, in a file no invocation
+// rewrites, ...).  Renaming anyway would fail to compile, or silently rebind
+// existing uses -- so the declaration and all its uses are left alone and the
+// site is reported.  Carried in the edit records so that an aggregating run,
+// whose per-file emit actions each reported only what they saw, can report the
+// whole repository's skips in one place.
+struct RenameSkip {
+  std::string File;  ///< the declaration's file, or "" when the skip is keyed
+                     ///< by name alone (no single declaration to point at)
+  unsigned Line = 0;
+  unsigned Column = 0;
+  std::string OldName;
+  std::string NewName;  ///< the name it would have got, or "" when unknown
+  std::string Reason;
+};
+
+// Emits one `file:line:col: skipped rename 'old' -> 'new': reason` line per
+// distinct skip when \p Verbose, and a one-line count either way.  A
+// declaration is seen once per translation unit that includes it, so the
+// sites are deduplicated.  Emits nothing at all when \p Skips is empty.
+void reportRenameSkips(const std::vector<RenameSkip>& Skips, bool Verbose,
+                       llvm::raw_ostream& OS);
+
 // A template-dependent member token resolved from an instantiation, pending
 // cross-TU resolution in aggregation.  Agreeing records become an edit; a veto
 // or a disagreement drops the token.
@@ -161,13 +186,18 @@ struct EditReport {
   std::vector<EditRecord> Edits;
   std::vector<ResolutionRecord> Resolutions;
   std::vector<RenameVeto> Vetoes;
+  /// Renames this invocation declined, for reporting only: aggregation never
+  /// acts on them (a skip means no edit was emitted in the first place, and a
+  /// veto that must drop *another* invocation's edit travels in Vetoes).
+  std::vector<RenameSkip> Skips;
 
   auto empty() const -> bool {
-    return Edits.empty() && Resolutions.empty() && Vetoes.empty();
+    return Edits.empty() && Resolutions.empty() && Vetoes.empty() &&
+           Skips.empty();
   }
 
   // Serializes as a JSON object
-  // {"edits":[...],"resolutions":[...],"vetoes":[...]}.
+  // {"edits":[...],"resolutions":[...],"vetoes":[...],"skips":[...]}.
   void emitJSON(llvm::raw_ostream& OS) const;
 };
 
@@ -181,11 +211,16 @@ auto parseEditReport(llvm::StringRef Json, EditReport& Out) -> bool;
 // edits per file (dedup byte-identical; distinct overlap -> a message appended
 // to \p Conflicts and that file omitted).  Performs no file I/O — the merged,
 // sorted, non-overlapping edits for each file are returned in \p MergedByFile.
-// Returns true when every file merged without conflict.
+// Returns true when every file merged without conflict.  When \p Declined is
+// non-null, the renames dropped *here* rather than by an invocation -- a
+// dependent token no report resolved, whose spelling is therefore declined
+// everywhere -- are appended to it, so the caller can report them alongside
+// the skips the invocations reported themselves.
 auto mergeEditReports(
     const std::vector<EditReport>& Reports,
     std::map<std::string, std::vector<EditRecord>>& MergedByFile,
-    std::vector<std::string>& Conflicts) -> bool;
+    std::vector<std::string>& Conflicts,
+    std::vector<RenameSkip>* Declined = nullptr) -> bool;
 
 // Like mergeEditReports, but also reads each touched file's original content
 // via
@@ -194,7 +229,8 @@ auto aggregateEdits(
     const std::vector<EditReport>& Reports,
     const std::function<std::optional<std::string>(llvm::StringRef)>& ReadFile,
     std::map<std::string, std::string>& Out,
-    std::vector<std::string>& Conflicts) -> bool;
+    std::vector<std::string>& Conflicts,
+    std::vector<RenameSkip>* Declined = nullptr) -> bool;
 
 // Appends every non-blank line of \p ListFile -- a newline-separated list of
 // record files, as the Bazel rules and cpp_format.sh write it: a repository's
@@ -214,7 +250,13 @@ auto appendRecordListFrom(llvm::StringRef ListFile,
 // a relative key is joined with \p Root (empty \p Root => the current working
 // directory).  Diagnostics go to stderr.  Returns the process exit code
 // (0 success / clean, 1 edits-present or conflict, 2 unreadable input).
+//
+// Every mode reports the renames the run declined (see RenameSkip): a one-line
+// count always, and one line per site when \p ReportSites.  A skipped rename is
+// the one outcome the diff cannot show -- it is precisely a change that is not
+// there -- so it is printed even when the aggregation itself is clean.
 auto runEditAggregation(const std::vector<std::string>& InputPaths,
-                        llvm::StringRef Root, bool Apply, bool Check) -> int;
+                        llvm::StringRef Root, bool Apply, bool Check,
+                        bool ReportSites = false) -> int;
 
 #endif  // CPP_FORMATTING_LINT_LIB_H_

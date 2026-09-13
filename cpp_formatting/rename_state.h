@@ -118,15 +118,6 @@ auto dependentResolutionsDifferFor(const DependentResolutions& A,
 using RenameVetoes = std::map<std::pair<std::string, unsigned>, RenameVeto>;
 
 // ---------------------------------------------------------------------------
-// Skipped renames
-// ---------------------------------------------------------------------------
-
-/// A rename that was *not* applied because the new name is already taken in
-/// the same scope, or because a reference to it cannot be rewritten.  Renaming
-/// anyway would either be a redeclaration error or, worse, silently rebind
-/// existing uses to a different entity -- so the declaration and all its uses
-/// are left alone and the site is reported.
-// ---------------------------------------------------------------------------
 // Declining a rename by *name*
 // ---------------------------------------------------------------------------
 //
@@ -150,14 +141,20 @@ inline auto isNameVeto(llvm::StringRef VetoFile) -> bool {
   return !VetoFile.empty() && VetoFile[0] == '\x01';
 }
 
-struct RenameConflict {
-  std::string File;
-  unsigned Line = 0;
-  unsigned Column = 0;
-  std::string OldName;
-  std::string NewName;
-  std::string Reason;  ///< what the new name would have clashed with
-};
+// ---------------------------------------------------------------------------
+// Skipped renames
+// ---------------------------------------------------------------------------
+//
+// A rename that was *not* applied because the new name is already taken in the
+// same scope, or because a reference to it cannot be rewritten.  Renaming
+// anyway would either be a redeclaration error or, worse, silently rebind
+// existing uses to a different entity -- so the declaration and all its uses
+// are left alone and the site is reported.
+//
+// This is lint_lib's RenameSkip: the same record is reported straight to
+// stderr by a direct run and serialized into the edit records by an emit run,
+// so that `--aggregate` can report the whole repository's skips at once.
+using RenameConflict = RenameSkip;
 using RenameConflicts = std::vector<RenameConflict>;
 
 #endif  // CPP_FORMATTING_RENAME_STATE_H_

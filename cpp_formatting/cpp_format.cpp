@@ -173,6 +173,7 @@ namespace {
 auto runAggregate(int argc, const char** argv) -> int {
   bool Apply = false;
   bool Check = false;
+  bool ReportSites = false;
   std::string Root;
   std::vector<std::string> Inputs;
   for (int i = 1; i < argc; ++i) {
@@ -182,6 +183,8 @@ auto runAggregate(int argc, const char** argv) -> int {
       Apply = true;
     } else if (Arg == "--check") {
       Check = true;
+    } else if (Arg == "--report-rename-conflicts") {
+      ReportSites = true;
     } else if (Arg == "--root") {
       if (i + 1 >= argc) {
         llvm::errs() << "--root requires a directory argument\n";
@@ -204,7 +207,8 @@ auto runAggregate(int argc, const char** argv) -> int {
         return 2;
     } else if (Arg.starts_with("-")) {
       llvm::errs() << "unknown --aggregate flag '" << Arg
-                   << "' (expected --apply, --check, --root=<dir>, or "
+                   << "' (expected --apply, --check, "
+                      "--report-rename-conflicts, --root=<dir>, or "
                       "--records-from=<file>)\n";
       return 2;
     } else {
@@ -216,7 +220,7 @@ auto runAggregate(int argc, const char** argv) -> int {
                     "(positional, or listed in --records-from=<file>)\n";
     return 2;
   }
-  return runEditAggregation(Inputs, Root, Apply, Check);
+  return runEditAggregation(Inputs, Root, Apply, Check, ReportSites);
 }
 
 void insertRealPath(FileSet& FS, const std::string& P) {

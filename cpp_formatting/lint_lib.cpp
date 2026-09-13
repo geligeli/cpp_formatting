@@ -319,6 +319,50 @@ auto emitLintResults(const LintReport& Report, const PendingRewrites& Rewrites,
 // Structured edits (Bazel per-TU emit + aggregation)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// reportRenameSkips
+// ---------------------------------------------------------------------------
+
+void reportRenameSkips(const std::vector<RenameSkip>& Skips, bool Verbose,
+                       llvm::raw_ostream& OS) {
+  if (Skips.empty()) return;
+  // One declaration is seen once per translation unit that includes it -- and,
+  // under the Bazel aspect, once per emit action -- so collapse to one line
+  // per declaration.  The old name is part of the key because a skip that no
+  // declaration could be tied to carries no location at all (see
+  // RenameSkip::File); the new name is not, because the same declaration can
+  // be declined twice over, by a check that knows the name it would have got
+  // and by a backstop that only knows the spelling.  Of those the one naming
+  // the new name carries the more specific reason, so it wins.
+  using Key = std::tuple<std::string, unsigned, unsigned, std::string>;
+  std::map<Key, const RenameSkip*> Chosen;
+  std::vector<Key> Order;
+  for (const RenameSkip& S : Skips) {
+    const Key K{S.File, S.Line, S.Column, S.OldName};
+    auto [It, Inserted] = Chosen.try_emplace(K, &S);
+    if (Inserted)
+      Order.push_back(K);
+    else if (It->second->NewName.empty() && !S.NewName.empty())
+      It->second = &S;
+  }
+  if (Verbose)
+    for (const Key& K : Order) {
+      const RenameSkip& S = *Chosen[K];
+      if (S.File.empty())
+        OS << "skipped rename '" << S.OldName << "'";
+      else
+        OS << relativizeToCwd(S.File) << ":" << S.Line << ":" << S.Column
+           << ": skipped rename '" << S.OldName << "'";
+      if (!S.NewName.empty()) OS << " -> '" << S.NewName << "'";
+      OS << ": " << S.Reason << "\n";
+    }
+  OS << Order.size()
+     << " rename(s) skipped (name collision, or a reference that cannot be "
+        "rewritten)"
+     << (Verbose ? "" : "; pass --report-rename-conflicts for the sites")
+     << "\n";
+}
+
 void EditReport::emitJSON(llvm::raw_ostream& OS) const {
   llvm::json::Array Edits;
   for (const EditRecord& E : this->Edits) {
@@ -357,9 +401,19 @@ void EditReport::emitJSON(llvm::raw_ostream& OS) const {
                            {"offset", static_cast<int64_t>(V.Offset)},
                            {"name", V.Name},
                            {"reason", V.Reason}});
+  llvm::json::Array Skips;
+  for (const RenameSkip& S : this->Skips)
+    Skips.push_back(
+        llvm::json::Object{{"file", S.File},
+                           {"line", static_cast<int64_t>(S.Line)},
+                           {"column", static_cast<int64_t>(S.Column)},
+                           {"old", S.OldName},
+                           {"new", S.NewName},
+                           {"reason", S.Reason}});
   llvm::json::Object Root{{"edits", std::move(Edits)},
                           {"resolutions", std::move(Res)},
-                          {"vetoes", std::move(Vetoes)}};
+                          {"vetoes", std::move(Vetoes)},
+                          {"skips", std::move(Skips)}};
   OS << llvm::formatv("{0:2}", llvm::json::Value(std::move(Root))) << "\n";
 }
 
@@ -421,6 +475,23 @@ auto parseEditReport(llvm::StringRef Json, EditReport& Out) -> bool {
       Out.Vetoes.push_back(std::move(Veto));
     }
   }
+  // Reporting only, and written by newer binaries than some records may come
+  // from, so a missing "skips" array is not an error.
+  if (const llvm::json::Array* Skips = Root->getArray("skips")) {
+    for (const llvm::json::Value& V : *Skips) {
+      const llvm::json::Object* O = V.getAsObject();
+      if (!O) return false;
+      RenameSkip S;
+      S.File = O->getString("file").value_or("").str();
+      S.Line = static_cast<unsigned>(O->getInteger("line").value_or(0));
+      S.Column = static_cast<unsigned>(O->getInteger("column").value_or(0));
+      S.OldName = O->getString("old").value_or("").str();
+      S.NewName = O->getString("new").value_or("").str();
+      S.Reason = O->getString("reason").value_or("").str();
+      if (S.OldName.empty()) return false;
+      Out.Skips.push_back(std::move(S));
+    }
+  }
   return true;
 }
 
@@ -448,7 +519,8 @@ auto applyEditsToContent(llvm::StringRef Original,
 auto mergeEditReports(
     const std::vector<EditReport>& Reports,
     std::map<std::string, std::vector<EditRecord>>& MergedByFile,
-    std::vector<std::string>& Conflicts) -> bool {
+    std::vector<std::string>& Conflicts, std::vector<RenameSkip>* Declined)
+    -> bool {
   // 0. Declarations vetoed by any report: some invocation found a reference to
   //    them that no byte range of any file spells (inside a macro body, or
   //    token-pasted).  Renaming is all-or-nothing, so every edit and resolution
@@ -524,6 +596,16 @@ auto mergeEditReports(
     return DeclinedNames.count(Old.str()) > 0 ||
            Unresolved.count(Old.str()) > 0;
   };
+  // Renames dropped here rather than by any invocation: no emit action
+  // reported a skip for them, because each one only saw a token it could not
+  // resolve on its own.  Reported by name -- which declaration the token meant
+  // is exactly what nothing could establish.
+  if (Declined)
+    for (const std::string& Name : Unresolved)
+      Declined->push_back(
+          {"", 0, 0, Name, "",
+           "a template-dependent use of this name was resolved by no "
+           "translation unit"});
 
   // 2. Gather all edits per file: ordinary edits + surviving resolutions.
   std::map<std::string, std::vector<EditRecord>> ByFile;
@@ -578,9 +660,10 @@ auto aggregateEdits(
     const std::vector<EditReport>& Reports,
     const std::function<std::optional<std::string>(llvm::StringRef)>& ReadFile,
     std::map<std::string, std::string>& Out,
-    std::vector<std::string>& Conflicts) -> bool {
+    std::vector<std::string>& Conflicts, std::vector<RenameSkip>* Declined)
+    -> bool {
   std::map<std::string, std::vector<EditRecord>> MergedByFile;
-  bool Ok = mergeEditReports(Reports, MergedByFile, Conflicts);
+  bool Ok = mergeEditReports(Reports, MergedByFile, Conflicts, Declined);
   for (const auto& [File, Merged] : MergedByFile) {
     std::optional<std::string> Original = ReadFile(File);
     if (!Original) {
@@ -618,7 +701,8 @@ auto appendRecordListFrom(llvm::StringRef ListFile,
 }
 
 auto runEditAggregation(const std::vector<std::string>& InputPaths,
-                        llvm::StringRef Root, bool Apply, bool Check) -> int {
+                        llvm::StringRef Root, bool Apply, bool Check,
+                        bool ReportSites) -> int {
   // Record keys are the file's real path.  Under Bazel that resolves to the
   // absolute workspace path (source symlinks), so absolute keys are used as-is;
   // relative keys (e.g. from a plain `--emit-edits` run) join with Root.
@@ -655,12 +739,20 @@ auto runEditAggregation(const std::vector<std::string>& InputPaths,
     Reports.push_back(std::move(R));
   }
 
+  // Every invocation's declined renames, plus the ones only the merge can
+  // find.  A skip is the one outcome no diff can show -- it is a change that
+  // is not there -- so it is reported in all three modes.
+  std::vector<RenameSkip> Skips;
+  for (const EditReport& R : Reports)
+    Skips.insert(Skips.end(), R.Skips.begin(), R.Skips.end());
+
   if (Check) {
     std::map<std::string, std::vector<EditRecord>> Merged;
     std::vector<std::string> Conflicts;
-    const bool Ok = mergeEditReports(Reports, Merged, Conflicts);
+    const bool Ok = mergeEditReports(Reports, Merged, Conflicts, &Skips);
     for (const std::string& C : Conflicts)
       llvm::errs() << "conflict: " << C << "\n";
+    reportRenameSkips(Skips, ReportSites, llvm::errs());
     std::size_t Total = 0;
     for (const auto& [File, Edits] : Merged) {
       if (Edits.empty()) continue;
@@ -677,9 +769,10 @@ auto runEditAggregation(const std::vector<std::string>& InputPaths,
 
   std::map<std::string, std::string> Out;
   std::vector<std::string> Conflicts;
-  const bool Ok = aggregateEdits(Reports, readFile, Out, Conflicts);
+  const bool Ok = aggregateEdits(Reports, readFile, Out, Conflicts, &Skips);
   for (const std::string& C : Conflicts)
     llvm::errs() << "conflict: " << C << "\n";
+  reportRenameSkips(Skips, ReportSites, llvm::errs());
 
   if (Apply) {
     for (const auto& [File, Content] : Out) {

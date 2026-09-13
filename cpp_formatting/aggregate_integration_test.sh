@@ -355,12 +355,38 @@ grep -q '"name": "itemCount"' counter_macro.json \
   || fail "audit: an unexpanded macro body naming the member should decline it"
 grep -q 'spelled where no reference the tool understands accounts for it' counter_macro.json \
   || fail "audit: unexpected veto reason: $(cat counter_macro.json)"
-if grep -q '"old": "itemCount"' counter_macro.json; then
-  fail "audit: the declined member must not be emitted as an edit"
+# The outcome, rather than the record shape: `itemCount` appears in the records
+# as a veto and as a reported skip, so it is the aggregated change that has to
+# be free of it.
+"$cpp_format" --aggregate --root="$tmpdir/macro" counter_macro.json \
+  > counter_macro.patch
+if grep -q 'item_count' counter_macro.patch; then
+  fail "audit: the declined member must not be rewritten"
 fi
-grep -q '"old": "otherCount"' counter_macro.json \
+grep -q 'other_count' counter_macro.patch \
   || fail "audit: the sibling member should still be renamed"
 echo "PASS: an unexpanded macro body in the owning header declines the rename locally"
+
+# A skipped rename is the one outcome the diff cannot show -- it is precisely a
+# change that is not there -- so aggregation reports it: a count always, and the
+# site with --report-rename-conflicts.  The emit action that found the skip is a
+# different process (under Bazel, a different action), so the report has to
+# travel in the records.
+skips="$("$cpp_format" --aggregate --root="$tmpdir/macro" counter_macro.json \
+  2>&1 >/dev/null)"
+[[ "$skips" == *"1 rename(s) skipped"* ]] \
+  || fail "aggregate: expected a skip count, got: $skips"
+sites="$("$cpp_format" --aggregate --report-rename-conflicts \
+  --root="$tmpdir/macro" counter_macro.json 2>&1 >/dev/null)"
+[[ "$sites" == *"skipped rename 'itemCount'"* ]] \
+  || fail "aggregate: expected the skipped site, got: $sites"
+[[ "$sites" == *"counter_macro.h:3:"* ]] \
+  || fail "aggregate: expected the declaration's location, got: $sites"
+agg_sites="$("$aggregate_edits" --report-rename-conflicts \
+  --root="$tmpdir/macro" counter_macro.json 2>&1 >/dev/null)"
+[[ "$agg_sites" == "$sites" ]] \
+  || fail "aggregate_edits reports skips differently than cpp_format --aggregate"
+echo "PASS: --aggregate reports the renames the emit actions declined"
 
 # ---------------------------------------------------------------------------
 # Test 6 — two rename rules: one rule's veto must not cancel the other's

@@ -415,7 +415,7 @@ def _aggregator_impl(ctx):
             _RECORD_LIST_SNIPPET +
             "rc=0\n" +
             '"$AGG" ' + ctx.attr.mode_flags +
-            ' --root="${BUILD_WORKSPACE_DIRECTORY:-$PWD}" --records-from="$list" || rc=$?\n' +
+            ' --root="${BUILD_WORKSPACE_DIRECTORY:-$PWD}" --records-from="$list" "$@" || rc=$?\n' +
             'rm -f "$list"\n' +
             "exit $rc\n"
         ),

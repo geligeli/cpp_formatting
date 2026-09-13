@@ -555,6 +555,14 @@ src/re.h:3:15: skipped rename 'pattern_' -> 'pattern': existing CXXMethod 'patte
 1 rename(s) skipped (name collision, or a reference that cannot be rewritten)
 ```
 
+The same report comes out of the Bazel integration, where the run that found
+the skip is a different process from the one that renders the change: each
+emit action records what it declined alongside its edits, and the aggregation
+step reports the repository's whole set. So `cpp_format.sh fix
+--report-rename-conflicts` (or `diff`, or `check`) says what it left alone —
+which no diff can show, a skipped rename being precisely a change that is not
+there.
+
 ---
 
 ### Names spelled through macros
@@ -804,7 +812,7 @@ clang-tidy `--export-fixes` + `clang-apply-replacements` model. Splitting a
 target's translation units across actions changes nothing in it: the records
 were always merged across processes.
 
-**Entry points.** `cpp_format.sh <check|diff|fix> [pattern]` is the ergonomic
+**Entry points.** `cpp_format.sh <check|diff|fix> [pattern] [flags]` is the ergonomic
 front door: it `bazel query`s the first-party `cc_*` targets under `pattern`
 (default `//...`), builds them with `--aspects=…%cpp_format_aspect
 --output_groups=+cpp_format_edits` to materialize each file's record, reads
@@ -813,7 +821,9 @@ which lists that target's current records — never a glob, which would pick up
 the stale record of a removed source), and runs `cpp_format --aggregate
 --records-from=<list>` over them. It is a plain script, not a `bazel run`
 target, precisely so it can invoke `bazel build` without nesting a Bazel server
-inside a running one. Because the aspect and the wrapper rely on flags of the
+inside a running one. Any argument starting with `-` is passed through to the
+aggregation step — `--report-rename-conflicts` lists every rename the run
+declined. Because the aspect and the wrapper rely on flags of the
 binary (`--owned-files`, `--aggregate --records-from`), the kit and the
 published binary are versioned together (see the release pin in
 `MODULE.bazel`). For a pinned CI gate, `cpp_format_targets(name, deps)`

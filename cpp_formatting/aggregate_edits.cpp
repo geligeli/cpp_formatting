@@ -34,6 +34,10 @@ static cl::list<std::string> RecordsFrom(
              "repository's worth of per-file records does not fit on a "
              "command line, so the Bazel rules pass them this way."),
     cl::value_desc("file"));
+static cl::opt<bool> ReportRenameConflicts(
+    "report-rename-conflicts",
+    cl::desc("List every rename the run declined, with its site and reason. A "
+             "one-line count is printed either way."));
 static cl::list<std::string> Inputs(cl::Positional,
                                     cl::desc("<records.json>..."),
                                     cl::ZeroOrMore);
@@ -49,5 +53,6 @@ int main(int argc, char** argv) {
                     "listed in --records-from=<file>)\n";
     return 2;
   }
-  return runEditAggregation(InputPaths, Root, Apply, Check);
+  return runEditAggregation(InputPaths, Root, Apply, Check,
+                            ReportRenameConflicts);
 }

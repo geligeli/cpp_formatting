@@ -241,6 +241,10 @@ void CppFormatActionFactory::emitEdits(llvm::raw_ostream& OS) {
                                    R.OwnerFile, R.OwnerOffset, Rule});
     }
   for (const auto& [Key, V] : Shared.Vetoes) Edits.Vetoes.push_back(V);
+  // Reporting only: each emit action sees just its own translation units, so
+  // the skips travel with the records and `--aggregate` reports the whole
+  // repository's set in one place (see RenameSkip in lint_lib.h).
+  Edits.Skips = Conflicts;
   Edits.emitJSON(OS);
 }
 

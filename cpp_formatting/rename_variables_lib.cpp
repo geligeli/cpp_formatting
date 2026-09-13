@@ -2014,21 +2014,9 @@ bool scopesShareADeclContext(VariableScope A, VariableScope B) {
 
 void reportRenameConflicts(const RenameConflicts& Conflicts, bool Verbose,
                            llvm::raw_ostream& OS) {
-  if (Conflicts.empty()) return;
-  // One declaration is seen once per TU that includes it, so collapse.
-  std::set<std::tuple<std::string, unsigned, unsigned, std::string>> Seen;
-  for (const RenameConflict& C : Conflicts) {
-    if (!Seen.emplace(C.File, C.Line, C.Column, C.NewName).second) continue;
-    if (Verbose)
-      OS << relativizeToCwd(C.File) << ":" << C.Line << ":" << C.Column
-         << ": skipped rename '" << C.OldName << "' -> '" << C.NewName
-         << "': " << C.Reason << "\n";
-  }
-  OS << Seen.size()
-     << " rename(s) skipped (name collision, or a reference that cannot be "
-        "rewritten)"
-     << (Verbose ? "" : "; pass --report-rename-conflicts for the sites")
-     << "\n";
+  // The same report an aggregating run prints from the serialized records
+  // (EditReport::Skips), so a direct run and a Bazel run say the same thing.
+  reportRenameSkips(Conflicts, Verbose, OS);
 }
 
 // ---------------------------------------------------------------------------
@@ -2188,6 +2176,9 @@ void RenameActionFactory::emitEdits(llvm::raw_ostream& OS) {
                                    R.OwnerFile, R.OwnerOffset});
     }
   for (const auto& [Key, V] : Shared.Vetoes) Edits.Vetoes.push_back(V);
+  // Reporting only: each action sees just its own TUs, so the skips travel
+  // with the records and `--aggregate` reports the repository's whole set.
+  Edits.Skips = Conflicts;
   Edits.emitJSON(OS);
 }
 

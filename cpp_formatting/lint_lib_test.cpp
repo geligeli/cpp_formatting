@@ -386,6 +386,88 @@ TEST(EditRecords, JSONRoundTripCarriesOwnersAndVetoes) {
   EXPECT_EQ(Parsed.Vetoes[0].Name, "val");
 }
 
+TEST(EditRecords, JSONRoundTripCarriesSkips) {
+  EditReport R;
+  R.Skips.push_back({"h.h", 3, 7, "val", "val_", "existing Field 'val_'"});
+  R.Skips.push_back({"", 0, 0, "biz", "", "never resolved"});
+  std::string Json;
+  llvm::raw_string_ostream OS(Json);
+  R.emitJSON(OS);
+  OS.flush();
+
+  EditReport Parsed;
+  ASSERT_TRUE(parseEditReport(Json, Parsed));
+  ASSERT_EQ(Parsed.Skips.size(), 2u);
+  EXPECT_EQ(Parsed.Skips[0].File, "h.h");
+  EXPECT_EQ(Parsed.Skips[0].Line, 3u);
+  EXPECT_EQ(Parsed.Skips[0].Column, 7u);
+  EXPECT_EQ(Parsed.Skips[0].OldName, "val");
+  EXPECT_EQ(Parsed.Skips[0].NewName, "val_");
+  EXPECT_EQ(Parsed.Skips[0].Reason, "existing Field 'val_'");
+  EXPECT_TRUE(Parsed.Skips[1].File.empty());
+  EXPECT_EQ(Parsed.Skips[1].OldName, "biz");
+}
+
+// Records written before "skips" existed still parse: the array is for
+// reporting only, and an older emit action's records are merged with newer
+// ones all the time.
+TEST(EditRecords, JSONWithoutSkipsParses) {
+  EditReport Parsed;
+  ASSERT_TRUE(parseEditReport(
+      R"({"edits":[{"file":"a.cpp","offset":0,"length":3,"old":"val",)"
+      R"("new":"val_"}],"resolutions":[],"vetoes":[]})",
+      Parsed));
+  EXPECT_EQ(Parsed.Edits.size(), 1u);
+  EXPECT_TRUE(Parsed.Skips.empty());
+}
+
+TEST(ReportRenameSkips, CollapsesOneDeclarationAndPrefersTheSpecificReason) {
+  // The same declaration is seen once per TU that includes it, and can be
+  // declined twice over: by the check that knows the name it would have got,
+  // and by a backstop that only knows the spelling.  One line, the specific
+  // reason.
+  const std::vector<RenameSkip> Skips = {
+      {"h.h", 3, 7, "val", "", "spelled where no reference accounts for it"},
+      {"h.h", 3, 7, "val", "val_", "referenced from a macro body at h.h:6"},
+      {"h.h", 3, 7, "val", "val_", "referenced from a macro body at h.h:6"},
+      {"", 0, 0, "biz", "", "never resolved"},
+  };
+  std::string Out;
+  llvm::raw_string_ostream OS(Out);
+  reportRenameSkips(Skips, /*Verbose=*/true, OS);
+  OS.flush();
+  EXPECT_EQ(Out,
+            "h.h:3:7: skipped rename 'val' -> 'val_': referenced from a macro "
+            "body at h.h:6\n"
+            "skipped rename 'biz': never resolved\n"
+            "2 rename(s) skipped (name collision, or a reference that cannot "
+            "be rewritten)\n");
+}
+
+TEST(ReportRenameSkips, EmptyReportsNothingAtAll) {
+  std::string Out;
+  llvm::raw_string_ostream OS(Out);
+  reportRenameSkips({}, /*Verbose=*/true, OS);
+  OS.flush();
+  EXPECT_TRUE(Out.empty());
+}
+
+TEST(AggregateEdits, ADependentUseNobodyResolvedIsReportedAsADecline) {
+  // The one skip no invocation can report: each emit action only saw a token
+  // it could not resolve on its own, so the decline happens in the merge.
+  EditReport Decl, Tmpl;
+  Decl.Edits.push_back({"c.h", 0, 3, "val", "val_", "c.h", 0});
+  Tmpl.Resolutions.push_back({"t.h", 0, 3, "val", "", false});  // pending
+
+  std::map<std::string, std::vector<EditRecord>> Merged;
+  std::vector<std::string> Conflicts;
+  std::vector<RenameSkip> Declined;
+  ASSERT_TRUE(mergeEditReports({Decl, Tmpl}, Merged, Conflicts, &Declined));
+  ASSERT_EQ(Declined.size(), 1u);
+  EXPECT_EQ(Declined[0].OldName, "val");
+  EXPECT_TRUE(Declined[0].File.empty());
+}
+
 TEST(AggregateEdits, ReportsConflictOnOverlappingDistinctEdits) {
   EditReport A, B;
   A.Edits.push_back({"a.cpp", 0, 3, "int", "u32"});

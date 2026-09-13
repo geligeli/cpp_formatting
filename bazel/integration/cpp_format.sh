@@ -8,7 +8,7 @@
 # so editing one .cpp re-parses one file), then merges every record into one
 # repository-wide change with `cpp_format --aggregate`.
 #
-#   Usage: cpp_format.sh <check|diff|fix|compile_commands> [target-pattern]
+#   Usage: cpp_format.sh <check|diff|fix|compile_commands> [target-pattern] [flags]
 #
 #     check            exit 1 if any edit would be made (CI lint gate); writes nothing
 #     diff             print the merged, git-apply-able unified patch
@@ -16,10 +16,15 @@
 #     compile_commands write compile_commands.json in the workspace root (for
 #                      clangd & co.); compiles nothing and never runs cpp_format
 #
-#   target-pattern defaults to //... (the whole repo). Examples:
+#   target-pattern defaults to //... (the whole repo). Any argument starting
+#   with `-` is passed through to `cpp_format --aggregate`; the one worth
+#   knowing is --report-rename-conflicts, which lists every rename the run
+#   declined (a count is printed either way -- a skipped rename is the one
+#   outcome the diff cannot show). Examples:
 #     cpp_format.sh fix                 # fix the entire repo
 #     cpp_format.sh diff //app/...      # preview just one package tree
 #     cpp_format.sh check //lib:core    # gate a single target (+ its sources)
+#     cpp_format.sh fix --report-rename-conflicts   # ... and say what it skipped
 #     cpp_format.sh compile_commands    # refresh compile_commands.json
 #
 #   Tag a target `no-cpp-format` to exclude it from formatting (it still gets
@@ -38,15 +43,40 @@ ASPECT="${CPP_FORMAT_ASPECT:-//third_party/cpp_format:cpp_format.bzl%cpp_format_
 BIN_LABEL="${CPP_FORMAT_BIN_LABEL:-@cpp_format_bin//:cpp_format}"
 BAZEL="${BAZEL:-bazel}"
 
+usage() {
+  echo "usage: $0 <check|diff|fix|compile_commands> [target-pattern] [--aggregate-flag...]" >&2
+  exit 2
+}
+
 mode="${1:-}"
-pattern="${2:-//...}"
 case "$mode" in
   check) agg=(--check) ;;
   diff)  agg=() ;;
   fix)   agg=(--apply) ;;
   compile_commands) agg=() ;;
-  *) echo "usage: $0 <check|diff|fix|compile_commands> [target-pattern]" >&2; exit 2 ;;
+  *) usage ;;
 esac
+shift || true
+
+# The remaining arguments: at most one target pattern, plus any flags to hand
+# to `cpp_format --aggregate` (--report-rename-conflicts being the useful one).
+pattern=""
+for arg in "$@"; do
+  case "$arg" in
+    -*)
+      if [[ "$mode" == compile_commands ]]; then
+        echo "$0: $mode takes no flags (got '$arg')" >&2
+        usage
+      fi
+      agg+=("$arg")
+      ;;
+    *)
+      [[ -z "$pattern" ]] || { echo "$0: more than one target pattern ('$pattern', '$arg')" >&2; usage; }
+      pattern="$arg"
+      ;;
+  esac
+done
+pattern="${pattern:-//...}"
 
 # The same merge the `<name>.compile_commands` run target performs (kept in
 # sync with _MERGE_COMPILE_COMMANDS_SNIPPET in cpp_format.bzl): each target's
