@@ -1,0 +1,33 @@
+# Members and methods in one run, with the two naming styles chosen so their
+# output namespaces cannot overlap.
+#
+# Each rule collects independently, and `collides()` asks whether a new name is
+# taken in the DeclContext *as the AST spells it* -- i.e. before any other
+# rule's renames.  So two rules can pick the same new name for a field and a
+# method of the same class and neither would notice:
+#
+#   class Widget { int Value() const { return value_; } int value_; };
+#
+# under `member: snake_case` + `method: snake_case` becomes `int value() const
+# { return value; } int value;` -- which does not compile, and is not reported.
+# That is the getter/field pattern, so on a real corpus it is not an edge case.
+#
+# `trailing_` and `snake_case` cannot collide by construction: every member
+# name ends in `_` and no snake_case name does.  (`m_prefix` + `UpperCamelCase`
+# is disjoint the same way, on the first character instead of the last.)
+# cpp_format checks this itself now and refuses a pair it cannot prove
+# disjoint, so this ruleset doubles as the case that has to keep passing the
+# check -- if the styles here ever stop being provably disjoint, every scenario
+# using it fails at `check` rather than silently miscompiling.
+#
+# The method style is `snake_case` for a second reason: on a Google-style
+# corpus the names the standard library reaches for by name -- begin, end,
+# size, data, swap, c_str -- are already snake_case, so they stay put.
+# Renaming methods to UpperCamelCase would rewrite them and break range-for,
+# the iterator protocol and every std algorithm, for reasons that have nothing
+# to do with this tool.
+normalize_variables:
+  - scope: member
+    style: trailing_
+  - scope: method
+    style: snake_case

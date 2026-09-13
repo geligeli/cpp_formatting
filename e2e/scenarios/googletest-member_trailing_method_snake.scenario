@@ -1,0 +1,32 @@
+# Members and methods renamed in one run. The styles are chosen so the two
+# rules cannot land on the same name -- see the ruleset -- and cpp_format now
+# refuses the combinations that can, so this is the shape that gets to run.
+#
+# The member half is fine: this found and fixed a real defect in it, where one
+# rule's veto cancelled another rule's dependent-token resolution because the
+# sidecar records had no rule index, so a member's declaration was renamed and
+# its dependent use left behind. googletest's MatcherBase VTable is the case.
+#
+# What remains is the method half, and it is not a near miss: 11044 errors.
+# Renaming member functions misses every reference that carries an *unresolved
+# overload set* rather than a resolved declaration. Two shapes dominate:
+# a call inside a template whose arguments are dependent, so overload
+# resolution is deferred and the callee is an UnresolvedMemberExpr rather than
+# a MemberExpr -- gtest-matchers.h calls Init(impl) from a constructor
+# template, and Init is renamed at its declaration but not at the call -- and a
+# using-declaration naming a member of a dependent base, as in
+# using FlatTuple::FlatTupleBase::Get. Both are node kinds the cross-TU
+# dependent-token path does not visit; it covers x.member and Helper<T>::member
+# only. Sample counts: Init 1108, Apply 419, CastImpl 314, Get 164.
+#
+# So this is a real gap in the method scope, not in the combination: the ruleset
+# is sound and the member half of it is green. Promote when the unresolved-
+# overload shapes are handled.
+#
+# NB: this file is sourced by bash, so values must not contain backticks or the
+# dollar sign.
+REPO=googletest
+RULESET=member_trailing_method_snake
+EXPECT=known_fail
+EXPECT_FAIL_PHASE=rebuild
+EXPECT_FAIL_REASON='Renaming member functions misses references that carry an unresolved overload set: a call with dependent arguments (UnresolvedMemberExpr, not MemberExpr) and a using-declaration naming a dependent base member. The declaration is renamed and those uses are left spelling the old name. Minimal shape: template <class T> struct B { template <class U> B(U* p) { Init(p); } template <class M> void Init(M&& m); };'

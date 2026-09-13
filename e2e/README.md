@@ -119,6 +119,17 @@ BUILD_FLAGS=()                # extra flags for its builds
 
 **A ruleset** — `e2e/rulesets/<name>.yaml`, a literal `cpp_format.yaml`.
 
+A ruleset that renames in **two scopes at once** has to pick styles whose
+output namespaces cannot overlap. Each rule collects independently, and the
+collision check asks whether a new name is taken in the DeclContext *as the AST
+spells it* — so two rules can pick the same new name for a field and a method
+of one class and neither notices. `member: snake_case` + `method: snake_case`
+turns the ordinary getter/field pair into `int value() const { return value; }`
+next to `int value;`. `cpp_format` refuses a pair it cannot prove disjoint, so
+a ruleset like that fails at `check` with an explanation rather than at
+`rebuild`; `member_trailing_method_snake` is the shape that passes, because
+every member name ends in `_` and no snake_case name does.
+
 **A scenario** — `e2e/scenarios/<repo>-<ruleset>.scenario`, pairing the two plus
 the expectation (and optionally a second ruleset, see above). Run it once locally before committing `EXPECT`: a wrong value
 fails either way (normally, or via XPASS), so it cannot rot silently, but the

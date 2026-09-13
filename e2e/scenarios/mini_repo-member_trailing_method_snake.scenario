@@ -1,0 +1,8 @@
+# The harness's own test for the combined rename: seconds, no network. The
+# fixture's members carry no trailing underscore, so the member half renames
+# them and the template-dependent access follows; its methods are already
+# snake_case, so the method half is a no-op here -- the corpus scenarios are
+# what exercise that side.
+REPO=mini_repo
+RULESET=member_trailing_method_snake
+EXPECT=pass
