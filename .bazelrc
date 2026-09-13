@@ -33,6 +33,20 @@ build:windows --cxxopt=/GR-
 build:windows --cxxopt=/Zc:preprocessor
 build:windows --cxxopt=/wd5105
 
+# MSVC defaults to /permissive (non-conforming name lookup) in pre-C++20 modes.
+# Under it, `friend class TrailingObjects;` inside a class deriving from
+# TrailingObjects<...> resolves to the namespace-level template rather than the
+# base's injected-class-name, and MSVC then rejects it:
+#
+#   TrieRawHashMap.cpp(111): error C2990: 'llvm::TrailingObjects':
+#     non-class template has already been declared as a class template
+#
+# That file is new in LLVM 21, which is why this first bit on that upgrade.
+# Conformance mode is the fix upstream points to for this class of error
+# (llvm/llvm-project#163865, where the source-level workaround was declined),
+# and it keeps the LLVM source unpatched.
+build:windows --cxxopt=/permissive-
+
 # Silence the MSVC warnings LLVM headers trigger in volume (C4624 alone fired
 # ~10k times per build); LLVM's own CMake build suppresses the same set on
 # MSVC. Kept to warnings actually observed in CI logs.

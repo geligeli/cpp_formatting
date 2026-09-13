@@ -178,7 +178,7 @@
     },
     "//third_party/llvm:extensions.bzl%llvm": {
       "general": {
-        "bzlTransitiveDigest": "0zgKYQVJU4IzmBiKHKZbHYRmgzj9u4SdLdMW9M0j4E0=",
+        "bzlTransitiveDigest": "642mz/T8anyK8nidr+XiOHtGZfm+linKtndHZhyCK04=",
         "usagesDigest": "CrcKKa5oBdOTLY3ZeaVBiY2x3U16aVNPJGOoRUUcsgs=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
@@ -194,8 +194,7 @@
               "patches": [
                 "@@//patches:llvm_blake3_no_asm_on_windows.patch",
                 "@@//patches:llvm_zlib_std_c11_msvc.patch",
-                "@@//patches:llvm_zstd_no_asm_on_windows.patch",
-                "@@//patches:llvm_trailing_objects_friend_msvc.patch"
+                "@@//patches:llvm_zstd_no_asm_on_windows.patch"
               ],
               "sha256": "7ba3f2a8d8fda88be18a31d011e8195d3b7f87f9fa92b20c94cba2d7f65b0e3f",
               "strip_prefix": "llvm-project-llvmorg-21.1.8",

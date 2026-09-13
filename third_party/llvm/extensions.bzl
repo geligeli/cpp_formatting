@@ -19,7 +19,6 @@ def _llvm_impl(_module_ctx):
             "//patches:llvm_blake3_no_asm_on_windows.patch",
             "//patches:llvm_zlib_std_c11_msvc.patch",
             "//patches:llvm_zstd_no_asm_on_windows.patch",
-            "//patches:llvm_trailing_objects_friend_msvc.patch",
         ],
         sha256 = LLVM_SHA256,
         strip_prefix = "llvm-project-llvmorg-" + LLVM_VERSION,
