@@ -10,10 +10,12 @@
 #include <utility>
 #include <vector>
 
+#include "clang/Basic/Diagnostic.h"
 #include "clang/Tooling/Tooling.h"
 #include "cpp_formatting/lint_lib.h"
 #include "cpp_formatting/output_mode.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/raw_ostream.h"
 
 namespace clang {
 class ASTConsumer;
@@ -62,12 +64,48 @@ struct DependentResolution {
   bool Vetoed = false;   ///< conflicting / out-of-scope binding: do not rewrite
   std::string OldName;   ///< spelled member identifier (for emitting a record)
   unsigned Length = 0;   ///< length of the spelled token
+  /// The member the token resolves to, keyed as in RenameVetoes, so that a
+  /// veto of that member also drops this token in aggregation.
+  std::string OwnerFile;
+  unsigned OwnerOffset = 0;
 };
 
 /// (real path — or, for in-memory buffers, a presumed file name — and byte
 /// offset within that file) -> resolution.
 using DependentResolutions =
     std::map<std::pair<std::string, unsigned>, DependentResolution>;
+
+// ---------------------------------------------------------------------------
+// Renames vetoed by a reference the tool cannot rewrite
+// ---------------------------------------------------------------------------
+//
+// A reference spelled inside a macro *body* — `#define BUMP(c) ((c).count +=
+// 1)` — or synthesized by token pasting has no byte range in any source file
+// that holds the name: the body token is one location shared by every
+// expansion, and a pasted token exists only in Clang's scratch buffer. Renaming
+// the declaration would leave such a reference spelling the old name, which is
+// a build break rather than a formatting change.
+//
+// Renaming is therefore all-or-nothing: a single unrewritable reference vetoes
+// the declaration, and it keeps its old name everywhere.  The veto is keyed by
+// the declaration's (real path, byte offset) — stable across TUs *and* across
+// processes, which is what lets one Bazel action's veto suppress the edits
+// another action already emitted for the same declaration (see EditRecord's
+// owner fields in lint_lib.h).
+//
+// Within one ClangTool::run() the map is threaded through every TU by the
+// factories.  A veto found in a TU processed *after* one that already renamed
+// the declaration cannot undo that TU's buffered rewrite, so the drivers
+// re-run the tool once when the first pass discovered any veto (see
+// runWithVetoRerun); nothing is written to disk until flush(), so discarding
+// the first pass costs nothing.  Emit mode skips that re-run: its output is
+// records carrying these vetoes, and aggregation does the dropping.
+//
+// A macro *argument* is not affected: `FWD(c.count)` spells `count` at the call
+// site, so it is rewritten normally (see ApplyRenamesVisitor::rewriteLoc). That
+// holds for template-dependent tokens too -- `EXPECT_FALSE(this->count_)` in a
+// class template -- since DependentResolutions is keyed by the spelling.
+using RenameVetoes = std::map<std::pair<std::string, unsigned>, RenameVeto>;
 
 // ---------------------------------------------------------------------------
 // Rename callback
@@ -178,8 +216,23 @@ class RenameActionFactory : public clang::tooling::FrontendActionFactory {
   void emitEdits(llvm::raw_ostream& OS);
 
   /// Renames that were skipped because the new name was already taken in the
-  /// same scope.  Empty unless such a clash was found.
+  /// same scope, or because a reference to them could not be rewritten.
   auto conflicts() const -> const RenameConflicts& { return Conflicts; }
+
+  /// Declarations vetoed during ClangTool::run() because some reference to
+  /// them cannot be rewritten.  Non-empty means an earlier TU may have renamed
+  /// a declaration a later one vetoed: discard the buffered output with
+  /// resetForRerun() and run the tool again.
+  auto vetoes() const -> const RenameVetoes& { return Vetoes; }
+
+  /// Drops everything buffered by a previous ClangTool::run() while keeping
+  /// the accumulated vetoes, so a second run applies only the renames that
+  /// survived.  Nothing has reached disk at this point (flush() has not run).
+  void resetForRerun();
+
+  /// False in Emit mode, whose records carry their own vetoes for aggregation
+  /// to act on, so a veto needs no second pass.  See runWithVetoRerun().
+  auto rerunNeededOnVeto() const -> bool { return Mode != OutputMode::Emit; }
 
  private:
   VariableRenameCallback CB;
@@ -193,9 +246,60 @@ class RenameActionFactory : public clang::tooling::FrontendActionFactory {
   // whole ClangTool::run() so a header TU can consume resolutions recorded by
   // earlier .cpp TUs.  See DependentResolutions above.
   DependentResolutions DepRes;
+  // Declarations that must not be renamed because a reference to them is not
+  // rewritable; persists across a re-run.  See RenameVetoes above.
+  RenameVetoes Vetoes;
   LintReport* Report = nullptr;
   std::string RuleId;
 };
+
+// ---------------------------------------------------------------------------
+// Driving a run that may veto renames
+// ---------------------------------------------------------------------------
+
+/// Runs \p Factory over \p Tool and, when the pass vetoed any rename, discards
+/// everything it buffered and runs it again with those vetoes known up front.
+/// Returns the last run's exit code.  Call flush()/emitEdits() afterwards, as
+/// for a plain ClangTool::run().
+///
+/// A veto discovered while processing one TU can invalidate a rename an earlier
+/// TU already buffered, and a Rewriter's edits cannot be taken back.  Nothing
+/// has reached disk before flush(), so re-running is the cheap way to make the
+/// result order-independent — and it costs nothing at all in the common case,
+/// where no macro names anything being renamed.
+///
+/// Usually one extra pass suffices, since the second renames a subset of the
+/// first and so can discover no new veto.  The exception is a name freed up by
+/// a veto and claimed by another declaration (see CollectRenamesVisitor's
+/// collides()), which can veto in turn; the loop runs to a fixpoint under a
+/// small cap.
+///
+/// Emit mode needs none of this and says so via rerunNeededOnVeto(): its output
+/// is records, not a Rewriter buffer, and aggregation already drops every edit
+/// whose owner any report vetoed — including edits and vetoes from this same
+/// run.  Skipping the re-run there is what keeps the Bazel path, where each
+/// target is its own process, from paying for a second parse.
+template <typename FactoryT>
+auto runWithVetoRerun(clang::tooling::ClangTool& Tool, FactoryT& Factory)
+    -> int {
+  constexpr int MaxPasses = 4;
+  int rc = Tool.run(&Factory);
+  size_t Vetoed = Factory.vetoes().size();
+  if (Vetoed == 0 || !Factory.rerunNeededOnVeto()) return rc;
+  llvm::errs() << "re-running: " << Vetoed
+               << " rename(s) vetoed by a reference that cannot be rewritten\n";
+  // The first pass already reported any parse diagnostics; don't repeat them.
+  clang::IgnoringDiagConsumer Silent;
+  Tool.setDiagnosticConsumer(&Silent);
+  for (int Pass = 1; Pass < MaxPasses; ++Pass) {
+    Factory.resetForRerun();
+    rc = Tool.run(&Factory);
+    if (Factory.vetoes().size() == Vetoed) break;
+    Vetoed = Factory.vetoes().size();
+  }
+  Tool.setDiagnosticConsumer(nullptr);
+  return rc;
+}
 
 // ---------------------------------------------------------------------------
 // Per-TU rename helper
@@ -214,6 +318,11 @@ class RenameActionFactory : public clang::tooling::FrontendActionFactory {
 /// are appended as edit records instead of being consumed for output, and
 /// template-dependent tokens are NOT applied (their resolutions are serialized
 /// separately for the aggregation phase).
+/// \p Vetoes, when non-null, enables all-or-nothing renaming: a scan pass over
+/// this TU records every declaration that has a reference the tool cannot
+/// rewrite (see RenameVetoes), those declarations are dropped from this TU's
+/// rename set before anything is applied, and declarations vetoed by an earlier
+/// TU are never collected in the first place.
 void runRenameRuleOnAST(clang::ASTContext& Ctx, clang::Rewriter& RW,
                         const VariableRenameCallback& CB, VariableScope Scope,
                         const FileSet& CollectFrom,
@@ -221,7 +330,8 @@ void runRenameRuleOnAST(clang::ASTContext& Ctx, clang::Rewriter& RW,
                         llvm::StringRef RuleId = "",
                         DependentResolutions* DepRes = nullptr,
                         EditReport* Edits = nullptr,
-                        RenameConflicts* Conflicts = nullptr);
+                        RenameConflicts* Conflicts = nullptr,
+                        RenameVetoes* Vetoes = nullptr);
 
 // ---------------------------------------------------------------------------
 // Convenience factories

@@ -26,7 +26,8 @@ class CppFormatConsumer : public ASTConsumer {
                     const std::string& ReturnRuleId, const FileSet& CollectFrom,
                     LintReport* Report,
                     std::vector<DependentResolutions>* DepResPerRule,
-                    EditReport* Edits, RenameConflicts* Conflicts)
+                    EditReport* Edits, RenameConflicts* Conflicts,
+                    RenameVetoes* Vetoes)
       : RW(RW),
         Rules(Rules),
         ReturnStyle(ReturnStyle),
@@ -35,14 +36,15 @@ class CppFormatConsumer : public ASTConsumer {
         Report(Report),
         DepResPerRule(DepResPerRule),
         Edits(Edits),
-        Conflicts(Conflicts) {}
+        Conflicts(Conflicts),
+        Vetoes(Vetoes) {}
 
   void HandleTranslationUnit(ASTContext& Ctx) override {
     for (size_t I = 0; I < Rules.size(); ++I)
       runRenameRuleOnAST(Ctx, RW, Rules[I].CB, Rules[I].Scope, CollectFrom,
                          Report, Rules[I].RuleId,
                          DepResPerRule ? &(*DepResPerRule)[I] : nullptr, Edits,
-                         Conflicts);
+                         Conflicts, Vetoes);
 
     if (ReturnStyle) {
       // MatchFinder::matchAST runs the matchers on the already-parsed AST —
@@ -67,6 +69,9 @@ class CppFormatConsumer : public ASTConsumer {
   std::vector<DependentResolutions>* DepResPerRule;
   EditReport* Edits;  // non-null in Emit mode
   RenameConflicts* Conflicts;
+  // One veto set for all rules: a reference that cannot be rewritten is
+  // unrewritable whatever new name a rule would have given it.
+  RenameVetoes* Vetoes;
 };
 
 // ---------------------------------------------------------------------------
@@ -86,7 +91,8 @@ class CppFormatAction : public ASTFrontendAction {
                   const FileSet& CollectFrom, PendingRewrites* Pending,
                   LintReport* Report,
                   std::vector<DependentResolutions>* DepResPerRule,
-                  EditReport* Edits, RenameConflicts* Conflicts)
+                  EditReport* Edits, RenameConflicts* Conflicts,
+                  RenameVetoes* Vetoes)
       : Rules(Rules),
         ReturnStyle(ReturnStyle),
         ReturnRuleId(ReturnRuleId),
@@ -96,7 +102,8 @@ class CppFormatAction : public ASTFrontendAction {
         Report(Report),
         DepResPerRule(DepResPerRule),
         Edits(Edits),
-        Conflicts(Conflicts) {}
+        Conflicts(Conflicts),
+        Vetoes(Vetoes) {}
 
   void EndSourceFileAction() override {
     SourceManager& SM = TheRewriter.getSourceMgr();
@@ -124,7 +131,7 @@ class CppFormatAction : public ASTFrontendAction {
     TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
     return std::make_unique<CppFormatConsumer>(
         TheRewriter, Rules, ReturnStyle, ReturnRuleId, CollectFrom, Report,
-        DepResPerRule, Edits, Conflicts);
+        DepResPerRule, Edits, Conflicts, Vetoes);
   }
 
  private:
@@ -138,6 +145,9 @@ class CppFormatAction : public ASTFrontendAction {
   std::vector<DependentResolutions>* DepResPerRule;
   EditReport* Edits;
   RenameConflicts* Conflicts;
+  // One veto set for all rules: a reference that cannot be rewritten is
+  // unrewritable whatever new name a rule would have given it.
+  RenameVetoes* Vetoes;
   Rewriter TheRewriter;
 };
 
@@ -162,7 +172,19 @@ auto CppFormatActionFactory::create()
     -> std::unique_ptr<clang::FrontendAction> {
   return std::make_unique<CppFormatAction>(
       Rules, ReturnStyle, ReturnRuleId, Mode, CollectFrom, &Pending, Report,
-      &DepResPerRule, Mode == OutputMode::Emit ? &Edits : nullptr, &Conflicts);
+      &DepResPerRule, Mode == OutputMode::Emit ? &Edits : nullptr, &Conflicts,
+      &Vetoes);
+}
+
+void CppFormatActionFactory::resetForRerun() {
+  Pending.clear();
+  Edits = EditReport{};
+  Conflicts.clear();
+  for (DependentResolutions& Map : DepResPerRule) Map.clear();
+  // Lint diagnostics are recorded at the same choke point as the rewrites, so
+  // they have to be discarded with them or the second pass appends to them.
+  if (Report) Report->clear();
+  // Vetoes are deliberately kept: they are what the second run acts on.
 }
 
 void CppFormatActionFactory::emitEdits(llvm::raw_ostream& OS) {
@@ -174,8 +196,10 @@ void CppFormatActionFactory::emitEdits(llvm::raw_ostream& OS) {
     for (const auto& [Key, R] : Map) {
       if (!R.HasName && !R.Vetoed) continue;
       Edits.Resolutions.push_back({relativizeToCwd(Key.first), Key.second,
-                                   R.Length, R.OldName, R.NewName, R.Vetoed});
+                                   R.Length, R.OldName, R.NewName, R.Vetoed,
+                                   R.OwnerFile, R.OwnerOffset});
     }
+  for (const auto& [Key, V] : Vetoes) Edits.Vetoes.push_back(V);
   Edits.emitJSON(OS);
 }
 

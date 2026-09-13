@@ -1,6 +1,7 @@
-# A deterministic, seconds-long reproduction of the macro limitation: a member
-# referenced only from inside a macro body. Gives that documented caveat a fast
-# regression test, rather than relying on finding it inside abseil.
+# A deterministic, seconds-long check that a member referenced only from inside
+# a macro body is left alone -- the reference has no spelling the tool can
+# rewrite, so the rename is vetoed everywhere rather than half-applied -- while
+# a sibling member with no macro reference renames normally.
 REPO_KIND=local
 REPO_PATH=e2e/testdata/macro_repo
 TARGET_PATTERN='//...'

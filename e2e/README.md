@@ -129,10 +129,13 @@ or `./tools/cpp_format.sh diff` by hand.
 For a `rebuild` failure, `rebuild.log` holds the full error set (`--keep_going`
 is on). The usual causes, in rough order of likelihood:
 
-1. **A macro-expanded reference.** `renameAt()` skips any location with
-   `isMacroID()`, so a member used inside a macro body keeps the old name while
-   its declaration is renamed. `macro_repo-member_snake_case` is a deterministic
-   reproduction.
+1. **A macro-expanded reference the veto did not see.** A member referenced from
+   a macro body is not renamed at all — the reference has no rewritable spelling,
+   so the whole rename is vetoed (AGENTS.md, "names spelled through macros").
+   That only holds for expansions in a TU the tool actually parses, so a macro
+   expanded solely in a `no-cpp-format` target, under an `#if` branch this build
+   does not take, or outside the formatted pattern is still invisible.
+   `macro_repo-member_snake_case` pins the case that *is* covered.
 2. **`textual_hdrs`.** The aspect's `_own_files()` walks only `srcs` and `hdrs`,
    so declarations in `textual_hdrs` are neither parsed nor propagated as owned
    headers.
@@ -144,7 +147,8 @@ is on). The usual causes, in rough order of likelihood:
 
 `normalize_variables --debug-trace` prints every candidate site with `main=`,
 `macro=` and `WILL_RENAME` flags, which is usually the fastest way to confirm
-which of these you are looking at.
+which of these you are looking at; `--report-rename-conflicts` lists every
+rename that was skipped and why.
 
 ## Notes
 

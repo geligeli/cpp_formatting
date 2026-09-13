@@ -237,3 +237,80 @@ if grep -q 'e.val_' "$vetodir/dep_a.cpp"; then
   fail "veto test: out-of-scope Ext::val must be left unchanged"
 fi
 echo "PASS: out-of-scope instantiation vetoes the shared dependent token"
+
+# ---------------------------------------------------------------------------
+# Test 7 — a reference inside a macro body vetoes the rename, in every TU
+#
+# `BUMP`'s body spells `itemCount` once, at a location shared by every
+# expansion, so it cannot be rewritten -- and renaming the declaration without
+# it does not compile.  The catch is ordering: counter.cpp is processed before
+# the TU that expands BUMP, so the veto arrives after that file was already
+# rewritten.  The tool discards the first pass and runs again, which is what
+# makes the result independent of the source order.  `otherCount`, which no
+# macro names, is renamed throughout.
+# ---------------------------------------------------------------------------
+macrodir="$tmpdir/macro"
+mkdir -p "$macrodir"
+cat > "$macrodir/counter.h" <<'EOF'
+#ifndef COUNTER_H
+#define COUNTER_H
+struct Counter {
+  int itemCount;
+  int otherCount;
+};
+#define BUMP(c) ((c).itemCount += 1)
+int total(const Counter& c);
+#endif
+EOF
+cat > "$macrodir/counter.cpp" <<'EOF'
+#include "counter.h"
+int total(const Counter& c) { return c.itemCount + c.otherCount; }
+EOF
+cat > "$macrodir/main.cpp" <<'EOF'
+#include "counter.h"
+int main() {
+  Counter c{0, 0};
+  BUMP(c);
+  return total(c);
+}
+EOF
+
+report="$("$binary" \
+  --style=snake_case --scope=member --in-place --report-rename-conflicts \
+  "$macrodir/counter.cpp" "$macrodir/main.cpp" "$macrodir/counter.h" \
+  -- -std=c++17 -xc++ -Wno-pragma-once-outside-header -I"$macrodir" 2>&1)"
+
+grep -q 'referenced from a macro body' <<<"$report" \
+  || fail "macro test: the skipped rename was not reported"
+if grep -q 'item_count' "$macrodir/counter.h" "$macrodir/counter.cpp"; then
+  fail "macro test: itemCount was renamed despite a reference in a macro body"
+fi
+grep -q 'int other_count;' "$macrodir/counter.h" \
+  || fail "macro test: otherCount should still be renamed in the header"
+grep -q 'c.other_count' "$macrodir/counter.cpp" \
+  || fail "macro test: otherCount use should still be renamed in the .cpp"
+echo "PASS: a macro-body reference vetoes the rename regardless of source order"
+
+# ---------------------------------------------------------------------------
+# Test 8 — a name written as a macro *argument* is spelled at the call site,
+# so it is renamed like any other reference.
+# ---------------------------------------------------------------------------
+argdir="$tmpdir/macroarg"
+mkdir -p "$argdir"
+cat > "$argdir/arg.cpp" <<'EOF'
+#define FWD(x) ((x) + 0)
+#define OUTER(y) FWD(y)
+#define FIELD(n) int n;
+struct Boxed { FIELD(innerCount) };
+int use(Boxed& b) { return FWD(b.innerCount) + OUTER(b.innerCount); }
+EOF
+
+"$binary" \
+  --style=snake_case --scope=member --in-place "$argdir/arg.cpp" \
+  -- -std=c++17 -xc++
+
+grep -q 'FIELD(inner_count)' "$argdir/arg.cpp" \
+  || fail "macro arg test: declaration written as a macro argument not renamed"
+grep -q 'FWD(b.inner_count) + OUTER(b.inner_count)' "$argdir/arg.cpp" \
+  || fail "macro arg test: macro-argument uses not renamed"
+echo "PASS: names written as macro arguments are renamed at the call site"

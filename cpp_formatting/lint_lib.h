@@ -40,6 +40,11 @@ class LintReport {
  public:
   void add(LintDiagnostic Diag);
 
+  // Discards every diagnostic recorded so far.  Used when a run is redone from
+  // scratch (see runWithVetoRerun), so the second pass does not append to the
+  // first pass's findings.
+  void clear() { Diagnostics.clear(); }
+
   auto empty() const -> bool { return Diagnostics.empty(); }
   auto size() const -> std::size_t { return Diagnostics.size(); }
   auto diagnostics() const -> const std::vector<LintDiagnostic>& {
@@ -96,12 +101,36 @@ auto emitLintResults(const LintReport& Report, const PendingRewrites& Rewrites,
 // (from a plain --emit-edits run) with its --root.
 
 // One text replacement at a byte range of a file's ORIGINAL content.
+//
+// A rename edit also names the declaration it belongs to (OwnerFile,
+// OwnerOffset — the real path and byte offset of that declaration's name
+// token, stable across TUs and processes).  Aggregation drops every edit whose
+// owner some other invocation vetoed, which is what keeps a rename all-or-
+// nothing across targets: the library's action renames the declaration while
+// the binary's action discovers a reference it cannot rewrite.  Edits that are
+// not renames (trailing-return rewrites) leave OwnerFile empty and are never
+// vetoed.
 struct EditRecord {
   std::string File;
   unsigned Offset = 0;
   unsigned Length = 0;
-  std::string Old;  ///< original bytes (verification / debugging)
-  std::string New;  ///< replacement bytes
+  std::string Old;        ///< original bytes (verification / debugging)
+  std::string New;        ///< replacement bytes
+  std::string OwnerFile;  ///< declaration this rename belongs to, or ""
+  unsigned OwnerOffset = 0;
+};
+
+// A declaration that must not be renamed because some reference to it cannot be
+// rewritten — it is spelled inside a macro body, or synthesized by token
+// pasting, so no byte range of any source file holds the name.  Renaming the
+// declaration anyway would leave that reference spelling the old name, i.e.
+// break the build.  Keyed like EditRecord's owner: (real path, byte offset) of
+// the declaration's name token.
+struct RenameVeto {
+  std::string File;
+  unsigned Offset = 0;
+  std::string Name;    ///< the declaration's spelled name (for reporting)
+  std::string Reason;  ///< why the reference could not be rewritten
 };
 
 // A template-dependent member token resolved from an instantiation, pending
@@ -114,16 +143,22 @@ struct ResolutionRecord {
   std::string Old;
   std::string New;
   bool Veto = false;
+  std::string OwnerFile;  ///< member this token resolves to, or ""
+  unsigned OwnerOffset = 0;
 };
 
 // One invocation's output: ordinary edits plus the dependent-token sidecar.
 struct EditReport {
   std::vector<EditRecord> Edits;
   std::vector<ResolutionRecord> Resolutions;
+  std::vector<RenameVeto> Vetoes;
 
-  auto empty() const -> bool { return Edits.empty() && Resolutions.empty(); }
+  auto empty() const -> bool {
+    return Edits.empty() && Resolutions.empty() && Vetoes.empty();
+  }
 
-  // Serializes as a JSON object {"edits":[...],"resolutions":[...]}.
+  // Serializes as a JSON object
+  // {"edits":[...],"resolutions":[...],"vetoes":[...]}.
   void emitJSON(llvm::raw_ostream& OS) const;
 };
 
@@ -131,7 +166,8 @@ struct EditReport {
 // \p Out.  Returns false on malformed input.
 auto parseEditReport(llvm::StringRef Json, EditReport& Out) -> bool;
 
-// Resolves the union of dependent-token resolution records (agree -> edit; veto
+// Drops every edit and resolution whose owning declaration any report vetoed,
+// resolves the union of dependent-token resolution records (agree -> edit; veto
 // or disagreement -> dropped, promoting survivors to edits) and merges all
 // edits per file (dedup byte-identical; distinct overlap -> a message appended
 // to \p Conflicts and that file omitted).  Performs no file I/O — the merged,

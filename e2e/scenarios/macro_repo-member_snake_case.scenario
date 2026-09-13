@@ -1,5 +1,3 @@
 REPO=macro_repo
 RULESET=member_snake_case
-EXPECT=known_fail
-EXPECT_FAIL_PHASE=rebuild
-EXPECT_FAIL_REASON="ApplyRenamesVisitor::renameAt() (rename_variables_lib.cpp:376) returns early on Loc.isMacroID(), so the member reference inside BUMP's macro body keeps the old name while its declaration is renamed."
+EXPECT=pass

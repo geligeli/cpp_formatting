@@ -23,13 +23,13 @@ fetched.
 bazel_dep(name = "cpp_formatting", version = "0.1.0")
 archive_override(
     module_name = "cpp_formatting",
-    urls = ["https://github.com/geligeli/cpp_formatting/archive/refs/tags/20260721-eec734d.tar.gz"],
-    strip_prefix = "cpp_formatting-20260721-eec734d",
+    urls = ["https://github.com/geligeli/cpp_formatting/archive/refs/tags/20260913-5ea87d3.tar.gz"],
+    strip_prefix = "cpp_formatting-20260913-5ea87d3",
 )
 
 cpp_format = use_extension("@cpp_formatting//bazel/integration:extensions.bzl", "cpp_format")
 cpp_format.release(
-    version = "20260721-eec734d",
+    version = "20260913-5ea87d3",
     # Optional but recommended for reproducible CI — pin per-asset hashes:
     # sha256 = {"cpp_format-linux-x86_64": "…"},
 )
@@ -309,7 +309,7 @@ bazel run //cpp_formatting:normalize_variables -- \
 | `--in-place` / `-i` | Overwrite files on disk (default: dry-run to stdout) |
 | `--lint` | Analyze only — report violations, modify nothing, exit 1 if any are found (see [Lint mode (CI/CD)](#lint-mode-cicd)) |
 | `--format=<fmt>` | Output format for `--lint`: `text` (default), `sarif`, or `diff` |
-| `--debug-trace` | Print, per TU, every rename target and reference site found in the AST. Makes no modifications. |
+| `--debug-trace` | Print, per TU, every rename target and reference site found in the AST, and whether each would be rewritten. Makes no modifications. |
 
 **Supported scopes:**
 
@@ -326,7 +326,7 @@ bazel run //cpp_formatting:normalize_variables -- \
 
 **Cross-file renaming:** list all files that share declarations — order does not matter. The tool auto-promotes header files to the end of the source list so each `.cpp` is parsed against the original on-disk header content; edits are buffered and committed atomically once every TU has been processed.
 
-**Debugging missed renames:** if you suspect the tool isn't renaming everything you expected, run with `--debug-trace`. It prints the full rename map and every reference site found in each TU, with `main=Y/N`, `macro=Y/N`, and a `WILL_RENAME` marker on sites that would actually be rewritten. A site that never appears with `WILL_RENAME` in any TU is missing from the source list passed to the tool.
+**Debugging missed renames:** if you suspect the tool isn't renaming everything you expected, run with `--debug-trace`. It prints the full rename map and every reference site found in each TU, with `main=Y/N`, `macro=Y/N`, and a marker per site: `WILL_RENAME` if it would be rewritten, `VETOES_RENAME` if it cannot be (see "Names spelled through macros" below), nothing if the site belongs to another TU. A site that never appears with `WILL_RENAME` in any TU is either vetoed or missing from the source list passed to the tool.
 
 ### Tests
 
@@ -425,8 +425,56 @@ A one-line count of skipped renames is printed to stderr; pass
 
 ```
 src/re.h:3:15: skipped rename 'pattern_' -> 'pattern': existing CXXMethod 'pattern'
-1 rename(s) skipped to avoid a name collision
+1 rename(s) skipped (name collision, or a reference that cannot be rewritten)
 ```
+
+---
+
+### Names spelled through macros
+
+Whether a reference can be renamed depends on what the preprocessor did to it.
+
+A name written as a macro **argument** is spelled at the call site, in ordinary
+source, so it renames like any other reference — including when the argument is
+forwarded through several macros, and including a declaration written that way:
+
+```c
+#define FIELD(n) int n;
+#define FWD(x)   ((x) + 0)
+
+struct Counter { FIELD(itemCount) };              // -> FIELD(item_count)
+int use(Counter& c) { return FWD(c.itemCount); }  // -> FWD(c.item_count)
+```
+
+This covers the common test-framework shape, where a member of a class template
+is reached through `this->` inside a macro argument:
+
+```c
+TYPED_TEST(MyFixture, Works) { EXPECT_FALSE(this->table_->IsPrime(0)); }
+```
+
+A name spelled inside a macro **body**, or built by token pasting (`##`), has no
+byte range of its own that the tool could rewrite: the body token is a single
+location shared by every expansion, and a pasted token exists only inside the
+compiler. Renaming the declaration without them would leave those references
+spelling the old name — a broken build. So a single such reference **vetoes the
+whole rename**: the declaration keeps its name everywhere, and the skip is
+reported like a name collision.
+
+```c
+struct Counter { int itemCount; };
+#define BUMP(c) ((c).itemCount += 1)   // vetoes renaming Counter::itemCount
+```
+
+```
+src/counter.h:4:7: skipped rename 'itemCount' -> 'item_count': referenced from a macro body at src/counter.h:7
+```
+
+The veto only accounts for expansions the tool actually parses. A macro expanded
+solely in code outside the files you passed (or, under Bazel, in a target tagged
+`no-cpp-format`, or under an `#if` branch this build does not take) is invisible,
+and that reference is missed — which shows up as a compile error on the next
+build rather than as silently wrong code.
 
 ---
 

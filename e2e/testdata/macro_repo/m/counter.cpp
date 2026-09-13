@@ -2,7 +2,8 @@
 
 namespace m {
 
-// An ordinary (non-macro) use: this one is renamed.
-int total(const Counter& c) { return c.itemCount; }
+// An ordinary use of both members: otherCount is renamed here, itemCount is
+// left alone together with its declaration.
+int total(const Counter& c) { return c.itemCount + c.otherCount; }
 
 }  // namespace m

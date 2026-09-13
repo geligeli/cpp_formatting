@@ -314,23 +314,44 @@ auto emitLintResults(const LintReport& Report, const PendingRewrites& Rewrites,
 
 void EditReport::emitJSON(llvm::raw_ostream& OS) const {
   llvm::json::Array Edits;
-  for (const EditRecord& E : this->Edits)
-    Edits.push_back(
-        llvm::json::Object{{"file", E.File},
-                           {"offset", static_cast<int64_t>(E.Offset)},
-                           {"length", static_cast<int64_t>(E.Length)},
-                           {"old", E.Old},
-                           {"new", E.New}});
+  for (const EditRecord& E : this->Edits) {
+    llvm::json::Object O{{"file", E.File},
+                         {"offset", static_cast<int64_t>(E.Offset)},
+                         {"length", static_cast<int64_t>(E.Length)},
+                         {"old", E.Old},
+                         {"new", E.New}};
+    // Omitted for edits that are not renames, which have no owning
+    // declaration and can never be vetoed.
+    if (!E.OwnerFile.empty()) {
+      O["owner_file"] = E.OwnerFile;
+      O["owner_offset"] = static_cast<int64_t>(E.OwnerOffset);
+    }
+    Edits.push_back(std::move(O));
+  }
   llvm::json::Array Res;
-  for (const ResolutionRecord& R : this->Resolutions)
-    Res.push_back(llvm::json::Object{{"file", R.File},
-                                     {"offset", static_cast<int64_t>(R.Offset)},
-                                     {"length", static_cast<int64_t>(R.Length)},
-                                     {"old", R.Old},
-                                     {"new", R.New},
-                                     {"veto", R.Veto}});
+  for (const ResolutionRecord& R : this->Resolutions) {
+    llvm::json::Object O{{"file", R.File},
+                         {"offset", static_cast<int64_t>(R.Offset)},
+                         {"length", static_cast<int64_t>(R.Length)},
+                         {"old", R.Old},
+                         {"new", R.New},
+                         {"veto", R.Veto}};
+    if (!R.OwnerFile.empty()) {
+      O["owner_file"] = R.OwnerFile;
+      O["owner_offset"] = static_cast<int64_t>(R.OwnerOffset);
+    }
+    Res.push_back(std::move(O));
+  }
+  llvm::json::Array Vetoes;
+  for (const RenameVeto& V : this->Vetoes)
+    Vetoes.push_back(
+        llvm::json::Object{{"file", V.File},
+                           {"offset", static_cast<int64_t>(V.Offset)},
+                           {"name", V.Name},
+                           {"reason", V.Reason}});
   llvm::json::Object Root{{"edits", std::move(Edits)},
-                          {"resolutions", std::move(Res)}};
+                          {"resolutions", std::move(Res)},
+                          {"vetoes", std::move(Vetoes)}};
   OS << llvm::formatv("{0:2}", llvm::json::Value(std::move(Root))) << "\n";
 }
 
@@ -353,6 +374,9 @@ auto parseEditReport(llvm::StringRef Json, EditReport& Out) -> bool {
       E.Length = static_cast<unsigned>(O->getInteger("length").value_or(0));
       E.Old = O->getString("old").value_or("").str();
       E.New = O->getString("new").value_or("").str();
+      E.OwnerFile = O->getString("owner_file").value_or("").str();
+      E.OwnerOffset =
+          static_cast<unsigned>(O->getInteger("owner_offset").value_or(0));
       if (E.File.empty()) return false;
       Out.Edits.push_back(std::move(E));
     }
@@ -368,8 +392,24 @@ auto parseEditReport(llvm::StringRef Json, EditReport& Out) -> bool {
       R.Old = O->getString("old").value_or("").str();
       R.New = O->getString("new").value_or("").str();
       R.Veto = O->getBoolean("veto").value_or(false);
+      R.OwnerFile = O->getString("owner_file").value_or("").str();
+      R.OwnerOffset =
+          static_cast<unsigned>(O->getInteger("owner_offset").value_or(0));
       if (R.File.empty()) return false;
       Out.Resolutions.push_back(std::move(R));
+    }
+  }
+  if (const llvm::json::Array* Vetoes = Root->getArray("vetoes")) {
+    for (const llvm::json::Value& V : *Vetoes) {
+      const llvm::json::Object* O = V.getAsObject();
+      if (!O) return false;
+      RenameVeto Veto;
+      Veto.File = O->getString("file").value_or("").str();
+      Veto.Offset = static_cast<unsigned>(O->getInteger("offset").value_or(0));
+      Veto.Name = O->getString("name").value_or("").str();
+      Veto.Reason = O->getString("reason").value_or("").str();
+      if (Veto.File.empty()) return false;
+      Out.Vetoes.push_back(std::move(Veto));
     }
   }
   return true;
@@ -400,6 +440,20 @@ auto mergeEditReports(
     const std::vector<EditReport>& Reports,
     std::map<std::string, std::vector<EditRecord>>& MergedByFile,
     std::vector<std::string>& Conflicts) -> bool {
+  // 0. Declarations vetoed by any report: some invocation found a reference to
+  //    them that no byte range of any file spells (inside a macro body, or
+  //    token-pasted).  Renaming is all-or-nothing, so every edit and resolution
+  //    belonging to such a declaration is dropped here, including those emitted
+  //    by other targets that never saw the offending reference.
+  std::set<std::pair<std::string, unsigned>> Vetoed;
+  for (const EditReport& Rep : Reports)
+    for (const RenameVeto& V : Rep.Vetoes) Vetoed.emplace(V.File, V.Offset);
+  const auto IsVetoed = [&Vetoed](llvm::StringRef OwnerFile,
+                                  unsigned OwnerOffset) {
+    return !OwnerFile.empty() &&
+           Vetoed.count({OwnerFile.str(), OwnerOffset}) > 0;
+  };
+
   // 1. Resolve the union of dependent-token resolutions, keyed by
   // (file,offset).
   //    Mirrors recordResolution/vetoResolution in rename_variables_lib.
@@ -411,6 +465,7 @@ auto mergeEditReports(
   std::map<std::pair<std::string, unsigned>, Resolved> ResMap;
   for (const EditReport& Rep : Reports) {
     for (const ResolutionRecord& R : Rep.Resolutions) {
+      if (IsVetoed(R.OwnerFile, R.OwnerOffset)) continue;
       Resolved& S = ResMap[{R.File, R.Offset}];
       if (R.Veto) {
         S.Vetoed = true;
@@ -428,7 +483,8 @@ auto mergeEditReports(
   // 2. Gather all edits per file: ordinary edits + surviving resolutions.
   std::map<std::string, std::vector<EditRecord>> ByFile;
   for (const EditReport& Rep : Reports)
-    for (const EditRecord& E : Rep.Edits) ByFile[E.File].push_back(E);
+    for (const EditRecord& E : Rep.Edits)
+      if (!IsVetoed(E.OwnerFile, E.OwnerOffset)) ByFile[E.File].push_back(E);
   for (const auto& [Key, S] : ResMap) {
     if (S.Vetoed || !S.HasName) continue;
     ByFile[S.Rec.File].push_back(

@@ -4,14 +4,18 @@
 namespace m {
 
 struct Counter {
+  // Referenced from BUMP's macro body below.  That body token is a single
+  // location shared by every expansion of BUMP, so no rewrite can express it,
+  // and renaming this declaration alone would leave the macro spelling the old
+  // name.  The rename is therefore vetoed and the member keeps its name --
+  // reported as a skipped rename, not silently dropped.
   int itemCount;
+
+  // No macro names this one, so it renames normally.  Its presence is what
+  // makes this scenario's `check` phase non-vacuous.
+  int otherCount;
 };
 
-// The member reference below is written inside a macro *body*, so every
-// expansion of BUMP carries a macro source location -- and
-// ApplyRenamesVisitor::renameAt() returns early on isMacroID(). The member is
-// therefore renamed at its declaration and at ordinary use sites, while this
-// one is left spelling the old name.
 #define BUMP(c) ((c).itemCount += 1)
 
 int total(const Counter& c);

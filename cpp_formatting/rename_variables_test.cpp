@@ -830,3 +830,130 @@ TEST(RenameCollisions, UnrelatedScopesDoNotCollide) {
             "  int value;\n"
             "};\n");
 }
+
+// ---------------------------------------------------------------------------
+// Macros.  A name written as a macro *argument* is spelled at the call site and
+// renames like any other; one spelled in a macro *body*, or formed by token
+// pasting, has no byte range of its own and vetoes the whole rename.
+// ---------------------------------------------------------------------------
+
+TEST(RenameMacros, MacroArgumentIsRenamed) {
+  EXPECT_EQ(rewriteMember("#define FWD(x) ((x) + 0)\n"
+                          "struct S { int itemCount; };\n"
+                          "int use(S& s) { return FWD(s.itemCount); }\n",
+                          renameOne("itemCount", "item_count")),
+            "#define FWD(x) ((x) + 0)\n"
+            "struct S { int item_count; };\n"
+            "int use(S& s) { return FWD(s.item_count); }\n");
+}
+
+TEST(RenameMacros, MacroArgumentForwardedThroughMacrosIsRenamed) {
+  EXPECT_EQ(rewriteMember("#define FWD(x) ((x) + 0)\n"
+                          "#define OUTER(y) FWD(y)\n"
+                          "struct S { int itemCount; };\n"
+                          "int use(S& s) { return OUTER(s.itemCount); }\n",
+                          renameOne("itemCount", "item_count")),
+            "#define FWD(x) ((x) + 0)\n"
+            "#define OUTER(y) FWD(y)\n"
+            "struct S { int item_count; };\n"
+            "int use(S& s) { return OUTER(s.item_count); }\n");
+}
+
+TEST(RenameMacros, ArgumentExpandedTwiceIsRewrittenOnce) {
+  // `s.itemCount` reaches the visitor as two MemberExprs sharing one spelling
+  // location; rewriting it twice would corrupt the token.
+  EXPECT_EQ(rewriteMember("#define TWICE(x) ((x) + (x))\n"
+                          "struct S { int itemCount; };\n"
+                          "int use(S& s) { return TWICE(s.itemCount); }\n",
+                          renameOne("itemCount", "item_count")),
+            "#define TWICE(x) ((x) + (x))\n"
+            "struct S { int item_count; };\n"
+            "int use(S& s) { return TWICE(s.item_count); }\n");
+}
+
+TEST(RenameMacros, DeclarationWrittenAsMacroArgumentIsRenamed) {
+  EXPECT_EQ(rewriteMember("#define FIELD(n) int n;\n"
+                          "struct S { FIELD(itemCount) };\n"
+                          "int use(S& s) { return s.itemCount; }\n",
+                          renameOne("itemCount", "item_count")),
+            "#define FIELD(n) int n;\n"
+            "struct S { FIELD(item_count) };\n"
+            "int use(S& s) { return s.item_count; }\n");
+}
+
+TEST(RenameMacros, ReferenceInMacroBodyVetoesTheRename) {
+  // The body token is one location shared by every expansion of BUMP, so it
+  // cannot be rewritten -- and renaming the declaration alone would not
+  // compile.  The whole rename is skipped.
+  const char* code =
+      "struct S { int itemCount; };\n"
+      "#define BUMP(s) ((s).itemCount += 1)\n"
+      "int use(S& s) { BUMP(s); return s.itemCount; }\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("itemCount", "item_count")), code);
+}
+
+TEST(RenameMacros, VetoLeavesOtherMembersAlone) {
+  EXPECT_EQ(rewriteMember("struct S { int itemCount; int otherCount; };\n"
+                          "#define BUMP(s) ((s).itemCount += 1)\n"
+                          "int use(S& s) { BUMP(s); return s.otherCount; }\n",
+                          addSuffix("_")),
+            "struct S { int itemCount; int otherCount_; };\n"
+            "#define BUMP(s) ((s).itemCount += 1)\n"
+            "int use(S& s) { BUMP(s); return s.otherCount_; }\n");
+}
+
+TEST(RenameMacros, TokenPastedReferenceVetoesTheRename) {
+  // `s.PASTE(item)` builds the name in Clang's scratch buffer; no file holds
+  // it, so there is nothing to rewrite and the rename is skipped.
+  const char* code =
+      "struct S { int itemCount; };\n"
+      "#define PASTE(p) p##Count\n"
+      "int use(S& s) { return s.PASTE(item); }\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("itemCount", "item_count")), code);
+}
+
+TEST(RenameMacros, MethodReferencedFromMacroBodyVetoesWholeOverrideFamily) {
+  // The macro names the override, but renaming the base alone would break
+  // `override` checking -- the veto keys on the base-most declaration so the
+  // whole hierarchy is skipped together.
+  const char* code =
+      "struct B { virtual int getVal() const { return 0; } };\n"
+      "struct D : B { int getVal() const override { return 1; } };\n"
+      "#define CALL(d) ((d).getVal())\n"
+      "int use(D& d) { return CALL(d); }\n";
+  EXPECT_EQ(rewriteMethod(code, renameOne("getVal", "get_val")), code);
+}
+
+TEST(RenameMacros, DependentMemberInMacroArgumentIsRenamed) {
+  // googletest's TYPED_TEST shape: `this->member_` in a class template is a
+  // dependent access, and it is written inside a macro argument.  The token is
+  // spelled at the call site, so the cross-TU resolution keys on that and the
+  // rewrite lands there.
+  EXPECT_EQ(
+      rewriteMember("#define CHECK(x) ((void)(x))\n"
+                    "template <class T> struct Fixture { T itemCount; };\n"
+                    "template <class T> struct Derived : Fixture<T> {\n"
+                    "  void f() { CHECK(this->itemCount); }\n"
+                    "};\n"
+                    "template struct Derived<int>;\n",
+                    renameOne("itemCount", "item_count")),
+      "#define CHECK(x) ((void)(x))\n"
+      "template <class T> struct Fixture { T item_count; };\n"
+      "template <class T> struct Derived : Fixture<T> {\n"
+      "  void f() { CHECK(this->item_count); }\n"
+      "};\n"
+      "template struct Derived<int>;\n");
+}
+
+TEST(RenameMacros, DependentMemberInMacroBodyIsLeftAlone) {
+  // The other half: a dependent token spelled in a macro body has no location
+  // of its own to rewrite, so it is not a resolution candidate at all.
+  const char* code =
+      "#define BUMP(p) ((p)->itemCount += 1)\n"
+      "template <class T> struct Fixture { T itemCount; };\n"
+      "template <class T> struct Derived : Fixture<T> {\n"
+      "  void f() { BUMP(this); }\n"
+      "};\n"
+      "template struct Derived<int>;\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("itemCount", "item_count")), code);
+}

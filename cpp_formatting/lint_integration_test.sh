@@ -255,4 +255,65 @@ cp "$tmpdir/subsume_orig.cpp" "$tmpdir/subsume_agg.cpp"
 diff -u "$tmpdir/subsume_expected.cpp" "$tmpdir/subsume_agg.cpp"   || fail "subsume: aggregate path disagrees with the in-place path"
 echo "PASS: a rename inside a moved trailing return type survives both paths"
 
+# ---------------------------------------------------------------------------
+# A vetoed rename produces no diagnostics -- and the re-run that makes the veto
+# order-independent must not leave the first pass's diagnostics behind, which
+# would report the same site twice (or report a rename that is not applied).
+# ---------------------------------------------------------------------------
+macrodir="$tmpdir/macrolint"
+mkdir -p "$macrodir"
+cat > "$macrodir/counter.h" <<'EOF'
+#ifndef COUNTER_H
+#define COUNTER_H
+struct Counter {
+  int itemCount;
+  int otherCount;
+};
+#define BUMP(c) ((c).itemCount += 1)
+int total(const Counter& c);
+#endif
+EOF
+cat > "$macrodir/counter.cpp" <<'EOF'
+#include "counter.h"
+int total(const Counter& c) { return c.itemCount + c.otherCount; }
+EOF
+cat > "$macrodir/main.cpp" <<'EOF'
+#include "counter.h"
+int main() {
+  Counter c{0, 0};
+  BUMP(c);
+  return total(c);
+}
+EOF
+cp "$macrodir/counter.h" "$macrodir/counter.h.orig"
+
+(
+  cd "$macrodir"
+  expect_violations "$normalize" --style=snake_case --scope=member --lint \
+    counter.cpp main.cpp counter.h \
+    -- -std=c++17 -xc++ -Wno-pragma-once-outside-header -I. > macro.txt 2>/dev/null
+)
+if grep -q "itemCount" "$macrodir/macro.txt"; then
+  fail "macro lint: reported a rename that the macro-body reference vetoes"
+fi
+[[ "$(grep -c "otherCount" "$macrodir/macro.txt")" -eq 2 ]] \
+  || fail "macro lint: expected exactly one diagnostic per otherCount site"
+
+# Lint must not have touched anything, and the diff format must match what
+# --in-place produces -- including leaving the vetoed member alone.
+diff -u "$macrodir/counter.h.orig" "$macrodir/counter.h" \
+  || fail "macro lint: --lint modified a file"
+(
+  cd "$macrodir"
+  expect_violations "$normalize" --style=snake_case --scope=member \
+    --format=diff counter.cpp main.cpp counter.h \
+    -- -std=c++17 -xc++ -Wno-pragma-once-outside-header -I. > macro.diff 2>/dev/null
+  git apply macro.diff || fail "macro lint: git apply rejected the patch"
+)
+grep -q "int other_count;" "$macrodir/counter.h" \
+  || fail "macro lint: diff did not rename the unaffected member"
+grep -q "int itemCount;" "$macrodir/counter.h" \
+  || fail "macro lint: diff renamed the vetoed member"
+echo "PASS: a macro-vetoed rename is absent from lint output, with no re-run duplicates"
+
 echo "All lint integration tests passed."

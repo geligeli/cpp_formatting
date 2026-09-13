@@ -243,6 +243,62 @@ TEST(AggregateEdits, PromotesAgreeingResolutionsAndDropsVetoed) {
   EXPECT_EQ(Out["h.h"], "val_ biz");  // first promoted, second vetoed
 }
 
+TEST(AggregateEdits, DropsEditsWhoseOwningDeclarationWasVetoed) {
+  // The Bazel shape: the library's action renames a member (it never sees the
+  // macro expanded), the binary's action vetoes it.  Aggregation must drop the
+  // library's edits too, or the declaration is renamed and the macro body is
+  // left spelling the old name.
+  EditReport Lib, Bin;
+  Lib.Edits.push_back({"lib.h", 0, 3, "val", "val_", "lib.h", 0});
+  Lib.Edits.push_back({"lib.cpp", 0, 3, "val", "val_", "lib.h", 0});
+  // An unrelated member of the same header stays renamed.
+  Lib.Edits.push_back({"lib.h", 4, 3, "biz", "biz_", "lib.h", 4});
+  Bin.Vetoes.push_back({"lib.h", 0, "val", "referenced from a macro body"});
+
+  std::map<std::string, std::string> Out;
+  std::vector<std::string> Conflicts;
+  ASSERT_TRUE(aggregateEdits(
+      {Lib, Bin}, filesFrom({{"lib.h", "val biz"}, {"lib.cpp", "val"}}), Out,
+      Conflicts));
+  EXPECT_TRUE(Conflicts.empty());
+  EXPECT_EQ(Out["lib.h"], "val biz_");
+  // lib.cpp had only the vetoed edit, so it is not rewritten at all.
+  EXPECT_EQ(Out.count("lib.cpp"), 0u);
+}
+
+TEST(AggregateEdits, DropsDependentResolutionsOfAVetoedDeclaration) {
+  EditReport A, B;
+  A.Resolutions.push_back({"h.h", 0, 3, "val", "val_", false, "h.h", 20});
+  B.Vetoes.push_back({"h.h", 20, "val", "the name is formed by token pasting"});
+
+  std::map<std::string, std::string> Out;
+  std::vector<std::string> Conflicts;
+  ASSERT_TRUE(
+      aggregateEdits({A, B}, filesFrom({{"h.h", "val"}}), Out, Conflicts));
+  EXPECT_EQ(Out.count("h.h"), 0u);
+}
+
+TEST(EditRecords, JSONRoundTripCarriesOwnersAndVetoes) {
+  EditReport R;
+  R.Edits.push_back({"a.cpp", 5, 3, "val", "val_", "h.h", 7});
+  R.Vetoes.push_back(
+      {"h.h", 7, "val", "referenced from a macro body at h.h:3"});
+  std::string Json;
+  llvm::raw_string_ostream OS(Json);
+  R.emitJSON(OS);
+  OS.flush();
+
+  EditReport Parsed;
+  ASSERT_TRUE(parseEditReport(Json, Parsed));
+  ASSERT_EQ(Parsed.Edits.size(), 1u);
+  EXPECT_EQ(Parsed.Edits[0].OwnerFile, "h.h");
+  EXPECT_EQ(Parsed.Edits[0].OwnerOffset, 7u);
+  ASSERT_EQ(Parsed.Vetoes.size(), 1u);
+  EXPECT_EQ(Parsed.Vetoes[0].File, "h.h");
+  EXPECT_EQ(Parsed.Vetoes[0].Offset, 7u);
+  EXPECT_EQ(Parsed.Vetoes[0].Name, "val");
+}
+
 TEST(AggregateEdits, ReportsConflictOnOverlappingDistinctEdits) {
   EditReport A, B;
   A.Edits.push_back({"a.cpp", 0, 3, "int", "u32"});

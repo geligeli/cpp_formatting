@@ -160,9 +160,14 @@ grep -q 'partCount' main.json \
 
 # The dependent must not re-emit edits for the dep's own files: each TU rewrites
 # only its main file, so the merged result has no duplicate/conflicting edits.
-if grep -q 'lib\.h' main.json; then
+# It *does* name lib.h as the edits' "owner_file" -- the declaration they belong
+# to -- which is how a veto raised in one target suppresses another's edits, so
+# match the edit target key exactly rather than the file name anywhere.
+if grep -q '"file": .*lib\.h' main.json; then
   fail "owned-files: dependent re-emitted edits for the dep's header"
 fi
+grep -q '"owner_file": .*lib\.h' main.json \
+  || fail "owned-files: dependent's edits do not name the dep's decl as owner"
 
 "$cpp_format" --aggregate --apply --root="$tmpdir/xtarget" lib.json main.json
 grep -q 'int part_count;' lib.h || fail "owned-files: decl not renamed on disk"
@@ -172,3 +177,73 @@ grep -q 'g.part_count = 2;' main.cpp \
 echo "PASS: --owned-files renames uses of a dependency's declarations"
 
 echo "All aggregate integration tests passed."
+
+# ---------------------------------------------------------------------------
+# Test 5 — a veto raised by one target suppresses another target's edits
+#
+# The cross-target shape of the all-or-nothing rule.  The library's action only
+# ever parses its own sources, so it never sees BUMP expanded and happily emits
+# a rename for `itemCount`.  The binary's action expands the macro, cannot
+# rewrite the body token, and emits a veto instead.  Aggregation has to drop the
+# library's edits too -- otherwise the declaration is renamed and the macro body
+# is left spelling the old name, i.e. a broken build.  `otherCount`, which no
+# macro names, must survive.
+# ---------------------------------------------------------------------------
+mkdir -p "$tmpdir/macro"
+cd "$tmpdir/macro"
+cp ../cpp_format.yaml .
+
+cat > counter.h <<'EOF'
+#ifndef COUNTER_H_
+#define COUNTER_H_
+struct Counter {
+  int itemCount;
+  int otherCount;
+};
+#define BUMP(c) ((c).itemCount += 1)
+int total(const Counter& c);
+#endif
+EOF
+cat > counter.cpp <<'EOF'
+#include "counter.h"
+int total(const Counter& c) { return c.itemCount + c.otherCount; }
+EOF
+cat > main.cpp <<'EOF'
+#include "counter.h"
+int main() {
+  Counter c{0, 0};
+  BUMP(c);
+  return total(c);
+}
+EOF
+
+# The library's action: owns both its files, sees no expansion of BUMP.
+"$cpp_format" --config=cpp_format.yaml --emit-edits=counter.json \
+  counter.cpp counter.h -- -x c++ -std=c++17 -I.
+grep -q '"old": "itemCount"' counter.json \
+  || fail "veto: the library's action should emit the rename it cannot know is unsafe"
+grep -q '"vetoes": \[\]' counter.json \
+  || fail "veto: the library's action has no expansion to veto from"
+
+# The dependent's action: expands BUMP, so it vetoes instead of editing.
+realpath counter.h > owned.txt
+"$cpp_format" --config=cpp_format.yaml --owned-files=owned.txt \
+  --emit-edits=main.json main.cpp -- -x c++ -std=c++17 -I.
+grep -q 'macro body' main.json \
+  || fail "veto: the dependent's action did not emit a veto for itemCount"
+
+# Aggregating both drops every itemCount edit and keeps otherCount.
+"$cpp_format" --aggregate --root="$tmpdir/macro" counter.json main.json \
+  > veto.patch
+if grep -q 'item_count' veto.patch; then
+  fail "veto: a vetoed rename survived aggregation"
+fi
+grep -q '+  int other_count;' veto.patch \
+  || fail "veto: the unaffected member should still be renamed"
+
+# The standalone aggregator applies the same rule.
+"$aggregate_edits" --root="$tmpdir/macro" counter.json main.json \
+  > veto_standalone.patch
+diff -u veto.patch veto_standalone.patch \
+  || fail "veto: standalone aggregate_edits disagrees with --aggregate"
+echo "PASS: a veto from one target suppresses another target's edits"

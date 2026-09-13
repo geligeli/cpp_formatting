@@ -421,7 +421,7 @@ auto main(int argc, const char** argv) -> int {
   CppFormatActionFactory Factory(std::move(Rules), ReturnStyle, ReturnRuleId,
                                  mode, std::move(Files));
   if (Lint) Factory.setLintReport(&Report);
-  if (int rc = Tool.run(&Factory)) return rc;
+  if (int rc = runWithVetoRerun(Tool, Factory)) return rc;
 
   // Renames whose new name was already taken are skipped rather than applied:
   // renaming into an occupied name does not compile, or silently rebinds uses.

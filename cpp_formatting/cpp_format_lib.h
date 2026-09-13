@@ -63,8 +63,23 @@ class CppFormatActionFactory : public clang::tooling::FrontendActionFactory {
   void emitEdits(llvm::raw_ostream& OS);
 
   /// Renames skipped because the new name was already taken in the same
-  /// scope.  Empty unless such a clash was found.
+  /// scope, or because a reference to them could not be rewritten.
   auto conflicts() const -> const RenameConflicts& { return Conflicts; }
+
+  /// Declarations vetoed during ClangTool::run() because some reference to
+  /// them cannot be rewritten.  Non-empty means an earlier TU may have renamed
+  /// a declaration a later one vetoed: discard the buffered output with
+  /// resetForRerun() and run the tool again.
+  auto vetoes() const -> const RenameVetoes& { return Vetoes; }
+
+  /// Drops everything buffered by a previous ClangTool::run() while keeping
+  /// the accumulated vetoes, so a second run applies only the renames that
+  /// survived.  Nothing has reached disk at this point (flush() has not run).
+  void resetForRerun();
+
+  /// False in Emit mode, whose records carry their own vetoes for aggregation
+  /// to act on, so a veto needs no second pass.  See runWithVetoRerun().
+  auto rerunNeededOnVeto() const -> bool { return Mode != OutputMode::Emit; }
 
  private:
   std::vector<NormalizeRule> Rules;
@@ -75,6 +90,9 @@ class CppFormatActionFactory : public clang::tooling::FrontendActionFactory {
   PendingRewrites Pending;
   EditReport Edits;  // populated in Emit mode (all rules + trailing-return)
   RenameConflicts Conflicts;  // renames skipped because the name was taken
+  // Declarations that must not be renamed because a reference to them is not
+  // rewritable; shared by all rules and kept across a re-run.
+  RenameVetoes Vetoes;
   // One cross-TU dependent-token resolution map per rule (see
   // DependentResolutions).  Persists for the whole ClangTool::run() so a header
   // TU can consume resolutions recorded by earlier .cpp TUs.  Kept per-rule so

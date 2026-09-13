@@ -226,7 +226,7 @@ auto main(int argc, const char** argv) -> int {
     factory->setLintReport(&Report, "normalize_variables/" +
                                         ScopeOpt.getValue() + "/" +
                                         StyleOpt.getValue());
-  int rc = Tool.run(factory.get());
+  int rc = runWithVetoRerun(Tool, *factory);
   reportRenameConflicts(factory->conflicts(), ReportRenameConflictsOpt,
                         llvm::errs());
   if (Emit) {
