@@ -379,6 +379,76 @@ bazel test //cpp_formatting:normalize_variables_integration_test
 
 ---
 
+## `const_placement`
+
+Moves cv-qualifiers to one side of the type they qualify — "east const" or
+"west const", whichever your codebase has settled on.
+
+```cpp
+// Before                              // After (--style=east)
+const int kCount = 1;                  int const kCount = 1;
+const char* Name();                    char const* Name();
+void Take(const Widget& w);            void Take(Widget const& w);
+std::vector<const Widget*> items;      std::vector<Widget const*> items;
+
+int* const slot = nullptr;             int* const slot = nullptr;   // unchanged
+int Area() const;                      int Area() const;            // unchanged
+```
+
+`--style=west` is the exact reverse, and running one direction over the other's
+output gives the original back.
+
+### Usage
+
+```sh
+# Dry-run — print the rewritten source to stdout
+bazel run //cpp_formatting:const_placement -- --style=east file.cpp -- -std=c++17
+
+# In-place
+bazel run //cpp_formatting:const_placement -- --style=east -i file.cpp -- -std=c++17
+
+# Lint (CI): report, change nothing, exit 1 if anything would move
+bazel run //cpp_formatting:const_placement -- --style=east --lint file.cpp -- -std=c++17
+```
+
+| Flag | Description |
+|---|---|
+| `--style=<east\|west>` | Which side the qualifiers go on (default `east`) |
+| `--in-place` / `-i` | Overwrite files on disk (default: dry-run) |
+| `--lint`, `--format=<fmt>` | As for the other binaries — see [Lint mode](#lint-mode-cicd) |
+| `--jobs=<N>` / `-j<N>` | Translation units to parse in parallel |
+
+### What moves, and what does not
+
+Only a qualifier of the **type specifier** moves, because only that one can be
+written on either side without changing the type:
+
+| Input | `--style=east` | Why |
+|---|---|---|
+| `const int x` | `int const x` | the qualifier is on the `int` |
+| `const int* p` | `int const* p` | pointer *to const* — the qualifier is still on the `int` |
+| `int* const p` | unchanged | **const pointer** — `const int* p` is a different type |
+| `const int* const p` | `int const* const p` | only the pointee's qualifier moves |
+| `int f() const` | unchanged | that `const` qualifies the member function, not a type |
+| `const int a[3]` | `int const a[3]` | the qualifier is on the element type |
+| `V<const T>` | `V<T const>` | template arguments move too, innermost first |
+| `const volatile int x` | `int const volatile x` | whole runs move, in source order |
+| `CONST int x` (macro) | unchanged | the qualifier has no byte range of its own to move |
+| `const /*why*/ int x` | unchanged | the run has to be adjacent to the type |
+| `const static int x` | unchanged | `static` is not a cv-qualifier, so the run is not adjacent |
+
+The qualifier is re-emitted with single spaces, so `const    int x` becomes
+`int const x` — the one thing an east→west round trip does not restore exactly.
+
+### Tests
+
+```sh
+bazel test //cpp_formatting:const_placement_test
+bazel test //cpp_formatting:const_placement_integration_test
+```
+
+---
+
 ## `cpp_format` — combined tool
 
 Runs any combination of the above passes in a single invocation, driven by a YAML configuration file or individual CLI flags.
@@ -389,6 +459,10 @@ Create a YAML file describing which passes to run:
 
 ```yaml
 # cpp_format.yaml
+
+# Move cv-qualifiers to one side of the type they qualify:
+# `east` rewrites `const int x` to `int const x`; `west` rewrites it back.
+const_placement: east
 
 # Return type style: `trailing` rewrites `int f()` to `auto f() -> int`,
 # `leading` rewrites it back.  The two cannot be combined.
@@ -433,6 +507,10 @@ bazel run //cpp_formatting:cpp_format -- \
 # Trailing return types only
 bazel run //cpp_formatting:cpp_format -- \
   --trailing-return-types --in-place src/rect.cpp -- -std=c++17
+
+# East const only
+bazel run //cpp_formatting:cpp_format -- \
+  --const-placement=east --in-place src/rect.cpp -- -std=c++17
 ```
 
 ### Options
@@ -442,6 +520,7 @@ bazel run //cpp_formatting:cpp_format -- \
 | `--config=<file>` | YAML configuration file (takes precedence over per-pass flags) |
 | `--trailing-return-types` | Enable the trailing-return-type pass (same as `--return-types=trailing`) |
 | `--return-types=<style>` | Return type style: `trailing` or `leading`. Cannot be combined with `--trailing-return-types`. |
+| `--const-placement=<style>` | Where cv-qualifiers go: `east` (`int const x`) or `west` (`const int x`) |
 | `--normalize-variables-scope=<scope>` | One of `member`, `local`, `global`, `static_member`, `const_member`, `static_global`, `const_global`, `method` |
 | `--normalize-variables-style=<style>` | Target naming style |
 | `--in-place` / `-i` | Overwrite files on disk (default: dry-run) |
@@ -449,7 +528,13 @@ bazel run //cpp_formatting:cpp_format -- \
 | `--format=<fmt>` | Output format for `--lint`: `text` (default), `sarif`, or `diff` |
 | `--jobs=<N>` / `-j<N>` | Translation units to parse in parallel. `0` (default) uses every CPU; larger values are capped at the CPU count. The result does not depend on it (see [Parallel parsing](#parallel-parsing)). |
 
-**Pass ordering:** `normalize_variables` rules are applied first (in the order listed in the config), then the `return_types` pass. For in-place mode each pass reads the output of the previous one from disk.
+**Pass ordering:** `normalize_variables` rules are applied first (in the order
+listed in the config), then `const_placement`, then `return_types`. The order
+matters where the passes overlap: a qualifier moved east is carried into the
+return type that `return_types: trailing` then lifts, so
+`const int Get() const` becomes `auto Get() const -> int const` rather than
+stranding the `const` on the `auto` placeholder. Every pass runs on the same
+parsed AST, sharing one `Rewriter`.
 
 ---
 
@@ -522,7 +607,7 @@ build rather than as silently wrong code.
 
 ## Lint mode (CI/CD)
 
-All three binaries support a lint mode that reports what *would* change without modifying any files:
+All four binaries support a lint mode that reports what *would* change without modifying any files:
 
 | Flag | Description |
 |---|---|
@@ -565,7 +650,7 @@ cpp_format --config=cpp_format.yaml --lint --format=diff \
 
 ## Parallel parsing
 
-All three binaries parse their translation units in parallel — one Clang
+All four binaries parse their translation units in parallel — one Clang
 instance per TU on a pool of worker threads sized to the machine's CPUs, the
 way `bazel build` sizes its own pool. `--jobs=N` (`-jN`) caps the pool; `0`,
 the default, means every CPU the process may use, and a larger request is
@@ -808,7 +893,7 @@ cpp_formatting/
   # Combined tool
   cpp_format.cpp                          # main(): YAML config + multi-pass driver
 
-  # Parallel translation-unit driver (shared by all three binaries)
+  # Parallel translation-unit driver (shared by all four binaries)
   tu_driver.h                             # TUSlot, TUSlotClient, runTranslationUnits(), --jobs sizing
   tu_driver.cpp                           # one ClangTool per TU on worker threads; barriers, re-runs
   tu_driver_test.cpp                      # gtest unit tests
@@ -822,6 +907,13 @@ cpp_formatting/
   trailing_return_types_lib.cpp           # implementation
   trailing_return_types_test.cpp          # gtest unit tests
   integration_test.sh                     # shell integration tests
+
+  # const_placement
+  const_placement.cpp                     # main(): CLI parsing, ActionFactory
+  const_placement_lib.h                   # public API: ConstStyle, action, factory, test helper
+  const_placement_lib.cpp                 # QualifiedTypeLoc visitor + the shape guard
+  const_placement_test.cpp                # gtest unit tests
+  const_placement_integration_test.sh     # shell integration tests
 
   # normalize_variables
   normalize_variables.cpp                 # main(): CLI parsing, FileSet builder

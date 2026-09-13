@@ -1,0 +1,5 @@
+# The reverse of east_const.  Unlike the two return-type directions, this one
+# is exactly as selective as its opposite -- both move the same qualifier runs,
+# just to the other side -- so it undoes east_const on anything east_const
+# moved.
+const_placement: west

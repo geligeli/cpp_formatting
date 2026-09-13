@@ -8,6 +8,7 @@
 #include "clang/Basic/FileEntry.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Rewrite/Core/Rewriter.h"
+#include "cpp_formatting/const_placement_lib.h"
 #include "cpp_formatting/trailing_return_types_lib.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -23,6 +24,7 @@ namespace {
 class CppFormatConsumer : public ASTConsumer {
  public:
   CppFormatConsumer(Rewriter& RW, const std::vector<NormalizeRule>& Rules,
+                    std::optional<ConstStyle> ConstPlacement,
                     std::optional<ReturnTypeStyle> ReturnStyle,
                     const std::string& ReturnRuleId, const FileSet& CollectFrom,
                     LintReport* Report,
@@ -31,6 +33,7 @@ class CppFormatConsumer : public ASTConsumer {
                     RenameVetoes* Vetoes)
       : RW(RW),
         Rules(Rules),
+        ConstPlacement(ConstPlacement),
         ReturnStyle(ReturnStyle),
         ReturnRuleId(ReturnRuleId),
         CollectFrom(CollectFrom),
@@ -46,6 +49,17 @@ class CppFormatConsumer : public ASTConsumer {
                          Report, Rules[I].RuleId,
                          DepResPerRule ? &(*DepResPerRule)[I] : nullptr, Edits,
                          Conflicts, Vetoes);
+
+    // Between the renames and the return-type pass.  It has to run after the
+    // renames because it shares their Rewriter and reads nothing they wrote;
+    // it has to run *before* the return-type pass because that pass lifts the
+    // whole return type as text (Rewriter::getRewrittenText), so a qualifier
+    // moved first rides along into `-> type` instead of being clobbered by the
+    // wholesale `auto` replacement.  In Emit mode the same ordering lets
+    // runToTrailing() subsume these records the way it subsumes rename ones.
+    if (ConstPlacement)
+      runConstPlacementOnAST(Ctx, RW, *ConstPlacement, Report,
+                             constStyleRuleId(*ConstPlacement), Edits);
 
     if (ReturnStyle) {
       // MatchFinder::matchAST runs the matchers on the already-parsed AST —
@@ -63,6 +77,7 @@ class CppFormatConsumer : public ASTConsumer {
  private:
   Rewriter& RW;
   const std::vector<NormalizeRule>& Rules;
+  std::optional<ConstStyle> ConstPlacement;
   std::optional<ReturnTypeStyle> ReturnStyle;
   const std::string& ReturnRuleId;
   const FileSet& CollectFrom;
@@ -87,6 +102,7 @@ class CppFormatConsumer : public ASTConsumer {
 class CppFormatAction : public ASTFrontendAction {
  public:
   CppFormatAction(const std::vector<NormalizeRule>& Rules,
+                  std::optional<ConstStyle> ConstPlacement,
                   std::optional<ReturnTypeStyle> ReturnStyle,
                   const std::string& ReturnRuleId, OutputMode Mode,
                   const FileSet& CollectFrom, PendingRewrites* Pending,
@@ -95,6 +111,7 @@ class CppFormatAction : public ASTFrontendAction {
                   EditReport* Edits, RenameConflicts* Conflicts,
                   RenameVetoes* Vetoes)
       : Rules(Rules),
+        ConstPlacement(ConstPlacement),
         ReturnStyle(ReturnStyle),
         ReturnRuleId(ReturnRuleId),
         Mode(Mode),
@@ -131,12 +148,13 @@ class CppFormatAction : public ASTFrontendAction {
       -> std::unique_ptr<ASTConsumer> override {
     TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
     return std::make_unique<CppFormatConsumer>(
-        TheRewriter, Rules, ReturnStyle, ReturnRuleId, CollectFrom, Report,
-        DepResPerRule, Edits, Conflicts, Vetoes);
+        TheRewriter, Rules, ConstPlacement, ReturnStyle, ReturnRuleId,
+        CollectFrom, Report, DepResPerRule, Edits, Conflicts, Vetoes);
   }
 
  private:
   const std::vector<NormalizeRule>& Rules;
+  std::optional<ConstStyle> ConstPlacement;
   std::optional<ReturnTypeStyle> ReturnStyle;
   const std::string& ReturnRuleId;
   OutputMode Mode;
@@ -159,10 +177,11 @@ class CppFormatAction : public ASTFrontendAction {
 // ---------------------------------------------------------------------------
 
 CppFormatActionFactory::CppFormatActionFactory(
-    std::vector<NormalizeRule> Rules,
+    std::vector<NormalizeRule> Rules, std::optional<ConstStyle> ConstPlacement,
     std::optional<ReturnTypeStyle> ReturnStyle, std::string ReturnRuleId,
     OutputMode Mode, FileSet CollectFrom)
     : Rules(std::move(Rules)),
+      ConstPlacement(ConstPlacement),
       ReturnStyle(ReturnStyle),
       ReturnRuleId(std::move(ReturnRuleId)),
       Mode(Mode),
@@ -174,8 +193,8 @@ auto CppFormatActionFactory::createAction(TUSlot& Slot)
   // slot's own members are touched.  A null Report stays null -- a non-null
   // pointer is what switches the visitors' diagnostic recording on.
   return std::make_unique<CppFormatAction>(
-      Rules, ReturnStyle, ReturnRuleId, Mode, CollectFrom, &Slot.Pending,
-      Report ? &Slot.Report : nullptr, &Slot.DepRes,
+      Rules, ConstPlacement, ReturnStyle, ReturnRuleId, Mode, CollectFrom,
+      &Slot.Pending, Report ? &Slot.Report : nullptr, &Slot.DepRes,
       Mode == OutputMode::Emit ? &Slot.Edits : nullptr, &Slot.Conflicts,
       &Slot.Vetoes);
 }

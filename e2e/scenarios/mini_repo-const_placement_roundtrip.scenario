@@ -1,0 +1,13 @@
+# East, then west: move every movable cv-qualifier to the right of its type,
+# rebuild, then move them all back and rebuild again.  Both legs also have to
+# converge, so each direction is checked for being a fixpoint on the other's
+# output.
+REPO=mini_repo
+RULESET=east_const
+RULESET_THEN=west_const
+EXPECT=pass
+# The two directions move the same qualifier runs, so unlike the return-type
+# round trip they cancel out exactly -- including on the one `const` this
+# fixture writes inside a macro body, which neither direction can rewrite and
+# both therefore leave alone.
+EXPECT_ROUNDTRIP_IDENTICAL=1

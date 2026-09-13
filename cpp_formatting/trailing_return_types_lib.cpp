@@ -87,6 +87,67 @@ static auto skipQualifiersBackward(SourceLocation Start, SourceManager& SM)
   return SM.getLocForStartOfFile(FID).getLocWithOffset(Pos);
 }
 
+/// The mirror of skipQualifiersBackward: scan forward from the last token of
+/// the written type over a run of `const`/`volatile`/`restrict` keywords, and
+/// return the start of the last one (so the result is still a *token range*
+/// end, like the location passed in).
+///
+/// East-const source spells the qualifier on the far side of the type
+/// specifier -- `int const f()` -- and Clang's QualifiedTypeLoc range covers
+/// only `int` there, exactly as it covers only `int` in `const int f()`.
+/// Without this the qualifier is left behind by the move: the Leading
+/// direction turned `auto f() -> int const` into `int f() const`, which for a
+/// member function is a silently *different* declaration (a const member
+/// function returning `int`, not a function returning `const int`), and the
+/// Trailing direction produced `auto const f() -> int`.
+///
+/// The declarator-id always separates a return type from a function's own
+/// cv-qualifiers (`int f() const`), so this scan can never reach them.
+static auto skipQualifiersForward(SourceLocation End, SourceManager& SM,
+                                  const LangOptions& LangOpts)
+    -> SourceLocation {
+  bool Inv = false;
+  FileID FID = SM.getFileID(End);
+  llvm::StringRef Buf = SM.getBufferData(FID, &Inv);
+  if (Inv) return End;
+
+  SourceLocation AfterEnd = Lexer::getLocForEndOfToken(End, 0, SM, LangOpts);
+  if (AfterEnd.isInvalid() || SM.getFileID(AfterEnd) != FID) return End;
+
+  unsigned Result = SM.getFileOffset(End);
+  unsigned Pos = SM.getFileOffset(AfterEnd);
+  const char* BP = Buf.data();
+
+  while (Pos < Buf.size()) {
+    // Skip whitespace forwards.
+    unsigned TokStart = Pos;
+    while (TokStart < Buf.size() &&
+           std::isspace(static_cast<unsigned char>(BP[TokStart])))
+      ++TokStart;
+    if (TokStart >= Buf.size()) break;
+
+    // The next token must be an identifier/keyword (which may not start with
+    // a digit).
+    if (!std::isalpha(static_cast<unsigned char>(BP[TokStart])) &&
+        BP[TokStart] != '_')
+      break;
+
+    unsigned TokEnd = TokStart;
+    while (TokEnd < Buf.size() &&
+           (std::isalnum(static_cast<unsigned char>(BP[TokEnd])) ||
+            BP[TokEnd] == '_'))
+      ++TokEnd;
+
+    llvm::StringRef Tok(BP + TokStart, TokEnd - TokStart);
+    if (Tok != "const" && Tok != "volatile" && Tok != "restrict") break;
+    Result = TokStart;  // extend the end rightward
+    Pos = TokEnd;
+  }
+
+  if (Result == SM.getFileOffset(End)) return End;  // nothing to extend
+  return SM.getLocForStartOfFile(FID).getLocWithOffset(Result);
+}
+
 /// Scan backwards from \p Start over whitespace only.  Deleting a trailing
 /// return type starts here so the space before the `->` goes with it, rather
 /// than leaving `auto foo() ` behind.
@@ -354,19 +415,24 @@ void TrailingReturnCallback::runToTrailing(const FunctionDecl& Func,
   // Pointer/reference TypeLocs (e.g. LValueReferenceTypeLoc for `T &`) only
   // report their sigil as their local begin; the base type lives in the next
   // TypeLoc in the chain.  Walk the chain to find the true leftmost location,
-  // then extend further left past any leading cv-qualifiers (needed because
-  // QualifiedTypeLoc also omits leading `const`/`volatile`/`restrict`).
+  // then extend outward past the cv-qualifiers on either side of the type
+  // specifier -- QualifiedTypeLoc's range omits them whichever side they are
+  // written on, so `const int f()` and the east-const `int const f()` both
+  // report just `int`.  Missing the trailing one strands the qualifier on the
+  // `auto` placeholder.
+  const LangOptions& LangOpts = Func.getASTContext().getLangOpts();
   SourceLocation TypeBegin = getTypeLocLeftmostBegin(ReturnLoc, SM);
   SourceLocation ExtStart = skipQualifiersBackward(TypeBegin, SM);
-  SourceRange FullReturnRange(ExtStart, ReturnRange.getEnd());
+  SourceLocation ExtEnd =
+      skipQualifiersForward(ReturnRange.getEnd(), SM, LangOpts);
+  SourceRange FullReturnRange(ExtStart, ExtEnd);
 
   // In a declarator whose return type *wraps* the function name -- a function
   // returning a function pointer, `int (*f(int))(bool)` -- the return TypeLoc's
   // source range spans the whole declarator, name and parameters included.
   // Hoisting it would duplicate the whole declarator after the `->`.  Only
   // rewrite when the return type is written entirely before the name.
-  if (!SM.isBeforeInTranslationUnit(ReturnRange.getEnd(), Func.getLocation()))
-    return;
+  if (!SM.isBeforeInTranslationUnit(ExtEnd, Func.getLocation())) return;
 
   // Extract the return-type text, accounting for edits already applied to
   // this buffer.  In cpp_format's combined pass a rename rule may already
@@ -375,7 +441,6 @@ void TrailingReturnCallback::runToTrailing(const FunctionDecl& Func,
   // moved after `->` stays consistent — the wholesale replace below would
   // otherwise silently clobber the nested edit.  With no prior edits this
   // returns the exact original source text, as before.
-  const LangOptions& LangOpts = Func.getASTContext().getLangOpts();
   std::string OriginalTypeStr =
       Rewrite.getRewrittenText(CharSourceRange::getTokenRange(FullReturnRange));
 
@@ -384,7 +449,7 @@ void TrailingReturnCallback::runToTrailing(const FunctionDecl& Func,
   // Pad "auto" if the character immediately after the return-type token would
   // merge with the next token (e.g. `Foo&operator=` -> `auto operator=`).
   SourceLocation AfterReturnLoc =
-      Lexer::getLocForEndOfToken(ReturnRange.getEnd(), 0, SM, LangOpts);
+      Lexer::getLocForEndOfToken(ExtEnd, 0, SM, LangOpts);
   bool Invalid = false;
   const char* NextChar = SM.getCharacterData(AfterReturnLoc, &Invalid);
   std::string AutoReplacement = "auto";
@@ -411,8 +476,8 @@ void TrailingReturnCallback::runToTrailing(const FunctionDecl& Func,
     std::pair<FileID, unsigned> Begin =
         SM.getDecomposedLoc(SM.getSpellingLoc(ExtStart));
     unsigned BeginOff = Begin.second;
-    unsigned EndOff = offsetOf(
-        Lexer::getLocForEndOfToken(ReturnRange.getEnd(), 0, SM, LangOpts));
+    unsigned EndOff =
+        offsetOf(Lexer::getLocForEndOfToken(ExtEnd, 0, SM, LangOpts));
     std::string Path;
     if (const FileEntry* FE = SM.getFileEntryForID(Begin.first)) {
       StringRef RP = FE->tryGetRealPathName();
@@ -486,12 +551,18 @@ void TrailingReturnCallback::runToLeading(const FunctionDecl& Func,
   if (!isMovableTypeShape(ReturnLoc)) return;
 
   // Same leftmost-begin and cv-qualifier treatment as the Trailing direction:
-  // `-> const int*` reports its range starting at `int`.  Scanning back for
-  // qualifiers is bounded by the `>` of the arrow, so it can never run past
-  // the type into the declarator's own `const` in `auto f() const -> int`.
+  // `-> const int*` reports its range starting at `int`, and `-> int const`
+  // reports it ending at `int`.  Scanning back for qualifiers is bounded by
+  // the `>` of the arrow, so it can never run past the type into the
+  // declarator's own `const` in `auto f() const -> int`; scanning forward runs
+  // into the body or the `;`.  Leaving a trailing qualifier behind here is not
+  // cosmetic: `int f() const` is a const *member function* returning `int`, a
+  // different declaration from the one that was written.
   SourceLocation TypeBegin = getTypeLocLeftmostBegin(ReturnLoc, SM);
   SourceLocation ExtStart = skipQualifiersBackward(TypeBegin, SM);
-  SourceRange FullReturnRange(ExtStart, ReturnRange.getEnd());
+  SourceLocation ExtEnd =
+      skipQualifiersForward(ReturnRange.getEnd(), SM, LangOpts);
+  SourceRange FullReturnRange(ExtStart, ExtEnd);
 
   // Parameters are not in scope before the declarator-id, so
   // `auto f(T a) -> decltype(a.size())` has nowhere to move to.
@@ -521,8 +592,7 @@ void TrailingReturnCallback::runToLeading(const FunctionDecl& Func,
   if (TypeStr.empty()) return;
 
   SourceLocation DeleteStart = skipWhitespaceBackward(ArrowLoc, SM);
-  SourceLocation TypeEnd =
-      Lexer::getLocForEndOfToken(ReturnRange.getEnd(), 0, SM, LangOpts);
+  SourceLocation TypeEnd = Lexer::getLocForEndOfToken(ExtEnd, 0, SM, LangOpts);
   if (TypeEnd.isInvalid()) return;
   // Every offset below -- including the one the Emit purge measures the
   // trailing type with -- has to come from the same file to mean anything.

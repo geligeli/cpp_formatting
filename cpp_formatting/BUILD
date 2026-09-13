@@ -162,6 +162,67 @@ sh_test(
     ],
 )
 
+# The east-const / west-const rewrite: moves a type specifier's cv-qualifiers
+# to the configured side.  Purely local to one TU -- no cross-TU state.
+cc_library(
+    name = "const_placement_lib",
+    srcs = ["const_placement_lib.cpp"],
+    hdrs = ["const_placement_lib.h"],
+    deps = [
+        ":lint_lib",
+        ":output_mode",
+        ":tu_driver",
+        "@llvm-project//clang:ast",
+        "@llvm-project//clang:basic",
+        "@llvm-project//clang:frontend",
+        "@llvm-project//clang:lex",
+        "@llvm-project//clang:rewrite",
+        "@llvm-project//clang:tooling",
+        "@llvm-project//llvm:Support",
+    ],
+)
+
+cc_test(
+    name = "const_placement_test",
+    srcs = ["const_placement_test.cpp"],
+    copts = [
+        "-DGTEST_HAS_RTTI=0",
+    ],
+    deps = [
+        ":const_placement_lib",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_binary(
+    name = "const_placement",
+    srcs = ["const_placement.cpp"],
+    linkstatic = True,
+    deps = [
+        ":const_placement_lib",
+        ":embedded_clang_resource",
+        ":lint_lib",
+        ":tu_driver",
+        "@llvm-project//clang:frontend",
+        "@llvm-project//clang:tooling",
+        "@llvm-project//llvm:Support",
+    ],
+)
+
+sh_test(
+    name = "const_placement_integration_test",
+    srcs = ["const_placement_integration_test.sh"],
+    args = [
+        "$(location //cpp_formatting:const_placement)",
+        "$(location //cpp_formatting:cpp_format)",
+    ],
+    data = [
+        "//cpp_formatting:const_placement",
+        "//cpp_formatting:cpp_format",
+    ],
+)
+
 cc_library(
     name = "naming_convention",
     srcs = ["naming_convention.cpp"],
@@ -287,6 +348,7 @@ cc_library(
     srcs = ["cpp_format_lib.cpp"],
     hdrs = ["cpp_format_lib.h"],
     deps = [
+        ":const_placement_lib",
         ":lint_lib",
         ":output_mode",
         ":rename_variables_lib",
@@ -306,6 +368,7 @@ cc_binary(
     linkstatic = True,
     visibility = ["//visibility:public"],
     deps = [
+        ":const_placement_lib",
         ":cpp_format_lib",
         ":embedded_clang_resource",
         ":lint_lib",

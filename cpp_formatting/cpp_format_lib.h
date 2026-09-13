@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "cpp_formatting/const_placement_lib.h"
 #include "cpp_formatting/lint_lib.h"
 #include "cpp_formatting/output_mode.h"
 #include "cpp_formatting/rename_variables_lib.h"
@@ -30,17 +31,19 @@ struct NormalizeRule {
 
 /// The TU driver's client for cpp_format: builds, per translation unit, one
 /// action that applies every normalize_variables rule plus (optionally) the
-/// return-type rewrite in a single pass over the AST, sharing one Rewriter.
-/// This avoids re-parsing every TU once per pass: parses per TU drop from
-/// 1 + #rules to 1.
+/// qualifier move and the return-type rewrite in a single pass over the AST,
+/// sharing one Rewriter.  This avoids re-parsing every TU once per pass:
+/// parses per TU drop from 1 + #rules to 1.
 ///
 /// Like RenameActionFactory, each TU writes into its own TUSlot; finish()
 /// merges the slots in source order and flush() commits the rewritten content
 /// afterwards, so every TU compiles against the original on-disk source.
 class CppFormatActionFactory : public TUSlotClient {
  public:
-  /// \p ReturnStyle selects the return-type pass; nullopt skips it entirely.
+  /// \p ConstPlacement selects the east/west qualifier move and
+  /// \p ReturnStyle the return-type pass; nullopt skips that pass entirely.
   CppFormatActionFactory(std::vector<NormalizeRule> Rules,
+                         std::optional<ConstStyle> ConstPlacement,
                          std::optional<ReturnTypeStyle> ReturnStyle,
                          std::string ReturnRuleId, OutputMode Mode,
                          FileSet CollectFrom);
@@ -88,6 +91,7 @@ class CppFormatActionFactory : public TUSlotClient {
 
  private:
   std::vector<NormalizeRule> Rules;
+  std::optional<ConstStyle> ConstPlacement;
   std::optional<ReturnTypeStyle> ReturnStyle;
   std::string ReturnRuleId;
   OutputMode Mode;

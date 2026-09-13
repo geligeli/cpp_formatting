@@ -1,0 +1,23 @@
+# The qualifier move over a real corpus, both ways.  What this adds over the
+# mini_repo round trip is the variety: qualifiers on template arguments, on
+# nested argument lists that close with `>>`, next to a member function's own
+# `const`, and spelled through macros -- the cases where "which `const` is
+# this" is decided by something other than the two tokens next to it.
+#
+# Measured (2026-09-13, fastbuild tool, 48 cc_* targets, 88 files touched):
+#   east  4688 edits, rebuild 0m14s, converge 2m40s
+#   west  4697 edits, rebuild 0m14s, converge 3m05s
+#   ~11 min total.  The reverse leg finds 9 more edits than the forward one
+#   produced, because it also moves the qualifiers googletest already wrote
+#   east.
+#
+# No EXPECT_ROUNDTRIP_IDENTICAL.  The two directions cancel out on everything
+# either of them moved, but the moved run is re-emitted with single spaces, so
+# a qualifier originally written `const    int` comes back as `const int`.
+# That is a formatting difference the round trip cannot undo, and on a corpus
+# this size it is not worth asserting the absence of; `rebuild2` and
+# `converge2` are the assertions that matter.
+REPO=googletest
+RULESET=east_const
+RULESET_THEN=west_const
+EXPECT=pass

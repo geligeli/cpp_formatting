@@ -795,3 +795,52 @@ TEST(TrailingReturnTypes, LeadingAttributeStillRewritten) {
   EXPECT_EQ(rewrite("[[nodiscard]] int value();\n"),
             "[[nodiscard]] auto value() -> int;\n");
 }
+
+// ---------------------------------------------------------------------------
+// East-const source -- a cv-qualifier written *after* the type specifier
+//
+// Clang's QualifiedTypeLoc range covers only `int` in `int const f()`, exactly
+// as it covers only `int` in `const int f()`, so the written qualifier has to
+// be picked up by scanning forward as well as backward.  Getting this wrong is
+// not cosmetic in the Leading direction: it turns a function returning
+// `const int` into a *const member function* returning `int`.
+// ---------------------------------------------------------------------------
+
+TEST(TrailingReturnTypes, EastConstReturnTypeMovesWhole) {
+  EXPECT_EQ(rewrite("int const value();"), "auto value() -> int const;");
+}
+
+TEST(TrailingReturnTypes, EastConstPointerReturnTypeMovesWhole) {
+  // The qualifier of the *pointer* sits after the `*` and still moves with the
+  // type: the whole written return type is what is hoisted.
+  EXPECT_EQ(rewrite("int* const value();"), "auto value() -> int* const;");
+}
+
+TEST(TrailingReturnTypes, EastConstOnAConstMemberFunction) {
+  // Two `const`s that mean different things: the return type's moves, the
+  // member function's stays where it is.
+  EXPECT_EQ(rewrite("struct S { int const value() const; };"),
+            "struct S { auto value() const -> int const; };");
+}
+
+TEST(LeadingReturnTypes, EastConstTrailingReturnTypeMovesWhole) {
+  EXPECT_EQ(unwind("auto value() -> int const;"), "int const value();");
+}
+
+TEST(LeadingReturnTypes, EastConstIsNotTurnedIntoAConstMemberFunction) {
+  // `int value() const` would be a const member function returning `int`,
+  // a different declaration from one returning `const int`.
+  EXPECT_EQ(unwind("struct S { auto value() -> int const; };"),
+            "struct S { int const value(); };");
+}
+
+TEST(LeadingReturnTypes, EastConstRoundTripsWithTheTrailingDirection) {
+  const char* code =
+      "struct S {\n"
+      "  int const value() const;\n"
+      "  int const* ptr() const;\n"
+      "};\n";
+  const std::string trailing = rewrite(code);
+  EXPECT_NE(trailing, code);
+  EXPECT_EQ(unwind(trailing.c_str()), code);
+}

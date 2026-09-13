@@ -21,12 +21,15 @@ bazel test //...
 bazel build //cpp_formatting:cpp_format
 bazel build //cpp_formatting:trailing_return_types
 bazel build //cpp_formatting:normalize_variables
+bazel build //cpp_formatting:const_placement
 ```
 
 **Run a specific test suite:**
 ```
 bazel test //cpp_formatting:trailing_return_types_test
 bazel test //cpp_formatting:trailing_return_types_integration_test
+bazel test //cpp_formatting:const_placement_test
+bazel test //cpp_formatting:const_placement_integration_test
 bazel test //cpp_formatting:naming_convention_test
 bazel test //cpp_formatting:rename_variables_test
 bazel test //cpp_formatting:normalize_variables_integration_test
@@ -39,6 +42,7 @@ bazel test //cpp_formatting:aggregate_integration_test
 ```
 bazel run //cpp_formatting:trailing_return_types -- path/to/file.cpp -- -std=c++17
 bazel run //cpp_formatting:normalize_variables -- --style=snake_case --scope=member path/to/file.cpp -- -std=c++17
+bazel run //cpp_formatting:const_placement -- --style=east path/to/file.cpp -- -std=c++17
 bazel run //cpp_formatting:cpp_format -- --config=cpp_format.yaml --in-place file.cpp -- -std=c++17
 ```
 
@@ -46,11 +50,12 @@ bazel run //cpp_formatting:cpp_format -- --config=cpp_format.yaml --in-place fil
 ```
 bazel run //cpp_formatting:trailing_return_types -- -i path/to/file.cpp -- -std=c++17
 bazel run //cpp_formatting:normalize_variables -- --style=snake_case --scope=member --in-place path/to/file.cpp -- -std=c++17
+bazel run //cpp_formatting:const_placement -- --style=east --in-place path/to/file.cpp -- -std=c++17
 ```
 
-**Lint mode (CI/CD):** all three binaries accept `--lint` (modify nothing, exit 1 when violations are found, 0 when clean) and `--format=<text|sarif|diff>` (default `text`; a non-default value implies `--lint`). `sarif` emits a SARIF 2.1.0 log; `diff` emits a git-apply-able unified patch. Output goes to stdout; `--lint`/`--format` cannot be combined with `--in-place`.
+**Lint mode (CI/CD):** all four binaries accept `--lint` (modify nothing, exit 1 when violations are found, 0 when clean) and `--format=<text|sarif|diff>` (default `text`; a non-default value implies `--lint`). `sarif` emits a SARIF 2.1.0 log; `diff` emits a git-apply-able unified patch. Output goes to stdout; `--lint`/`--format` cannot be combined with `--in-place`.
 
-**Parallelism:** all three binaries parse translation units in parallel — one `ClangTool` per TU on a worker pool sized to the CPU count (`--jobs=N` / `-jN` caps it; `0` = every CPU; larger requests are capped). The output is byte-identical for any `-j`; see "Execution model" below. `--debug-trace` forces one TU at a time.
+**Parallelism:** all four binaries parse translation units in parallel — one `ClangTool` per TU on a worker pool sized to the CPU count (`--jobs=N` / `-jN` caps it; `0` = every CPU; larger requests are capped). The output is byte-identical for any `-j`; see "Execution model" below. `--debug-trace` forces one TU at a time.
 ```
 bazel run //cpp_formatting:normalize_variables -- --style=snake_case --scope=member --lint path/to/file.cpp -- -std=c++17
 bazel run //cpp_formatting:cpp_format -- --config=cpp_format.yaml --format=sarif file.cpp -- -std=c++17
@@ -85,7 +90,7 @@ All source files live under [cpp_formatting/](cpp_formatting/).
   - `rewriteToTrailingReturnTypes()` / `rewriteToLeadingReturnTypes()` — test helpers that rewrite an in-memory string
 - [cpp_formatting/trailing_return_types_lib.cpp](cpp_formatting/trailing_return_types_lib.cpp) — Implementation: `runToTrailing()` and `runToLeading()` behind one `run()`, the guard helpers the Leading direction needs (`isMovableTypeShape`, `rangeMentionsName`, `LookupEscapeChecker`), plus the private `CaptureAction` used by the test helpers.
 
-#### `tu_driver` — parallel translation-unit driver (shared by all three binaries)
+#### `tu_driver` — parallel translation-unit driver (shared by all four binaries)
 
 - [cpp_formatting/tu_driver.h](cpp_formatting/tu_driver.h) — Public API:
   - `TUSlot` — everything one TU produces (`Pending`, `Edits`, `Conflicts`, `Report`, its seeded-plus-own `Vetoes` and per-rule `DepRes` maps, buffered Clang diagnostics, `Rc`). Written only by that TU's action, on its worker thread.
@@ -95,6 +100,17 @@ All source files live under [cpp_formatting/](cpp_formatting/).
   - `isHeaderSource()` (h/hh/hpp/hxx/h++, the aspect's `_HDR_EXTS`), `resolveJobs()` (0 → every CPU, affinity-aware; larger requests capped), `makeStandardArgumentsAdjuster()` (drop `-fno-canonical-system-headers`, supply the embedded `-resource-dir` unless one is given — the adjusters every main used to build by hand).
 - [cpp_formatting/tu_driver.cpp](cpp_formatting/tu_driver.cpp) — Implementation. One `ClangTool` per TU with `llvm::vfs::createPhysicalFileSystem()` (a per-instance cwd, so `ClangTool::run`'s per-compile-command chdir never touches the process — the `AllTUsToolExecutor` pattern). Workers are `llvm::thread`s with explicit 8 MiB stacks (a pool's default is 1 MiB on Windows; Clang's parser recurses deeply). A per-slot `SlotActionFactory` overrides `runInvocation()` to point `CompilerInstance::setVerboseOutputStream` at the slot's buffer (Clang's `N warnings generated.` bypasses the `DiagnosticConsumer`) and to build the buffered `TextDiagnosticPrinter` from the invocation's own `DiagnosticOptions`; buffered diagnostics are replayed to stderr in slot order under one mutex. The serial path (`-j1`, `--debug-trace`) leaves Clang's stderr printer in place, so its output is exactly the old one.
 - [cpp_formatting/rename_state.h](cpp_formatting/rename_state.h) / [rename_state.cpp](cpp_formatting/rename_state.cpp) — the cross-TU rename types (`DependentResolution(s)`, `RenameVetoes`, `RenameConflict(s)`) split out of `rename_variables_lib` so the driver can carry them without depending on the visitors, plus `recordResolution` / `vetoResolution`, `mergeDependentResolutions()` (a lattice join on `(HasName, NewName, Vetoed)`: veto absorbing, disagreement vetoes, same name idempotent — so replaying a map seeded from the target is safe) and `dependentResolutionsDifferFor()` (the staleness test, scoped to one file).
+
+#### `const_placement` — move cv-qualifiers to the east or west of the type they qualify
+
+- [cpp_formatting/const_placement.cpp](cpp_formatting/const_placement.cpp) — `main()`: CLI option parsing (`--style=east|west`, `--lint`/`--format`, `--jobs`), drives `ConstPlacementActionFactory`.
+- [cpp_formatting/const_placement_lib.h](cpp_formatting/const_placement_lib.h) — Public API:
+  - `ConstStyle` — `East` (`const int x` → `int const x`) | `West` (the reverse). One value rather than two booleans, so "both directions at once" is unrepresentable, as for `ReturnTypeStyle`.
+  - `parseConstStyle()` / `constStyleRuleId()` — the `east`/`west` spelling and the `east_const`/`west_const` lint rule ids.
+  - `runConstPlacementOnAST()` — the pass itself, exposed so `cpp_format` can run it on an AST it has already parsed, sharing one `Rewriter` with the other passes.
+  - `ConstPlacementAction` / `ConstPlacementActionFactory` — frontend action and `TUSlotClient`, mirroring the return-type pair: the rewrite is local to one TU, so there is no cross-TU state, nothing to seed and nothing that can veto.
+  - `rewriteConstPlacement()` — test helper that rewrites an in-memory string.
+- [cpp_formatting/const_placement_lib.cpp](cpp_formatting/const_placement_lib.cpp) — Implementation: a `RecursiveASTVisitor` over `QualifiedTypeLoc`, plus the shape guard (`isPlainTypeSpecifier`) that decides which qualifiers may move and the raw-buffer scans that find the written qualifier run. See "`const_placement`: which qualifier moves, and why" below.
 
 #### `normalize_variables` — rename variables and member functions to a consistent naming convention
 
@@ -113,18 +129,18 @@ All source files live under [cpp_formatting/](cpp_formatting/).
 
 #### `cpp_format` — combined tool with YAML config
 
-- [cpp_formatting/cpp_format.cpp](cpp_formatting/cpp_format.cpp) — `main()`: parses CLI options or a YAML config file, then runs every `normalize_variables` rule plus `trailing_return_types` in a **single** `ClangTool` pass via `CppFormatActionFactory` (each TU is parsed exactly once, regardless of how many rules are configured). Also hosts the `--emit-edits=<file>` mode (writes per-TU edit records for Bazel aggregation), the `--owned-files=<list>` mode (newline-separated paths added to the `FileSet` but *not* to the source list, so a dependency's declarations are renameable at their use sites here without being re-parsed — see the Bazel integration below), and the `--aggregate` mode (merges those records; dispatched before `CommonOptionsParser`, delegates to `lint_lib`'s `runEditAggregation`).
-- [cpp_formatting/cpp_format_lib.h](cpp_formatting/cpp_format_lib.h) — `NormalizeRule` (scope + rename callback + lint rule id) and `CppFormatActionFactory`: the `TUSlotClient` for the combined tool (`ruleCount()` = number of rules, one `DepRes` map per rule in every slot); `finish()` merges the slots and `flush()` commits like `RenameActionFactory`. The return-type pass is carried as a `std::optional<ReturnTypeStyle>` — `nullopt` skips it.
-- [cpp_formatting/cpp_format_lib.cpp](cpp_formatting/cpp_format_lib.cpp) — Implementation: per TU, `runRenameRuleOnAST()` (from `rename_variables_lib`) runs each rule's collect+apply visitors, then the trailing-return `MatchFinder` runs via `matchAST()` on the same AST, all sharing one `Rewriter`. Return-type text is extracted via `Rewriter::getRewrittenText()`, so a rename that landed inside a return type (e.g. a member in `decltype(count_)`) is carried into the moved `-> decltype(m_count)` text instead of being clobbered by the wholesale `auto` replacement.
+- [cpp_formatting/cpp_format.cpp](cpp_formatting/cpp_format.cpp) — `main()`: parses CLI options or a YAML config file, then runs every `normalize_variables` rule plus `const_placement` and `trailing_return_types` in a **single** `ClangTool` pass via `CppFormatActionFactory` (each TU is parsed exactly once, regardless of how many rules are configured). Also hosts the `--emit-edits=<file>` mode (writes per-TU edit records for Bazel aggregation), the `--owned-files=<list>` mode (newline-separated paths added to the `FileSet` but *not* to the source list, so a dependency's declarations are renameable at their use sites here without being re-parsed — see the Bazel integration below), and the `--aggregate` mode (merges those records; dispatched before `CommonOptionsParser`, delegates to `lint_lib`'s `runEditAggregation`).
+- [cpp_formatting/cpp_format_lib.h](cpp_formatting/cpp_format_lib.h) — `NormalizeRule` (scope + rename callback + lint rule id) and `CppFormatActionFactory`: the `TUSlotClient` for the combined tool (`ruleCount()` = number of rules, one `DepRes` map per rule in every slot); `finish()` merges the slots and `flush()` commits like `RenameActionFactory`. The qualifier move and the return-type pass are carried as a `std::optional<ConstStyle>` and a `std::optional<ReturnTypeStyle>` — `nullopt` skips that pass.
+- [cpp_formatting/cpp_format_lib.cpp](cpp_formatting/cpp_format_lib.cpp) — Implementation: per TU, `runRenameRuleOnAST()` (from `rename_variables_lib`) runs each rule's collect+apply visitors, then `runConstPlacementOnAST()`, then the trailing-return `MatchFinder` via `matchAST()` on the same AST, all sharing one `Rewriter`. **That order is load-bearing.** Each later pass reads the text an earlier one produced with `Rewriter::getRewrittenText()`, so a rename that landed inside a return type (a member in `decltype(count_)`) is carried into the moved `-> decltype(m_count)` text instead of being clobbered by the wholesale `auto` replacement — and a qualifier moved east is carried into `-> int const` instead of being stranded on the `auto` placeholder. In Emit mode each pass drops the records of the earlier ones that fall inside the span it re-emits, for the same reason.
 
 #### Lint support (CI/CD)
 
-- [cpp_formatting/lint_lib.h](cpp_formatting/lint_lib.h) — `PendingRewrites` (path → rewritten content, shared by both rewrite libs), `EditRecord`/`ResolutionRecord`/`RenameVeto`/`EditReport` (the Bazel aggregation model), `LintDiagnostic`, `LintReport` (`emitText`/`emitSARIF`), `emitUnifiedDiff()` (Myers line diff, git-apply-able), `relativizeToCwd()` (the cwd is resolved once and cached — it is called per edit record from several threads, and the tool never changes its own cwd), `emitLintResults()` (shared by the three mains: emits the chosen format and returns the exit code).
+- [cpp_formatting/lint_lib.h](cpp_formatting/lint_lib.h) — `PendingRewrites` (path → rewritten content, shared by both rewrite libs), `EditRecord`/`ResolutionRecord`/`RenameVeto`/`EditReport` (the Bazel aggregation model), `LintDiagnostic`, `LintReport` (`emitText`/`emitSARIF`), `emitUnifiedDiff()` (Myers line diff, git-apply-able), `relativizeToCwd()` (the cwd is resolved once and cached — it is called per edit record from several threads, and the tool never changes its own cwd), `emitLintResults()` (shared by the four mains: emits the chosen format and returns the exit code).
 - [cpp_formatting/lint_lib.cpp](cpp_formatting/lint_lib.cpp) — Implementation. JSON via `llvm/Support/JSON.h` (no new dependency). Lint diagnostics are recorded at the same choke points that perform rewrites (`ApplyRenamesVisitor::renameAt`, `TrailingReturnCallback::run`), so lint results exactly match what in-place mode would change. Also implements the edit-record model (`EditReport`/`parseEditReport`/`mergeEditReports`/`aggregateEdits`) and `runEditAggregation()` — the shared CLI entry point behind both `aggregate_edits` and `cpp_format --aggregate`.
 
 #### Embedded Clang resource directory
 
-All three binaries link the Clang built-in headers (`stddef.h`, `__stddef_max_align_t.h`, etc.) into the binary itself, so no system Clang installation is required at runtime.
+All four binaries link the Clang built-in headers (`stddef.h`, `__stddef_max_align_t.h`, etc.) into the binary itself, so no system Clang installation is required at runtime.
 
 - [cpp_formatting/embedded_clang_resource.h](cpp_formatting/embedded_clang_resource.h) — declares `ensureClangResourceDir()`.
 - [cpp_formatting/embedded_clang_resource.cpp](cpp_formatting/embedded_clang_resource.cpp) — implementation: extracts the embedded `.tar.gz` to `$XDG_CACHE_HOME/cpp_formatting/clang_resource_<fnv1a-hash>/` on first call, returns the cached path on subsequent calls. Decompression (zlib, `@llvm_zlib//:zlib`) and tar parsing happen in-process — no system `tar`/`rm` or POSIX calls — and extraction goes via a uniquely-named temp directory + atomic `std::filesystem::rename` so concurrent invocations are safe.
@@ -132,7 +148,7 @@ All three binaries link the Clang built-in headers (`stddef.h`, `__stddef_max_al
 
 ### Tests
 
-- [cpp_formatting/trailing_return_types_test.cpp](cpp_formatting/trailing_return_types_test.cpp) — gtest unit tests for `trailing_return_types_lib`, including a `TrailingReturnTypesDeducingThis` suite covering C++23 explicit object parameters (P0847, run with `-std=c++23`) and a `LeadingReturnTypes` suite for the reverse direction (every guard gets a "left unchanged" case, plus a leading→trailing→leading round trip and a fixpoint check).
+- [cpp_formatting/trailing_return_types_test.cpp](cpp_formatting/trailing_return_types_test.cpp) — gtest unit tests for `trailing_return_types_lib`, including a `TrailingReturnTypesDeducingThis` suite covering C++23 explicit object parameters (P0847, run with `-std=c++23`) and a `LeadingReturnTypes` suite for the reverse direction (every guard gets a "left unchanged" case, plus a leading→trailing→leading round trip and a fixpoint check). An east-const group pins both directions on a return type whose cv-qualifier is written *after* the type specifier — the case the forward qualifier scan exists for.
 - [cpp_formatting/integration_test.sh](cpp_formatting/integration_test.sh) — Shell integration tests for `trailing_return_types`:
   1. Dry-run on a single file — rewritten source goes to stdout.
   2. In-place on a single file — file is modified on disk.
@@ -142,6 +158,8 @@ All three binaries link the Clang built-in headers (`stddef.h`, `__stddef_max_al
   6. `--jobs=2` — two files on two threads give the expected in-place result and the same multi-file dry-run output (one `=== path ===` section per file) as one thread.
 - [cpp_formatting/tu_driver_test.cpp](cpp_formatting/tu_driver_test.cpp) — gtest unit tests for `tu_driver`: `isHeaderSource` (incl. `h++`, and a dotted directory name), `resolveJobs` (0 = every CPU, requests capped), `makeStandardArgumentsAdjuster`.
 - [cpp_formatting/rename_state_test.cpp](cpp_formatting/rename_state_test.cpp) — gtest unit tests for `rename_state`: merge is idempotent and commutative on the resolved state, disagreement vetoes, veto is absorbing, `dependentResolutionsDifferFor` is scoped to one file and ignores the informational fields.
+- [cpp_formatting/const_placement_test.cpp](cpp_formatting/const_placement_test.cpp) — gtest unit tests for `const_placement_lib`: the move in both directions over every spelling that carries a qualifier (variable, parameter, return type, elaborated and qualified names, multi-token builtins, template arguments, alias and typedef, `auto`, `decltype`, casts, array elements); the declarator-component cases that must *not* move (`int* const p` either way, `const int* const p` moving only the pointee's qualifier, a member function's own `const`); nested qualified types including an argument list that closes with `>>`; the macro declines; one decl-specifier-seq shared by several declarators; `volatile` and runs of qualifiers; and that each direction is a fixpoint and undoes the other.
+- [cpp_formatting/const_placement_integration_test.sh](cpp_formatting/const_placement_integration_test.sh) — Shell integration tests for `const_placement`: in-place in both directions over a fixture and back to a byte-identical round trip; both directions as fixpoints; a pointer's own qualifier left alone; `--lint` text/SARIF/diff agreeing with the in-place result and a clean file exiting 0; `--jobs=1` vs `--jobs=4`; `cpp_format` running the same pass from its config **composed with `return_types: trailing`**; `--emit-edits` + `--aggregate --apply` reproducing the in-place result exactly; an unknown style refused by both entry points; and nested qualified types carrying a rename made *inside* one of the specifiers the move re-emits (`decltype(count_) const` becoming `decltype(m_count) const`), in-place and through aggregation.
 - [cpp_formatting/naming_convention_test.cpp](cpp_formatting/naming_convention_test.cpp) — gtest unit tests for `naming_convention`: `splitIntoWords`, `formatName`, `renameToStyle`.
 - [cpp_formatting/rename_variables_test.cpp](cpp_formatting/rename_variables_test.cpp) — gtest unit tests for `rename_variables_lib` (member, local, global, static data members, const members, static globals, const globals, member functions, templates, template-dependent member tokens resolved through instantiations, cross-file, constructor initializers, C++23 explicit object parameters / "deducing this"). A `RenameNestedTemplateClass` suite pins members of a class nested in a class template (plain use, dependent use, the method/static-member cases that already worked, and the partial/explicit specialization cases where index matching must not cross member lists). A `RenameMacros` suite covers both halves of the macro rule: arguments (direct, forwarded through macros, expanded twice, a declaration written as an argument, and a template-dependent `this->member` in an argument) are renamed; a macro-body reference, a `##`-pasted reference, a macro-body reference to one member of an override hierarchy, and a macro-body *dependent* token each veto the rename.
 - [cpp_formatting/normalize_variables_integration_test.sh](cpp_formatting/normalize_variables_integration_test.sh) — Shell integration tests for `normalize_variables`:
@@ -157,7 +175,7 @@ All three binaries link the Clang built-in headers (`stddef.h`, `__stddef_max_al
   10. `--debug-trace --jobs=4` — runs serially, prints one trace per TU, modifies nothing.
   11. `--jobs` equivalence — the multi-file, ordering, dependent-token, out-of-scope-veto and macro-veto scenarios each give byte-identical files and the same (sorted) conflict report with `--jobs=1` and `--jobs=4`.
 - [cpp_formatting/lint_lib_test.cpp](cpp_formatting/lint_lib_test.cpp) — gtest unit tests for `lint_lib`: unified diff (hunks, context merging, missing trailing newline, empty inputs), SARIF emission (parsed back with `llvm::json`), and the edit-record model (JSON round trip including owners and vetoes; aggregation dropping the edits and dependent-token resolutions of a vetoed declaration).
-- [cpp_formatting/lint_integration_test.sh](cpp_formatting/lint_integration_test.sh) — Shell integration tests for `--lint`/`--format` across all three binaries:
+- [cpp_formatting/lint_integration_test.sh](cpp_formatting/lint_integration_test.sh) — Shell integration tests for `--lint`/`--format` across `normalize_variables`, `trailing_return_types` and `cpp_format` (`const_placement`'s lint modes are covered by its own integration test):
   1. Text lint — diagnostics on stdout, exit 1, file byte-identical.
   2. SARIF lint — valid 2.1.0 log with rule id and cwd-relative URI.
   3. Diff lint — emitted patch applies with `git apply` and matches the `--in-place` result.
@@ -238,6 +256,14 @@ strictly tighter than the Trailing ones, so on a large corpus some
 declarations are expected to stay in trailing form, and there `rebuild2` and
 `converge2` are the assertions that matter.
 
+The two `*-const_placement_roundtrip` scenarios are the same shape for the
+east/west qualifier move (`east_const`, then `west_const`). Unlike the
+return-type pair these two directions are exactly as selective as each other —
+both move the same qualifier runs — so `mini_repo` does declare
+`EXPECT_ROUNDTRIP_IDENTICAL=1`; googletest does not, because the moved run is
+re-emitted with single spaces and a corpus that size contains qualifiers
+written `const    int`.
+
 Each scenario gets its **own** Bazel disk cache: edit records hold absolute
 paths, and the devcontainer sets a machine-wide `--disk_cache`, so two
 workspaces sharing one can restore each other's records. [.bazelignore](.bazelignore)
@@ -271,6 +297,12 @@ The BCR tops out at llvm-project 17.0.4, so to track a newer Clang (21.1.8, need
 # both be given.
 return_types: trailing
 
+# Move cv-qualifiers to one side of the type they qualify: `east` rewrites
+# `const int x` to `int const x`; `west` rewrites it back.  Only a qualifier of
+# the type *specifier* moves -- the `const` in `int* const p` qualifies the
+# pointer and stays put.
+const_placement: east
+
 # Rename variables in one or more scopes (applied in order).
 normalize_variables:
   - scope: member   # non-static and static data members
@@ -284,6 +316,8 @@ normalize_variables:
 Supported scopes: `member`, `local`, `global`, `static_member`, `const_member`, `static_global`, `const_global`, `method`.
 
 Supported return-type styles: `trailing`, `leading`.
+
+Supported const placements: `east`, `west`.
 
 Supported styles: `snake_case`, `_leading`, `trailing_`, `m_prefix`, `camelCase`, `UpperCamelCase`, `UPPER_SNAKE_CASE`, `kConstant`.
 
@@ -393,6 +427,85 @@ the same offset ends up with conflicting edits after aggregation.
 Both directions are fixpoints, and each is a fixpoint on the other's output
 for everything it moved — see `mini_repo-return_types_roundtrip` below.
 
+### `const_placement`: which qualifier moves, and why
+
+`const int x` and `int const x` declare the same thing, so moving the qualifier
+across the type specifier is a pure formatting change. `int* const p` is a
+*different type* from `const int* p`, so moving that one is not. The whole pass
+turns on telling those apart, and Clang already does it: a `QualifiedTypeLoc`'s
+qualifiers belong to whatever its **unqualified loc** is, and those locs nest
+the way the declarator reads.
+
+| Written | TypeLoc nesting | What the `const` qualifies |
+|---|---|---|
+| `const int* p` | `Pointer( Qualified{const}( Builtin int ) )` | the `int` — movable |
+| `int const* p` | the same | the `int` — movable |
+| `int* const p` | `Qualified{const}( Pointer( Builtin int ) )` | the *pointer* — declined |
+
+So `isPlainTypeSpecifier()` walks the unqualified loc's `getNextTypeLoc()` chain
+and declines the whole node if any component is a pointer, reference, array,
+function type or paren — the same shape test `isMovableTypeShape()` makes for
+the return-type pass. Declining those also keeps the rewrite's source range
+honest: an array or function declarator's TypeLoc range runs *past* the type
+specifier and over the declarator-id (`const int a[3]`'s `ConstantArrayTypeLoc`
+spells `int a[3]`), so appending ` const` to its end would produce
+`int a[3] const`. Every loc that survives the filter spells the type specifier
+and nothing else.
+
+A member function's own `const` (`int f() const`) is not a `QualifiedTypeLoc` at
+all — it lives on the `FunctionProtoType`'s method qualifiers — so the pass
+never sees it, and `const int f() const` moves exactly one of its two `const`s.
+
+**Finding the written qualifier.** `QualifiedTypeLoc::getSourceRange()` covers
+only the type specifier; the qualifier keywords are outside it on one side or
+the other, exactly as they are for `skipQualifiersBackward()` in the return-type
+pass. `scanCvRunBackward`/`scanCvRunForward` scan the raw buffer for the run of
+`const`/`volatile` keywords adjacent to the specifier. Consequences of scanning
+the buffer rather than the AST, all deliberate:
+
+- A qualifier the preprocessor produced is never found, because the buffer
+  spells the macro name (`#define CONST const` leaves `CONST int x` alone), and
+  a specifier whose own location is a macro expansion is declined outright.
+- A run is only recognised when it is *adjacent* to the specifier. `const static
+  int x` is left alone (`static` is not a cv keyword), as is
+  `const /*why*/ int x` — whitespace is skipped, comments are not.
+- The run is re-emitted with single spaces, so `const    int` comes back as
+  `int const`. That is the one thing an east→west round trip cannot undo.
+
+**Whole runs move, in source order.** `const volatile int x` becomes
+`int const volatile x`; a declaration with qualifiers on *both* sides
+(`const int volatile x`) gathers them on the requested side. `volatile` moves
+with `const` because the style is about where cv-qualifiers go, and leaving
+`volatile int` next to `int const` would be neither style.
+
+**One contiguous replacement per move, innermost first.** The move is a single
+`ReplaceText` spanning the qualifier run *and* the specifier, not an insert on
+one side plus a delete on the other. Two things force this:
+
+- Where the pass meets the return-type pass in `cpp_format`, an insertion
+  sitting exactly on the boundary of the range `runToTrailing()` lifts is
+  neither carried into the moved text nor removed by the replacement, and
+  `const int Get()` came out as `auto const Get() -> int`. A replacement of the
+  same byte range composes instead — the two passes agree on that range because
+  `skipQualifiersBackward`/`Forward` find the same run this scan did.
+- Qualified types nest (`const std::map<std::string const, T const*>` is three
+  of them, and the outer one's specifier spans both inner ones), so the visitor
+  handles children **before** the node (`TraverseQualifiedTypeLoc` recurses
+  first). An outer move applied first would write a specifier text that the
+  inner moves then edit in the middle of, giving `std::stconst ring`. Handling
+  the innermost first means each outer move reads its specifier back with the
+  inner results already in it, via `getRewrittenText()`.
+
+Two smaller sharp edges, both about the closing `>` of a nested template
+argument list: the lexer reads `>>` as one token that the parser splits, so the
+inner list's end location is an *expansion* location (mapped back with
+`getFileLoc()`), and measuring a token there runs one character long and
+swallows the enclosing list's bracket. Hence every range in the pass is a
+**character** range over offsets computed by hand, and the end offset is
+`+1` whenever the last token spells `>`. Requiring that character to be `>` is
+also what keeps the `getFileLoc()` path from being a macro hole: a type whose
+end really comes from a macro body maps to the macro's own name token.
+
 ### Execution model: parallel TUs (`tu_driver`)
 
 Every translation unit is parsed by its own `ClangTool` on a worker thread (`--jobs`, default every CPU) and writes only into its own `TUSlot`. Nothing is shared while a TU runs; what other TUs need is exchanged at barriers by the driver thread, always in **source order** (non-headers in the order given, then headers in the order given), which is what makes the output byte-identical for any `-j`:
@@ -486,6 +599,7 @@ Two mechanisms make the veto order-independent, one per driver path:
   ```
 
   `status_` is declared in an **anonymous union**, so the field the instantiation resolves to cannot be mapped back to the pattern (`primaryTemplateMember()` matches fields by index within a record, and the anonymous union's `RecordDecl` has no pattern link). The recorder concludes the token binds to a member this rule is not renaming and vetoes it. Neither half alone reproduces — a plain member of a dependent base resolves correctly across TUs, and an anonymous-union member used inside its own class rewrites correctly — which is why this shape survived the googletest corpus. Two fixes are possible and they are not alternatives: map anonymous-union fields back to their pattern (removes this instance), and give a dependent-token veto the owner of whatever it did resolve to, so the declaration backs out with it (removes the class of silent half-renames).
+- **A return type's cv-qualifier can be written on either side of it, and both sides have to move.** Clang's `QualifiedTypeLoc` range covers only `int` in `int const f()`, exactly as it covers only `int` in `const int f()`, so the return-type pass scans outward in *both* directions (`skipQualifiersBackward`, `skipQualifiersForward`) to find the whole written type. Leaving a trailing qualifier behind is not cosmetic in the Leading direction: `auto f() -> int const` became `int f() const`, which for a member function is a silently *different* declaration — a const member function returning `int`, not a function returning `const int`. The declarator-id always separates a return type from a function's own cv-qualifiers, so the forward scan can never reach them.
 - **Shadowed variables** — `matchesScope()` filters by scope: a parameter with the same name as a global is not collected when renaming globals.
 - **The project's warning flags are silenced** — every binary appends `-w` to the compile command it is handed (`makeStandardArgumentsAdjuster`). That command belongs to the project being formatted, so under `-Werror` Clang counts its own warning as an error, `CompilerInstance::ExecuteAction` returns false for a TU that parsed perfectly well, `ClangTool::run` reports the run as failed, and the tool exits 1 — failing the build (under the Bazel aspect, the emit action) over a diagnostic it never reads. The warning set is not even the one the project compiles with: a different Clang version, and per-target `copts`, which the aspect cannot recover (it passes only `ctx.fragments.cpp.copts`, the command-line `--copt`s). `-w` is tested *before* the `-Werror` promotion in `DiagnosticIDs::getDiagnosticSeverity`, so it outranks it, and it ignores only diagnostics that are warnings by default — a real error, which does mean the AST cannot be trusted, still fails the run. Test 12 of [cpp_formatting/normalize_variables_integration_test.sh](cpp_formatting/normalize_variables_integration_test.sh) is the end-to-end case.
 - **Per-file-content cache key** — the embedded Clang resource directory is extracted under a directory whose name includes the FNV-1a hash of the embedded `.tar.gz`. If the embedded headers change (e.g. after an LLVM upgrade) a fresh cache directory is created automatically.

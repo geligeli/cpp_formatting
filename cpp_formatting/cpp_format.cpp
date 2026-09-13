@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "clang/Tooling/CommonOptionsParser.h"
+#include "cpp_formatting/const_placement_lib.h"
 #include "cpp_formatting/cpp_format_lib.h"
 #include "cpp_formatting/embedded_clang_resource.h"
 #include "cpp_formatting/lint_lib.h"
@@ -32,7 +33,8 @@ struct Config {
   // `return_types: trailing`, kept working because it appears in every config
   // written before the reverse direction existed.
   bool trailing_return_types = false;
-  std::string return_types;  // "" | "trailing" | "leading"
+  std::string return_types;     // "" | "trailing" | "leading"
+  std::string const_placement;  // "" | "east" | "west"
   std::vector<NormalizeVarsRule> normalize_variables;
 };
 
@@ -54,6 +56,7 @@ struct MappingTraits<Config> {
   static void mapping(IO& io, Config& c) {
     io.mapOptional("trailing_return_types", c.trailing_return_types, false);
     io.mapOptional("return_types", c.return_types, std::string());
+    io.mapOptional("const_placement", c.const_placement, std::string());
     io.mapOptional("normalize_variables", c.normalize_variables);
   }
 };
@@ -82,6 +85,12 @@ static cl::opt<std::string> ReturnTypesOpt(
     cl::desc("Return type style: trailing (`auto f() -> int`) or leading "
              "(`int f()`).  The reverse of --trailing-return-types; the two "
              "cannot be combined."),
+    cl::init(""), cl::cat(CppFormatCategory));
+
+static cl::opt<std::string> ConstPlacementOpt(
+    "const-placement",
+    cl::desc("Which side of the type specifier cv-qualifiers go on: east "
+             "(`int const x`) or west (`const int x`)."),
     cl::init(""), cl::cat(CppFormatCategory));
 
 static cl::opt<std::string> NormScopeOpt(
@@ -285,6 +294,7 @@ auto main(int argc, const char** argv) -> int {
   } else {
     cfg.trailing_return_types = TrailingReturnOpt.getValue();
     cfg.return_types = ReturnTypesOpt.getValue();
+    cfg.const_placement = ConstPlacementOpt.getValue();
     const bool hasScope = !NormScopeOpt.empty();
     const bool hasStyle = !NormStyleOpt.empty();
     if (hasScope && hasStyle) {
@@ -297,11 +307,12 @@ auto main(int argc, const char** argv) -> int {
       return 1;
     }
     if (!cfg.trailing_return_types && cfg.return_types.empty() &&
-        cfg.normalize_variables.empty()) {
+        cfg.const_placement.empty() && cfg.normalize_variables.empty()) {
       llvm::errs()
           << "Nothing to do. Provide --config=<file>, "
-             "--trailing-return-types, --return-types=<trailing|leading>, or "
-             "both --normalize-variables-scope and "
+             "--trailing-return-types, --return-types=<trailing|leading>, "
+             "--const-placement=<east|west>, or both "
+             "--normalize-variables-scope and "
              "--normalize-variables-style.\n";
       return 1;
     }
@@ -333,6 +344,20 @@ auto main(int argc, const char** argv) -> int {
   const char* ReturnRuleId = ReturnStyle == ReturnTypeStyle::Leading
                                  ? "leading_return_types"
                                  : "trailing_return_types";
+
+  // Like the two return-type directions, east and west rewrite the same
+  // declarations against each other, so the style is one value and the config
+  // names it once.
+  std::optional<ConstStyle> ConstPlacement;
+  if (!cfg.const_placement.empty()) {
+    ConstStyle Parsed{};
+    if (!parseConstStyle(cfg.const_placement, Parsed)) {
+      llvm::errs() << "Unknown const_placement '" << cfg.const_placement
+                   << "'. Valid values: east, west\n";
+      return 1;
+    }
+    ConstPlacement = Parsed;
+  }
 
   const bool Lint = LintOpt || FormatOpt != "text";
   const bool Emit = !EmitEditsOpt.empty();
@@ -464,8 +489,8 @@ auto main(int argc, const char** argv) -> int {
   if (!OwnedFilesOpt.empty() && !addOwnedFilesFrom(OwnedFilesOpt, Files))
     return 1;
 
-  CppFormatActionFactory Factory(std::move(Rules), ReturnStyle, ReturnRuleId,
-                                 mode, std::move(Files));
+  CppFormatActionFactory Factory(std::move(Rules), ConstPlacement, ReturnStyle,
+                                 ReturnRuleId, mode, std::move(Files));
   if (Lint) Factory.setLintReport(&Report);
   TUDriverOptions DriverOpts;
   DriverOpts.Jobs = JobsOpt;

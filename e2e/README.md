@@ -80,6 +80,12 @@ does, so on a large corpus some declarations are expected to stay where the
 first pass put them, and there `rebuild2` and `converge2` are the assertions
 that carry the weight.
 
+The `east_const` / `west_const` pair is the other two-pass scenario. Those two
+directions *are* equally selective, so `mini_repo-const_placement_roundtrip`
+declares byte-identity; `googletest-const_placement_roundtrip` does not, because
+a moved qualifier run is re-emitted with single spaces and a corpus that size
+contains qualifiers written `const    int`.
+
 ## Expected outcomes
 
 Some transformations are *expected* to break some repos, and the corpus says so

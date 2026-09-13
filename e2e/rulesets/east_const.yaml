@@ -1,0 +1,7 @@
+# Move every movable cv-qualifier to the right of the type it qualifies.
+# Purely syntactic, touches no names, and a fixpoint by construction (a
+# qualifier already written east has no west run to move).
+#
+# Only a qualifier of the *type specifier* moves: the `const` in `int* const p`
+# qualifies the pointer, has no west spelling, and is left where it is.
+const_placement: east
