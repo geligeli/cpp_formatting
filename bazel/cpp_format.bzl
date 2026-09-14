@@ -42,6 +42,8 @@ for a target pattern and writes `index.pb` into the workspace.
 
 load("@rules_cc//cc:action_names.bzl", "CPP_COMPILE_ACTION_NAME")
 load("@rules_cc//cc:find_cc_toolchain.bzl", "find_cc_toolchain", "use_cc_toolchain")
+load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
+load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
 
 CppFormatEditsInfo = provider(
     doc = "Transitive cpp_format state: per-source-file edit-record JSON files, and " +

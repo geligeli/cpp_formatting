@@ -129,6 +129,14 @@ enum Role {
   // has one such occurrence per distinct symbol.  Always with REFERENCE, never
   // with READ/WRITE/CALL (the instantiation's use is not classified).
   DEPENDENT = 2048;
+  // A macro argument whose spelling a `##` paste consumed to form this
+  // symbol's name: `ABSL_FLAG(std::string, docker_image, ...)` spells the
+  // tail of FLAGS_docker_image, `ON_CALL(m, DoThis())` the tail of
+  // gmock_DoThis.  The pasted name itself is spelled nowhere, so its own
+  // occurrence lands on the invocation token (MACRO_BODY); this one, on the
+  // argument (MACRO_ARGUMENT), is what says that argument is part of it.
+  // Always alone: which role the formed occurrence has is on the invocation.
+  PASTED = 4096;
 }
 
 enum RelationKind {
@@ -156,7 +164,9 @@ enum MacroContext {
                        // the range is that spelling
   MACRO_BODY = 2;  // spelled in a macro body (or pasted with `##`); the range
                    // is the invocation's name token at the call site, which
-                   // every symbol the expansion names shares
+                   // every symbol the expansion names shares.  A pasted name
+                   // also gets a PASTED occurrence on each argument it was
+                   // formed from.
 }
 
 // A producer-defined key/value pair.  Sorted by key, keys unique.

@@ -913,7 +913,7 @@ like `lib/foo.cpp`, `bazel-out/.../foo.pb.h` or `external/...`, so a unit is
 portable), a `symbols` table keyed by Clang's USR (the symbol's identity across
 TUs and machines: `c:@N@demo@S@Widget`), and `occurrences` that refer to both
 by index and carry a `[begin, end)` byte range, role bits (`DECLARATION`,
-`DEFINITION`, `REFERENCE`, `READ`, `WRITE`, `CALL`, `DEPENDENT`, ...), whether
+`DEFINITION`, `REFERENCE`, `READ`, `WRITE`, `CALL`, `DEPENDENT`, `PASTED`, ...), whether
 the token was spelled through a macro, and relations (`CALLED_BY`,
 `CONTAINED_BY`); there is one occurrence per token and symbol, its roles the
 union of every report of it. A unit also lists its `pending` dependent tokens
