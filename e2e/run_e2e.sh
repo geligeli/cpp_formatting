@@ -34,7 +34,6 @@ unset TEST_TMPDIR TEST_SRCDIR RUNFILES_DIR RUNFILES_MANIFEST_FILE \
 WORK="${E2E_WORK_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/cpp_format_e2e}"
 OUT=""
 TOOL_SPEC="source"
-TOOL_CONFIG="fastbuild"
 PHASE_TIMEOUT="${E2E_PHASE_TIMEOUT:-7200}"
 JOBS=""
 FRESH=""
@@ -49,7 +48,6 @@ usage() {
 Options:
   --list                 list the available scenarios and exit
   --tool=SPEC            source (default) | release:<tag> | path:<abs path>
-  --tool-config=CFG      fastbuild (default) | opt   -- how to build from source
   --work-dir=DIR         checkouts, caches and staged binaries (default
                          $XDG_CACHE_HOME/cpp_format_e2e; must be outside the repo)
   --out-dir=DIR          artifacts: logs, patches, summaries (default <work>/artifacts)
@@ -73,7 +71,6 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --list) LIST=1 ;;
     --tool=*) TOOL_SPEC="${1#*=}" ;;
-    --tool-config=*) TOOL_CONFIG="${1#*=}" ;;
     --work-dir=*) WORK="${1#*=}" ;;
     --out-dir=*) OUT="${1#*=}" ;;
     --jobs=*) JOBS="${1#*=}" ;;
@@ -93,7 +90,6 @@ case "$TOOL_SPEC" in
   source|release:*|path:*) ;;
   *) die "--tool must be source, release:<tag> or path:<abs path>; got '$TOOL_SPEC'" ;;
 esac
-case "$TOOL_CONFIG" in fastbuild|opt) ;; *) die "--tool-config must be fastbuild or opt" ;; esac
 
 : "${OUT:=$WORK/artifacts}"
 

@@ -24,7 +24,7 @@ static cl::opt<std::string> ScopeOpt(
     "scope",
     cl::desc("Scope to rename: member, local, global, "
              "static_member, const_member, static_global, const_global, "
-             "method"),
+             "method, type, namespace"),
     cl::init("member"), cl::cat(NormalizeVarsCategory));
 
 static cl::opt<bool> InPlace("in-place",
@@ -130,11 +130,15 @@ auto main(int argc, const char** argv) -> int {
     scope = VariableScope::ConstGlobal;
   } else if (ScopeOpt == "method") {
     scope = VariableScope::Method;
+  } else if (ScopeOpt == "type") {
+    scope = VariableScope::Type;
+  } else if (ScopeOpt == "namespace") {
+    scope = VariableScope::Namespace;
   } else {
     llvm::errs() << "Unknown scope '" << ScopeOpt
                  << "'. Valid scopes: member, local, global, "
                     "static_member, const_member, static_global, const_global, "
-                    "method\n";
+                    "method, type, namespace\n";
     return 1;
   }
 
@@ -207,6 +211,13 @@ auto main(int argc, const char** argv) -> int {
     case VariableScope::Method:
       factory =
           RenameAllMemberFunctions(std::move(cb), mode, std::move(collectFrom));
+      break;
+    case VariableScope::Type:
+      factory = RenameAllTypes(std::move(cb), mode, std::move(collectFrom));
+      break;
+    case VariableScope::Namespace:
+      factory =
+          RenameAllNamespaces(std::move(cb), mode, std::move(collectFrom));
       break;
   }
   LintReport Report;

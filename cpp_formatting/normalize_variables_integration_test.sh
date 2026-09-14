@@ -201,12 +201,16 @@ grep -q 'return a.val_;' "$depdir/dep_a.cpp" \
 echo "PASS: template-dependent member token resolved across files (x.val -> x.val_ in header)"
 
 # ---------------------------------------------------------------------------
-# Test 6 — out-of-scope instantiation vetoes the dependent token
+# Test 6 — out-of-scope instantiation vetoes the dependent token *and* the
+# owned member it also binds to
 #
 # `set_val` is also instantiated with `Ext`, a type declared in a header that is
 # NOT passed to the tool (out of the file set).  Renaming the shared token to
-# `val_` would break `set_val<Ext>`, so the tool must leave the header token
-# alone (veto) even though it renames the owned type `A` in the .cpp.
+# `val_` would break `set_val<Ext>`, so the header token has to stay -- and
+# then renaming the owned `A::val` would break `set_val<A>`, so that has to
+# stay too (the rename is declined by name and reported).  The tool used to
+# rename `A::val` and leave the token, an incomplete rename that surfaced as a
+# compile error on the next build; protobuf's `T::_table_` is where that bit.
 # ---------------------------------------------------------------------------
 vetodir="$tmpdir/veto"
 mkdir -p "$vetodir"
@@ -233,19 +237,20 @@ cp "$vetodir/dep.h" "$vetodir/dep_before.h"
 cp -r "$vetodir" "$fixtures/veto"
 
 # Pass only dep_a.cpp and dep.h — ext.h is intentionally not owned.
+cp "$vetodir/dep_a.cpp" "$vetodir/dep_a_before.cpp"
 "$binary" \
-  --style=trailing_ --scope=member --in-place \
+  --style=trailing_ --scope=member --in-place --report-rename-conflicts \
   "$vetodir/dep_a.cpp" "$vetodir/dep.h" \
-  -- -std=c++17 -xc++ -Wno-pragma-once-outside-header -I"$vetodir"
+  -- -std=c++17 -xc++ -Wno-pragma-once-outside-header -I"$vetodir" \
+  2> "$vetodir/stderr.txt"
 
 diff -u "$vetodir/dep_before.h" "$vetodir/dep.h" \
   || fail "veto test: header token was rewritten despite an out-of-scope binding"
-grep -q 'struct A { int val_; };' "$vetodir/dep_a.cpp" \
-  || fail "veto test: owned type A::val should still be renamed"
-if grep -q 'e.val_' "$vetodir/dep_a.cpp"; then
-  fail "veto test: out-of-scope Ext::val must be left unchanged"
-fi
-echo "PASS: out-of-scope instantiation vetoes the shared dependent token"
+diff -u "$vetodir/dep_a_before.cpp" "$vetodir/dep_a.cpp" \
+  || fail "veto test: A::val must be declined, since set_val's token cannot be rewritten"
+grep -q "skipped rename 'val'.*outside the files being formatted" "$vetodir/stderr.txt" \
+  || { cat "$vetodir/stderr.txt"; fail "veto test: the declined A::val was not reported with the out-of-scope binding as the reason"; }
+echo "PASS: out-of-scope instantiation vetoes the shared dependent token and the owned member"
 
 # ---------------------------------------------------------------------------
 # Test 7 — a reference inside a macro body vetoes the rename, in every TU

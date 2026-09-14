@@ -98,6 +98,7 @@ static cl::opt<std::string> ConstPlacementOpt(
 static cl::opt<std::string> NormScopeOpt(
     "normalize-variables-scope",
     cl::desc("Scope for normalization: member, local, global, static_member, "
+             "type, namespace, "
              "const_member, static_global, const_global, or method"),
     cl::init(""), cl::cat(CppFormatCategory));
 
@@ -578,11 +579,15 @@ auto main(int argc, const char** argv) -> int {
       scope = VariableScope::ConstGlobal;
     } else if (rule.scope == "method") {
       scope = VariableScope::Method;
+    } else if (rule.scope == "type") {
+      scope = VariableScope::Type;
+    } else if (rule.scope == "namespace") {
+      scope = VariableScope::Namespace;
     } else {
       llvm::errs() << "Unknown scope '" << rule.scope
                    << "'. Valid scopes: member, local, global, "
                       "static_member, const_member, static_global, "
-                      "const_global, method\n";
+                      "const_global, method, type, namespace\n";
       return 1;
     }
 
@@ -596,12 +601,12 @@ auto main(int argc, const char** argv) -> int {
          "normalize_variables/" + rule.scope + "/" + rule.style});
   }
 
-  // Reject rule combinations that cannot be applied soundly.  Each rule
-  // collects on its own and decides in ignorance of the others -- collides()
-  // asks whether a new name is taken in the DeclContext as the AST spells it,
-  // which is before any rule has renamed anything -- so an unsound pair is not
-  // reported as a conflict, it is silently miscompiled.  Refusing up front is
-  // the only place this can be caught cheaply.
+  // Reject the one rule combination that cannot be applied soundly: two rules
+  // that can match the same declaration rewrite the same bytes twice.  Two
+  // rules that can merely produce the same *name* in one scope are fine --
+  // the collision resolution in runRenameRulesOnAST sees every rule's
+  // candidates together, and the first rule in the list keeps a contested
+  // name (the other is reported as a skip).
   for (size_t I = 0; I < Parsed.size(); ++I) {
     for (size_t J = I + 1; J < Parsed.size(); ++J) {
       const ParsedRule& A = Parsed[I];
@@ -616,20 +621,6 @@ auto main(int argc, const char** argv) -> int {
                "fine-grained ones: 'member' includes static and const data "
                "members, 'global' includes static and const globals. Keep one "
                "rule per declaration.\n";
-        return 1;
-      }
-      if (scopesShareADeclContext(A.Scope, B.Scope) &&
-          namingStylesCanCollide(A.Style, B.Style)) {
-        llvm::errs()
-            << "Rules " << (I + 1) << " (" << A.Spelling << ") and " << (J + 1)
-            << " (" << B.Spelling
-            << ") can produce the same name for two declarations in one scope, "
-               "and neither rule can see the other's renames. A field and its "
-               "accessor would both be given the same name, which does not "
-               "compile and is not reported as a conflict. Choose styles whose "
-               "names cannot coincide -- 'trailing_' with 'snake_case' (only "
-               "the first ever ends in '_'), or 'm_prefix' with "
-               "'UpperCamelCase' (they differ in the first character).\n";
         return 1;
       }
     }

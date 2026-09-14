@@ -32,7 +32,7 @@ class CppFormatConsumer : public ASTConsumer {
                     std::vector<DependentResolutions>* DepResPerRule,
                     EditReport* Edits, RenameConflicts* Conflicts,
                     RenameVetoes* Vetoes, std::set<std::string>* RenamedNames,
-                    Preprocessor* PP)
+                    Preprocessor* PP, const ConsumedMacroArgs* Consumed)
       : RW(RW),
         Rules(Rules),
         ConstPlacement(ConstPlacement),
@@ -45,14 +45,18 @@ class CppFormatConsumer : public ASTConsumer {
         Conflicts(Conflicts),
         Vetoes(Vetoes),
         RenamedNames(RenamedNames),
-        PP(PP) {}
+        PP(PP),
+        Consumed(Consumed) {}
 
   void HandleTranslationUnit(ASTContext& Ctx) override {
+    // Every rule at once: the collision resolution needs all of their
+    // candidates in view (see runRenameRulesOnAST).
+    std::vector<RenameRuleSpec> Specs;
     for (size_t I = 0; I < Rules.size(); ++I)
-      runRenameRuleOnAST(Ctx, RW, Rules[I].CB, Rules[I].Scope, CollectFrom,
-                         Report, Rules[I].RuleId,
-                         DepResPerRule ? &(*DepResPerRule)[I] : nullptr, Edits,
-                         Conflicts, Vetoes, RenamedNames, PP);
+      Specs.push_back({&Rules[I].CB, Rules[I].Scope, Rules[I].RuleId,
+                       DepResPerRule ? &(*DepResPerRule)[I] : nullptr});
+    runRenameRulesOnAST(Ctx, RW, Specs, CollectFrom, Report, Edits, Conflicts,
+                        Vetoes, RenamedNames, PP, Consumed);
 
     // Between the renames and the return-type pass.  It has to run after the
     // renames because it shares their Rewriter and reads nothing they wrote;
@@ -100,6 +104,7 @@ class CppFormatConsumer : public ASTConsumer {
   RenameVetoes* Vetoes;
   std::set<std::string>* RenamedNames;
   Preprocessor* PP;
+  const ConsumedMacroArgs* Consumed;  // for the spelling audit; may be null
 };
 
 // ---------------------------------------------------------------------------
@@ -160,10 +165,11 @@ class CppFormatAction : public ASTFrontendAction {
   auto CreateASTConsumer(CompilerInstance& CI, StringRef)
       -> std::unique_ptr<ASTConsumer> override {
     TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
+    watchConsumedMacroArgs(CI.getPreprocessor(), Consumed);
     return std::make_unique<CppFormatConsumer>(
         TheRewriter, Rules, ConstPlacement, ReturnStyle, ReturnRuleId,
         CollectFrom, Report, DepResPerRule, Edits, Conflicts, Vetoes,
-        RenamedNames, &CI.getPreprocessor());
+        RenamedNames, &CI.getPreprocessor(), &Consumed);
   }
 
  private:
@@ -183,6 +189,7 @@ class CppFormatAction : public ASTFrontendAction {
   RenameVetoes* Vetoes;
   std::set<std::string>* RenamedNames;
   Rewriter TheRewriter;
+  ConsumedMacroArgs Consumed;  // filled while this TU is parsed
 };
 
 }  // namespace

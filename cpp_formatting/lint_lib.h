@@ -182,6 +182,20 @@ struct ResolutionRecord {
 };
 
 // One invocation's output: ordinary edits plus the dependent-token sidecar.
+/// A rename that was accepted only because another rename vacates its new
+/// name (the field `count` to `count_` is what frees `count` for the method
+/// `Count()`): the mover is named by its owner key and old spelling.  If any
+/// report vetoes the mover -- or declines its name outright -- the dependent
+/// keeps its name too, and \p Site says which rename that was.
+struct RenameDependency {
+  std::string OwnerFile;
+  unsigned OwnerOffset = 0;
+  std::string OnFile;
+  unsigned OnOffset = 0;
+  std::string OnName;
+  RenameSkip Site;  ///< the dependent rename, for the skip report
+};
+
 struct EditReport {
   std::vector<EditRecord> Edits;
   std::vector<ResolutionRecord> Resolutions;
@@ -190,14 +204,15 @@ struct EditReport {
   /// acts on them (a skip means no edit was emitted in the first place, and a
   /// veto that must drop *another* invocation's edit travels in Vetoes).
   std::vector<RenameSkip> Skips;
+  std::vector<RenameDependency> Dependencies;
 
   auto empty() const -> bool {
     return Edits.empty() && Resolutions.empty() && Vetoes.empty() &&
-           Skips.empty();
+           Skips.empty() && Dependencies.empty();
   }
 
-  // Serializes as a JSON object
-  // {"edits":[...],"resolutions":[...],"vetoes":[...],"skips":[...]}.
+  // Serializes as a JSON object {"edits":[...],"resolutions":[...],
+  // "vetoes":[...],"skips":[...],"dependencies":[...]}.
   void emitJSON(llvm::raw_ostream& OS) const;
 };
 

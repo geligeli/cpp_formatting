@@ -1,4 +1,29 @@
-# Placeholder expectation: measured and rewritten before commit.
+# The largest rename corpus: 16446 edits across 307 files apply with 0
+# conflicts, the library and protoc rebuild, and every test target whose
+# protos are checked in rebuilds too.  What does not is every test target
+# whose .pb.cc is *generated at build time*: the C++ code generator emits
+# `$classname$::kDescriptorMethods` and `_impl_._cached_size_` from raw string
+# templates in compiler/cpp/message.cc, so the renamed members of Message and
+# ZeroFieldsBase are referenced from files that exist only in bazel-out and
+# were produced from a string literal.  No reference analysis can see that;
+# the only fix is not to rename what the generator names, which is a
+# per-repository decision (an exemption list) rather than a tool bug.
+#
+# Its trail is worth keeping.  The first run broke six *checked-in* files with
+# 357 errors, and every one of them was a tool bug: a member of an anonymous
+# union whose implicit-this access the local-capture rule did not recognise
+# (LazyString::init_value_, `auto init_value = init_value_`), and two
+# dependent tokens (TcParser::GetTable's T::_table_, micro_string_test's
+# T::kInlineCapacity) that bound both to a renamed member and to one the tool
+# could not rename -- a build-generated class outside the file set, and a
+# member declined by a parameter capture -- where the token was left alone
+# and the renamed target broke.  Those are fixed (see AGENTS.md, "A dependent
+# token that binds to something this rule does not rename"), which is what
+# let protoc build and the generated tests surface.
+#
+# NB: sourced by bash -- no backticks or dollar signs in values.
 REPO=protobuf
 RULESET=member_snake_case
-EXPECT=pass
+EXPECT=known_fail
+EXPECT_FAIL_PHASE=rebuild
+EXPECT_FAIL_REASON='members the C++ code generator names from raw string templates (Message::kDescriptorMethods, ZeroFieldsBase::_cached_size_ in compiler/cpp/message.cc) are referenced from every build-generated .pb.cc, which no analysis of the sources can see'

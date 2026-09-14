@@ -1,0 +1,32 @@
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+
+# Three targets in a chain, so a renamed type or namespace declared in
+# `shapes` has to reach its spellings in `report`, `main` and `shapes_test`.
+cc_library(
+    name = "shapes",
+    srcs = ["shapes.cpp"],
+    hdrs = ["shapes.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "report",
+    srcs = ["report.cpp"],
+    hdrs = ["report.h"],
+    visibility = ["//visibility:public"],
+    deps = [":shapes"],
+)
+
+cc_binary(
+    name = "main",
+    srcs = ["main.cpp"],
+    deps = [":report"],
+)
+
+cc_test(
+    name = "shapes_test",
+    srcs = ["shapes_test.cpp"],
+    deps = [":report"],
+)

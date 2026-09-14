@@ -506,3 +506,67 @@ TEST(RecordList, MissingFileIsAnError) {
 }
 
 }  // namespace
+
+TEST(EditRecords, JSONRoundTripCarriesDependencies) {
+  EditReport R;
+  R.Dependencies.push_back({"c.h", 40, "c.h", 12, "count",
+                            RenameSkip{"c.h", 4, 7, "Count", "count", ""}});
+  std::string Json;
+  llvm::raw_string_ostream OS(Json);
+  R.emitJSON(OS);
+  OS.flush();
+
+  EditReport Parsed;
+  ASSERT_TRUE(parseEditReport(Json, Parsed));
+  ASSERT_EQ(Parsed.Dependencies.size(), 1u);
+  EXPECT_EQ(Parsed.Dependencies[0].OwnerFile, "c.h");
+  EXPECT_EQ(Parsed.Dependencies[0].OwnerOffset, 40u);
+  EXPECT_EQ(Parsed.Dependencies[0].OnFile, "c.h");
+  EXPECT_EQ(Parsed.Dependencies[0].OnOffset, 12u);
+  EXPECT_EQ(Parsed.Dependencies[0].OnName, "count");
+  EXPECT_EQ(Parsed.Dependencies[0].Site.Line, 4u);
+  EXPECT_EQ(Parsed.Dependencies[0].Site.OldName, "Count");
+  EXPECT_EQ(Parsed.Dependencies[0].Site.NewName, "count");
+}
+
+TEST(AggregateEdits, ADependentFallsWithItsVetoedMover) {
+  // One action accepted Count() -> count because the field count moves to
+  // count_; another action, which never saw the method, vetoed the field.
+  // The method's edits must go too, or the class ends up with a field and a
+  // method named count.
+  EditReport Lib, Dep;
+  Lib.Edits.push_back({"c.h", 12, 5, "count", "count_", "c.h", 12});
+  Lib.Edits.push_back({"c.h", 40, 5, "Count", "count", "c.h", 40});
+  Lib.Dependencies.push_back({"c.h", 40, "c.h", 12, "count",
+                              RenameSkip{"c.h", 4, 7, "Count", "count", ""}});
+  Dep.Vetoes.push_back({"c.h", 12, "count", "referenced from a macro body"});
+
+  std::map<std::string, std::vector<EditRecord>> Merged;
+  std::vector<std::string> Conflicts;
+  std::vector<RenameSkip> Declined;
+  ASSERT_TRUE(mergeEditReports({Lib, Dep}, Merged, Conflicts, &Declined));
+  EXPECT_TRUE(Merged.empty() || Merged["c.h"].empty());
+  ASSERT_EQ(Declined.size(), 1u);
+  EXPECT_EQ(Declined[0].OldName, "Count");
+  EXPECT_EQ(Declined[0].Line, 4u);
+}
+
+TEST(AggregateEdits, ADependentFallsWithAMoverDeclinedByName) {
+  // The mover's name is declined outright (a name-keyed veto), which is not a
+  // veto of its owner key: the dependency has to be matched by name too.
+  EditReport Lib, Dep;
+  Lib.Edits.push_back({"c.h", 12, 5, "count", "count_", "c.h", 12});
+  Lib.Edits.push_back({"c.h", 40, 5, "Count", "count", "c.h", 40});
+  Lib.Dependencies.push_back({"c.h", 40, "c.h", 12, "count",
+                              RenameSkip{"c.h", 4, 7, "Count", "count", ""}});
+  Dep.Vetoes.push_back({std::string("\x01") + "count", 0, "count",
+                        "spelled where nothing accounts for it"});
+
+  std::map<std::string, std::vector<EditRecord>> Merged;
+  std::vector<std::string> Conflicts;
+  std::vector<RenameSkip> Declined;
+  ASSERT_TRUE(mergeEditReports({Lib, Dep}, Merged, Conflicts, &Declined));
+  EXPECT_TRUE(Merged.empty() || Merged["c.h"].empty());
+  ASSERT_EQ(Declined.size(), 1u);
+  EXPECT_EQ(Declined[0].OldName, "Count");
+}

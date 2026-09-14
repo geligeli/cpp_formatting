@@ -1,6 +1,7 @@
 #include "cpp_formatting/rename_variables_lib.h"
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <iterator>
 #include <map>
@@ -18,11 +19,16 @@
 #include "clang/Basic/FileEntry.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Lex/Lexer.h"
+#include "clang/Lex/MacroArgs.h"
 #include "clang/Lex/MacroInfo.h"
+#include "clang/Lex/PPCallbacks.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Rewrite/Core/Rewriter.h"
 #include "clang/Tooling/Tooling.h"
+#include "llvm/ADT/BitVector.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringSet.h"
 
 using namespace clang;
@@ -157,8 +163,135 @@ bool matchesScope(const NamedDecl* D, VariableScope Scope) {
       const auto* MD = dyn_cast<CXXMethodDecl>(D);
       return MD && isRenamableMethod(MD);
     }
+    case VariableScope::Type:
+      return isa<TagDecl>(D) || isa<TypedefNameDecl>(D);
+    case VariableScope::Namespace:
+      return isa<NamespaceDecl>(D) || isa<NamespaceAliasDecl>(D);
   }
   return false;
+}
+
+// Type names the standard library reads by convention -- `value_type`,
+// `iterator`, `type`, ... -- exactly as isProtocolMethodName() for member
+// functions: a complete rename still does not compile, because the reference
+// that matters is in a system header.  The Google style guide exempts these
+// from its UpperCamelCase rule for the same reason.
+static bool isProtocolTypeName(llvm::StringRef Name) {
+  static const llvm::StringSet<> kNames = {
+      // traits and metafunctions
+      "type",
+      "value_type",
+      "element_type",
+      "result_type",
+      "argument_type",
+      "first_argument_type",
+      "second_argument_type",
+      "first_type",
+      "second_type",
+      "is_transparent",
+      "is_always_equal",
+      "rebind",
+      "other",
+      // containers and iterators
+      "iterator",
+      "const_iterator",
+      "reverse_iterator",
+      "const_reverse_iterator",
+      "iterator_category",
+      "iterator_concept",
+      "difference_type",
+      "size_type",
+      "pointer",
+      "const_pointer",
+      "reference",
+      "const_reference",
+      "key_type",
+      "mapped_type",
+      "key_compare",
+      "value_compare",
+      "hasher",
+      "key_equal",
+      "allocator_type",
+      "container_type",
+      "traits_type",
+      // allocators, streams, futures, coroutines
+      "propagate_on_container_copy_assignment",
+      "propagate_on_container_move_assignment",
+      "propagate_on_container_swap",
+      "void_pointer",
+      "const_void_pointer",
+      "char_type",
+      "int_type",
+      "off_type",
+      "pos_type",
+      "state_type",
+      "promise_type",
+      "handle_type",
+      // smart pointers, function objects, variants
+      "deleter_type",
+      "weak_type",
+      "callable_type",
+      "native_handle_type",
+      "mutex_type",
+      "duration",
+      "rep",
+      "period",
+      "clock",
+      "time_point",
+  };
+  return kNames.count(Name) > 0;
+}
+
+static const CXXRecordDecl* instantiationPattern(const CXXRecordDecl* RD);
+
+// The rename-map key for a type: a template's pattern record for every
+// specialization and instantiation of it (the name is the template's), the
+// pattern for a member of an instantiated class, the canonical declaration
+// otherwise.  Null for a type with no name of its own.
+static const Decl* typeKey(const TagDecl* D) {
+  if (!D) return nullptr;
+  if (const auto* Spec = dyn_cast<ClassTemplateSpecializationDecl>(D))
+    return Spec->getSpecializedTemplate()
+        ->getTemplatedDecl()
+        ->getCanonicalDecl();
+  if (const auto* RD = dyn_cast<CXXRecordDecl>(D)) {
+    if (RD->isLambda() || RD->isInjectedClassName()) return nullptr;
+    if (const CXXRecordDecl* P = instantiationPattern(RD)) RD = P;
+    return RD->getCanonicalDecl();
+  }
+  if (const auto* ED = dyn_cast<EnumDecl>(D))
+    if (const EnumDecl* P = ED->getInstantiatedFromMemberEnum())
+      return P->getCanonicalDecl();
+  return D->getCanonicalDecl();
+}
+
+// The key for what a template name refers to: a class template's pattern
+// record, an alias template's alias.
+static const Decl* templateKey(const TemplateDecl* TD) {
+  if (!TD) return nullptr;
+  if (const auto* CT = dyn_cast<ClassTemplateDecl>(TD))
+    return CT->getTemplatedDecl()->getCanonicalDecl();
+  if (const auto* AT = dyn_cast<TypeAliasTemplateDecl>(TD))
+    return AT->getTemplatedDecl()->getCanonicalDecl();
+  return nullptr;
+}
+
+// The key for a namespace or a namespace alias (its first declaration).
+static const Decl* namespaceKey(const NamedDecl* D) {
+  if (const auto* NS = dyn_cast_or_null<NamespaceDecl>(D))
+    return NS->isAnonymousNamespace() ? nullptr : NS->getCanonicalDecl();
+  if (const auto* NA = dyn_cast_or_null<NamespaceAliasDecl>(D))
+    return NA->getCanonicalDecl();
+  return nullptr;
+}
+
+// The key for a type-like declaration reached through a using-declaration or
+// a using-type: a tag, a typedef, or nothing we rename.
+static const Decl* typeLikeKey(const NamedDecl* D) {
+  if (const auto* TD = dyn_cast_or_null<TagDecl>(D)) return typeKey(TD);
+  if (const auto* TN = dyn_cast_or_null<TypedefNameDecl>(D))
+    return TN->getCanonicalDecl();
+  return nullptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -490,6 +623,86 @@ static const CXXRecordDecl* lookupHomeOf(const NamedDecl* Member) {
 }
 
 // ---------------------------------------------------------------------------
+// Macro arguments the preprocessor consumed (see ConsumedMacroArgs)
+// ---------------------------------------------------------------------------
+//
+// For every function-like macro expansion, the tokens of each argument whose
+// parameter the body only ever pastes (`##` on either side), stringizes (`#`)
+// or never mentions are recorded by their spelling location.  Those tokens
+// are the ones the preprocessor never emits as themselves: what reaches the
+// parser is the pasted identifier or the string literal, and neither is a
+// reference at the argument's spelling.  A parameter used plainly anywhere in
+// the body -- even once, even alongside a paste -- is not consumed: its
+// argument is emitted, and if that emission is a reference the tool does not
+// understand, the audit must still see it.  The variadic parameter is never
+// consumed: `, ## __VA_ARGS__` is the comma-swallowing idiom, not a paste.
+class ConsumedMacroArgsCallbacks : public PPCallbacks {
+ public:
+  ConsumedMacroArgsCallbacks(SourceManager& SM, ConsumedMacroArgs& Out)
+      : SM(SM), Out(Out) {}
+
+  void MacroExpands(const Token&, const MacroDefinition& MD, SourceRange,
+                    const MacroArgs* Args) override {
+    const MacroInfo* MI = MD.getMacroInfo();
+    if (!MI || !Args || !MI->isFunctionLike()) return;
+    const ParamUse Use = paramUse(MI);
+    const unsigned N =
+        std::min<unsigned>(MI->getNumParams(), Args->getNumMacroArguments());
+    for (unsigned I = 0; I < N; ++I) {
+      if (!Use.Consumed[I] && !Use.Pasted[I]) continue;
+      for (const Token* T = Args->getUnexpArgument(I); T && T->isNot(tok::eof);
+           ++T) {
+        if (!T->is(tok::identifier)) continue;
+        // A nested invocation's argument came out of an enclosing expansion;
+        // getFileLoc walks the argument levels back to where it was written.
+        const SourceLocation L = SM.getFileLoc(T->getLocation());
+        if (L.isInvalid()) continue;
+        if (Use.Consumed[I]) Out.Tokens.insert(SM.getDecomposedLoc(L));
+        if (Use.Pasted[I]) Out.Pasted.insert(SM.getDecomposedLoc(L));
+      }
+    }
+  }
+
+ private:
+  // Per parameter: only ever pasted / stringized / unused (Consumed), and
+  // pasted at least once (Pasted).  The two overlap but neither implies the
+  // other: `int n; int n##_count;` is pasted and not consumed.
+  struct ParamUse {
+    llvm::BitVector Consumed, Pasted;
+  };
+
+  ParamUse paramUse(const MacroInfo* MI) {
+    auto It = Cache.find(MI);
+    if (It != Cache.end()) return It->second;
+    ParamUse Use{llvm::BitVector(MI->getNumParams(), true),
+                 llvm::BitVector(MI->getNumParams(), false)};
+    const ArrayRef<const IdentifierInfo*> Params = MI->params();
+    if (MI->isVariadic() && !Params.empty())
+      Use.Consumed[Params.size() - 1] = false;
+    const ArrayRef<Token> Toks = MI->tokens();
+    for (size_t I = 0; I < Toks.size(); ++I) {
+      if (!Toks[I].is(tok::identifier)) continue;
+      const auto* P = llvm::find(Params, Toks[I].getIdentifierInfo());
+      if (P == Params.end()) continue;
+      const size_t Idx = P - Params.begin();
+      const bool Stringized = I > 0 && Toks[I - 1].is(tok::hash);
+      const bool Pasted =
+          (I > 0 && Toks[I - 1].is(tok::hashhash)) ||
+          (I + 1 < Toks.size() && Toks[I + 1].is(tok::hashhash));
+      if (Pasted && !(MI->isVariadic() && Idx + 1 == Params.size()))
+        Use.Pasted[Idx] = true;
+      if (!Stringized && !Pasted) Use.Consumed[Idx] = false;
+    }
+    Cache[MI] = Use;
+    return Use;
+  }
+
+  SourceManager& SM;
+  ConsumedMacroArgs& Out;
+  llvm::DenseMap<const MacroInfo*, ParamUse> Cache;
+};
+
+// ---------------------------------------------------------------------------
 // Pass 1: collect the rename map
 // ---------------------------------------------------------------------------
 
@@ -502,14 +715,16 @@ class CollectRenamesVisitor
                         VariableScope Scope, RenameMap& Renames,
                         const FileSet& CollectFrom,
                         RenameConflicts* Conflicts = nullptr,
-                        RenameVetoes* Vetoes = nullptr)
+                        RenameVetoes* Vetoes = nullptr,
+                        std::vector<const Decl*>* Order = nullptr)
       : SM(SM),
         CB(CB),
         Scope(Scope),
         Renames(Renames),
         CollectFrom(CollectFrom),
         Conflicts(Conflicts),
-        Vetoes(Vetoes) {}
+        Vetoes(Vetoes),
+        Order(Order) {}
 
   bool VisitFieldDecl(FieldDecl* D) {
     collect(D);
@@ -523,8 +738,54 @@ class CollectRenamesVisitor
     collectMethod(D);
     return true;
   }
+  // The scope a type or namespace is renamed from is decided by where its
+  // *definition* (or first declaration) lives, not by the redeclaration at
+  // hand: a forward declaration of a third-party class in our header, or a
+  // reopened `namespace std`, must not make it ours.
+  bool VisitTagDecl(TagDecl* D) {
+    const TagDecl* Def = D->getDefinition();
+    collectNamed(D, typeKey(D), Def ? Def : D->getCanonicalDecl());
+    return true;
+  }
+  bool VisitTypedefNameDecl(TypedefNameDecl* D) {
+    collectNamed(D, D->getCanonicalDecl(), D->getCanonicalDecl());
+    return true;
+  }
+  bool VisitNamespaceDecl(NamespaceDecl* D) {
+    collectNamed(D, namespaceKey(D), D->getCanonicalDecl());
+    return true;
+  }
+  bool VisitNamespaceAliasDecl(NamespaceAliasDecl* D) {
+    collectNamed(D, D->getCanonicalDecl(), D->getCanonicalDecl());
+    return true;
+  }
 
  private:
+  // A declaration with an explicit key and the declaration whose location
+  // decides ownership (see VisitTagDecl).  For a class template's explicit
+  // specialization the key is the primary template's record, so the
+  // specialization renames with the template and a specialization of a
+  // template that is not ours is left alone.
+  void collectNamed(const NamedDecl* D, const Decl* Key,
+                    const NamedDecl* Anchor) {
+    if (!Key || D->isImplicit() || !matchesScope(D, Scope)) return;
+    if (!D->getDeclName().isIdentifier() || D->getName().empty()) return;
+    if (!shouldCollect(Anchor->getLocation(), SM, CollectFrom)) return;
+    if (!Visited.insert(Key).second) return;
+    std::string NewName;
+    if (!CB(D->getName(), NewName) || NewName == D->getName().str()) return;
+    if (!isa<NamespaceDecl, NamespaceAliasDecl>(D) &&
+        isProtocolTypeName(D->getName())) {
+      record(D, NewName,
+             "'" + D->getName().str() +
+                 "' is a type name the standard library reads by convention");
+      return;
+    }
+    if (unusableNewName(D, Key, NewName) || vetoed(D, Key, NewName)) return;
+    Renames[Key] = std::move(NewName);
+    if (Order) Order->push_back(Key);
+  }
+
   void collect(NamedDecl* D) {
     if (D->isImplicit() || !matchesScope(D, Scope)) return;
     if (!shouldCollect(D->getLocation(), SM, CollectFrom)) return;
@@ -542,10 +803,9 @@ class CollectRenamesVisitor
              "formatted; the primary template names it");
       return;
     }
-    if (unusableNewName(D, Key, NewName) || vetoed(D, Key, NewName) ||
-        collides(D, NewName))
-      return;
+    if (unusableNewName(D, Key, NewName) || vetoed(D, Key, NewName)) return;
     Renames[Key] = std::move(NewName);
+    if (Order) Order->push_back(Key);
   }
 
   void collectMethod(const CXXMethodDecl* D) {
@@ -580,12 +840,11 @@ class CollectRenamesVisitor
     // by the base-most declaration of its hierarchy, so a veto recorded against
     // any override is found from here.
     if (unusableNewName(D, Key, NewName) || vetoed(D, Key, NewName)) return;
-    // One check for the whole family: a clash anywhere in the hierarchy means
-    // the rename cannot be applied consistently, so none of it is.
-    for (const CXXMethodDecl* M : Family)
-      if (collides(M, NewName)) return;
+    // The whole family goes in together; resolveRenameCollisions() checks for
+    // a clash anywhere in the hierarchy and drops all of it if there is one.
     for (const CXXMethodDecl* M : Family)
       Renames[M->getCanonicalDecl()] = NewName;
+    if (Order) Order->push_back(Key);
   }
 
   // True when the new name cannot name the declaration no matter what else is
@@ -629,71 +888,6 @@ class CollectRenamesVisitor
     return true;
   }
 
-  // True when NewName is already taken in D's own scope, in which case the
-  // rename is skipped entirely (declaration and uses) and recorded.  Renaming
-  // into an occupied name is not a formatting change: at best it fails to
-  // compile, at worst it silently rebinds uses to the other entity.
-  bool collides(const NamedDecl* D, llvm::StringRef NewName) {
-    // The scope the name is *looked up* in, which for a member of an anonymous
-    // union or struct is the enclosing class, not the anonymous record it is
-    // declared in.  re2's Regexp keeps its variant fields in anonymous structs
-    // inside an anonymous union and has an accessor of the same name on the
-    // class for each -- `runes_` next to `Rune* runes()`, `hi_` next to
-    // `int hi()`.  Consulting the anonymous struct finds nothing, so every one
-    // of those renames looked free and produced a class declaring a field and
-    // a method of one name: ill-formed, and every later lookup in the class
-    // fails with it (1069 errors from 7 files, all of them this).
-    const DeclContext* DC = lookupHomeOf(D);
-    if (!DC) DC = D->getDeclContext();
-    if (!DC) return false;
-    DC = DC->getPrimaryContext();
-    const Decl* Key = D->getCanonicalDecl();
-
-    // Something of that name is already declared in the *same* scope.  Only
-    // the immediate context is consulted: shadowing an inherited member or an
-    // outer-scope name is legal C++ and not this tool's business.
-    ASTContext& Ctx = D->getASTContext();
-    DeclarationName DN(&Ctx.Idents.get(NewName));
-    for (const NamedDecl* ND : DC->lookup(DN)) {
-      // A member of an anonymous union or struct appears in the enclosing
-      // class only as an implicit IndirectFieldDecl, so that one kind of
-      // implicit declaration is exactly what must not be skipped: it is how a
-      // sibling anonymous struct's field is seen at all.
-      const auto* IFD = dyn_cast<IndirectFieldDecl>(ND);
-      const NamedDecl* Cand = IFD ? cast<NamedDecl>(IFD->getAnonField()) : ND;
-      if (!Cand || Cand->getCanonicalDecl() == Key) continue;
-      if (!IFD && ND->isImplicit()) continue;
-      if (overloadsCleanly(Ctx, D, Cand)) continue;
-      record(D, NewName,
-             ("existing " + std::string(Cand->getDeclKindName()) + " '" +
-              NewName.str() + "'"));
-      return true;
-    }
-
-    // Two declarations in the same scope renaming to the same new name: the
-    // first one through keeps it, the second is skipped -- unless they are
-    // functions that would form a legal overload set.
-    auto [It, Inserted] = Claimed.try_emplace({DC, NewName.str()}, D);
-    if (!Inserted && It->second->getCanonicalDecl() != Key &&
-        !overloadsCleanly(Ctx, D, It->second)) {
-      record(D, NewName, "another declaration in the same scope renames to it");
-      return true;
-    }
-    return false;
-  }
-
-  // Two functions may share a name in one scope -- that is an overload set, and
-  // renaming one onto another's name is a supported outcome.  Identical
-  // signatures are not: that is a redeclaration.  Anything else (a field and a
-  // method, two fields) cannot share a name at all.
-  static bool overloadsCleanly(ASTContext& Ctx, const NamedDecl* A,
-                               const NamedDecl* B) {
-    const auto* FA = dyn_cast<FunctionDecl>(A);
-    const auto* FB = dyn_cast<FunctionDecl>(B);
-    if (!FA || !FB) return false;
-    return !Ctx.hasSameType(FA->getType(), FB->getType());
-  }
-
   void record(const NamedDecl* D, llvm::StringRef NewName,
               const std::string& Reason) {
     if (!Conflicts) return;
@@ -714,10 +908,243 @@ class CollectRenamesVisitor
   // plus a place to record a macro clash found here for the other TUs.
   RenameVetoes* Vetoes = nullptr;
   std::unordered_set<const Decl*> Visited;
-  // (scope, new name) -> the declaration that claimed it first.
-  std::map<std::pair<const DeclContext*, std::string>, const NamedDecl*>
-      Claimed;
+  std::vector<const Decl*>* Order;  // collection order, for the resolver
 };
+
+// ---------------------------------------------------------------------------
+// Collision resolution, across rules
+// ---------------------------------------------------------------------------
+//
+// Renaming into an occupied name is not a formatting change: at best it fails
+// to compile, at worst it silently rebinds uses to the other entity.  Whether
+// a new name is free is decided here, after every rule has collected, with all
+// of their candidates in view -- so a name is *not* occupied by a declaration
+// that another candidate renames away, and two candidates for one name in one
+// scope are seen as the clash they are (the first rule in the list keeps it).
+// Deciding per rule, against the names as the AST spells them, gave
+// googletest's `Flags::AlsoRunDisabledTests` next to its field
+// `also_run_disabled_tests` a rename that was declined on the first run
+// ("existing field") and accepted on the second, once the field was
+// `also_run_disabled_tests_`: correct both times, and never a fixpoint.
+//
+// The name is looked up in the declaration's lookup home -- the nearest
+// enclosing record that is not an anonymous struct or union -- because that
+// is the scope C++ resolves it in.  re2's Regexp keeps its variant fields in
+// anonymous structs inside an anonymous union and has an accessor of the same
+// name on the class for each (`runes_` next to `Rune* runes()`); consulting
+// the anonymous struct finds nothing.  A sibling anonymous struct's field is
+// visible in that class only as an implicit IndirectFieldDecl, so that one
+// kind of implicit declaration must not be skipped.  Nothing beyond the home
+// is consulted: shadowing an inherited or outer-scope name is legal C++, and
+// what makes it unsafe at a particular use is the scan pass's business.
+//
+// A candidate whose name is vacated by another candidate is accepted only
+// once that one is, and remembers the dependency: if the mover is later
+// vetoed (a macro reference the scan pass finds, say), it keeps its name and
+// the dependent has to keep its own.  Candidates that wait on each other --
+// `a` to `b` and `b` to `a` -- are declined together.
+
+using RenameOrder = std::vector<const Decl*>;
+
+struct RenamePlan {
+  RenameMap Renames;
+  RenameOrder Order;
+  // Renames accepted because another candidate vacates their name: the family
+  // root -> the declarations it waits on (in any rule's plan).
+  std::map<const Decl*, std::vector<const Decl*>> Deps;
+};
+
+// Two functions may share a name in one scope -- that is an overload set, and
+// renaming one onto another's name is a supported outcome.  Identical
+// signatures are not: that is a redeclaration.  Anything else (a field and a
+// method, two fields) cannot share a name at all.
+static bool overloadsCleanly(ASTContext& Ctx, const NamedDecl* A,
+                             const NamedDecl* B) {
+  const auto* FA = dyn_cast<FunctionDecl>(A);
+  const auto* FB = dyn_cast<FunctionDecl>(B);
+  if (!FA || !FB) return false;
+  return !Ctx.hasSameType(FA->getType(), FB->getType());
+}
+
+static const DeclContext* nameScopeOf(const NamedDecl* D) {
+  const DeclContext* DC = lookupHomeOf(D);
+  if (!DC) DC = D->getDeclContext();
+  return DC ? DC->getPrimaryContext() : nullptr;
+}
+
+// A virtual function's whole override hierarchy, or the declaration alone.
+static std::vector<const NamedDecl*> renameFamily(const Decl* Key) {
+  std::vector<const NamedDecl*> Out;
+  if (const auto* MD = dyn_cast<CXXMethodDecl>(Key)) {
+    std::vector<const CXXMethodDecl*> Family;
+    collectOverrideFamily(MD, Family);
+    for (const CXXMethodDecl* M : Family) Out.push_back(M->getCanonicalDecl());
+    if (!Out.empty()) return Out;
+  }
+  Out.push_back(cast<NamedDecl>(Key));
+  return Out;
+}
+
+static void recordSkip(RenameConflicts* Conflicts, SourceManager& SM,
+                       const NamedDecl* D, llvm::StringRef NewName,
+                       const std::string& Reason) {
+  if (!Conflicts) return;
+  const PresumedLoc PL = SM.getPresumedLoc(D->getLocation());
+  Conflicts->push_back(RenameConflict{
+      PL.isValid() ? PL.getFilename() : "", PL.isValid() ? PL.getLine() : 0,
+      PL.isValid() ? PL.getColumn() : 0, D->getName().str(), NewName.str(),
+      Reason});
+}
+
+static void resolveRenameCollisions(ASTContext& Ctx, SourceManager& SM,
+                                    llvm::ArrayRef<RenamePlan*> Plans,
+                                    RenameConflicts* Conflicts) {
+  enum class State { Undecided, Accepted, Declined };
+  struct Cand {
+    RenamePlan* Plan;
+    const Decl* Key;
+  };
+  std::vector<Cand> Cands;
+  llvm::DenseMap<const Decl*, RenamePlan*> PlanOf;
+  for (RenamePlan* P : Plans) {
+    for (const Decl* K : P->Order) Cands.push_back({P, K});
+    for (const auto& [K, New] : P->Renames) PlanOf[K] = P;
+  }
+  llvm::DenseMap<const Decl*, State> States;
+  std::map<std::pair<const DeclContext*, std::string>, const NamedDecl*> Claims;
+
+  const auto decline = [&](const Cand& C, const std::string& New,
+                           const std::string& Reason) {
+    for (const NamedDecl* M : renameFamily(C.Key)) {
+      States[M] = State::Declined;
+      C.Plan->Renames.erase(M);
+    }
+    recordSkip(Conflicts, SM, cast<NamedDecl>(C.Key), New, Reason);
+  };
+
+  bool Progress = true;
+  while (Progress) {
+    Progress = false;
+    for (const Cand& C : Cands) {
+      if (States.lookup(C.Key) != State::Undecided) continue;
+      auto It = C.Plan->Renames.find(C.Key);
+      if (It == C.Plan->Renames.end()) {  // taken down with its family
+        States[C.Key] = State::Declined;
+        Progress = true;
+        continue;
+      }
+      const std::string New = It->second;
+      const DeclarationName DN(&Ctx.Idents.get(New));
+      const std::vector<const NamedDecl*> Family = renameFamily(C.Key);
+      std::string Reason;
+      bool Defer = false;
+      std::vector<const Decl*> Movers;
+      for (const NamedDecl* M : Family) {
+        const DeclContext* DC = nameScopeOf(M);
+        if (!DC) continue;
+        auto CI = Claims.find({DC, New});
+        if (CI != Claims.end() &&
+            CI->second->getCanonicalDecl() != M->getCanonicalDecl() &&
+            !overloadsCleanly(Ctx, M, CI->second)) {
+          Reason = "another declaration in the same scope renames to it";
+          break;
+        }
+        for (const NamedDecl* ND : DC->lookup(DN)) {
+          const auto* IFD = dyn_cast<IndirectFieldDecl>(ND);
+          const NamedDecl* Other =
+              IFD ? cast<NamedDecl>(IFD->getAnonField()) : ND;
+          if (!Other || Other->getCanonicalDecl() == M->getCanonicalDecl())
+            continue;
+          if (!IFD && ND->isImplicit()) continue;
+          if (overloadsCleanly(Ctx, M, Other)) continue;
+          // Does Other vacate the name?  Only if its own rename is settled.
+          const Decl* OK = Other->getCanonicalDecl();
+          if (RenamePlan* OP = PlanOf.lookup(OK)) {
+            auto OIt = OP->Renames.find(OK);
+            if (OIt != OP->Renames.end() && OIt->second != New) {
+              const State S = States.lookup(OK);
+              if (S == State::Accepted) {
+                Movers.push_back(OK);
+                continue;
+              }
+              if (S == State::Undecided) {
+                Defer = true;
+                break;
+              }
+            }
+          }
+          Reason = "existing " + std::string(Other->getDeclKindName()) + " '" +
+                   New + "'";
+          break;
+        }
+        if (!Reason.empty() || Defer) break;
+      }
+      if (!Reason.empty()) {
+        decline(C, New, Reason);
+        Progress = true;
+        continue;
+      }
+      if (Defer) continue;
+      for (const NamedDecl* M : Family) {
+        States[M] = State::Accepted;
+        if (const DeclContext* DC = nameScopeOf(M))
+          Claims.try_emplace({DC, New}, M);
+      }
+      if (!Movers.empty()) C.Plan->Deps[C.Key] = std::move(Movers);
+      Progress = true;
+    }
+  }
+  for (const Cand& C : Cands) {
+    if (States.lookup(C.Key) != State::Undecided) continue;
+    auto It = C.Plan->Renames.find(C.Key);
+    if (It == C.Plan->Renames.end()) continue;
+    const std::string New = It->second;
+    decline(C, New,
+            "the name is taken by a declaration whose own rename waits on this "
+            "one");
+  }
+}
+
+// Drops from every plan the renames that a veto took down, and then every
+// rename that depended on one of those (transitively).
+static void pruneVetoedRenames(llvm::ArrayRef<RenamePlan*> Plans,
+                               const RenameVetoes& Vetoes, SourceManager& SM,
+                               RenameConflicts* Conflicts) {
+  for (RenamePlan* P : Plans) {
+    for (auto It = P->Renames.begin(); It != P->Renames.end();) {
+      std::pair<std::string, unsigned> Owner = renameOwnerKey(It->first, SM);
+      if (Vetoes.count({relativizeToCwd(Owner.first), Owner.second}) > 0)
+        It = P->Renames.erase(It);
+      else
+        ++It;
+    }
+  }
+  const auto stillRenamed = [&](const Decl* K) {
+    for (RenamePlan* P : Plans)
+      if (P->Renames.count(K) > 0) return true;
+    return false;
+  };
+  bool Changed = true;
+  while (Changed) {
+    Changed = false;
+    for (RenamePlan* P : Plans) {
+      for (auto It = P->Deps.begin(); It != P->Deps.end();) {
+        const bool Gone = llvm::any_of(
+            It->second, [&](const Decl* E) { return !stillRenamed(E); });
+        if (!Gone || P->Renames.count(It->first) == 0) {
+          ++It;
+          continue;
+        }
+        const std::string New = P->Renames[It->first];
+        for (const NamedDecl* M : renameFamily(It->first)) P->Renames.erase(M);
+        recordSkip(Conflicts, SM, cast<NamedDecl>(It->first), New,
+                   "the name is vacated only by a rename that was declined");
+        It = P->Deps.erase(It);
+        Changed = true;
+      }
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Dependent member tokens (cross-TU resolution)
@@ -765,6 +1192,24 @@ class DependentTokenCollector
                           DependentTokens& Locs)
       : SM(SM), CollectFrom(CollectFrom), Locs(Locs) {}
 
+  // `typename T::Inner`, and the `Inner` of `T::Inner::x`: a type name that
+  // resolves only per instantiation, for the type scope.
+  bool VisitDependentNameTypeLoc(DependentNameTypeLoc TL) {
+    if (const IdentifierInfo* II = TL.getTypePtr()->getIdentifier())
+      add(TL.getNameLoc(), II->getName());
+    return true;
+  }
+  bool TraverseNestedNameSpecifierLoc(NestedNameSpecifierLoc NNS) {
+    using Base = RecursiveASTVisitor<DependentTokenCollector>;
+    for (NestedNameSpecifierLoc L = NNS; L; L = L.getPrefix()) {
+      const NestedNameSpecifier* S = L.getNestedNameSpecifier();
+      if (S && S->getKind() == NestedNameSpecifier::Identifier)
+        if (const IdentifierInfo* II = S->getAsIdentifier())
+          add(L.getLocalBeginLoc(), II->getName());
+    }
+    return Base::TraverseNestedNameSpecifierLoc(NNS);
+  }
+
   bool VisitCXXDependentScopeMemberExpr(CXXDependentScopeMemberExpr* E) {
     SourceLocation Loc = E->getMemberLoc();
     // A dependent token written as a macro *argument* is spelled at the call
@@ -795,6 +1240,12 @@ class DependentTokenCollector
   }
 
  private:
+  void add(SourceLocation Loc, StringRef Name) {
+    if (!rewriteLocFor(Loc, SM).isValid()) return;
+    if (auto Key = ownedKey(Loc, SM, CollectFrom))
+      Locs.emplace(*Key, Name.str());
+  }
+
   SourceManager& SM;
   const FileSet& CollectFrom;
   DependentTokens& Locs;
@@ -846,13 +1297,12 @@ static void vetoByName(RenameVetoes* Vetoes, RenameConflicts* Conflicts,
 class RecordDependentResolutionsVisitor
     : public RecursiveASTVisitor<RecordDependentResolutionsVisitor> {
  public:
-  RecordDependentResolutionsVisitor(SourceManager& SM, const RenameMap& Renames,
-                                    const FileSet& CollectFrom,
-                                    const DependentTokens& DependentLocs,
-                                    DependentResolutions& DepRes,
-                                    RenameVetoes* Vetoes,
-                                    RenameConflicts* Conflicts,
-                                    const RenamesByOldName& ByOldName)
+  RecordDependentResolutionsVisitor(
+      SourceManager& SM, const RenameMap& Renames, const FileSet& CollectFrom,
+      const DependentTokens& DependentLocs, DependentResolutions& DepRes,
+      RenameVetoes* Vetoes, RenameConflicts* Conflicts,
+      const RenamesByOldName& ByOldName, VariableScope Scope,
+      llvm::ArrayRef<VariableScope> AllScopes)
       : SM(SM),
         Renames(Renames),
         CollectFrom(CollectFrom),
@@ -860,7 +1310,9 @@ class RecordDependentResolutionsVisitor
         DepRes(DepRes),
         Vetoes(Vetoes),
         Conflicts(Conflicts),
-        ByOldName(ByOldName) {}
+        ByOldName(ByOldName),
+        Scope(Scope),
+        AllScopes(AllScopes) {}
 
   bool shouldVisitTemplateInstantiations() const { return true; }
 
@@ -883,6 +1335,26 @@ class RecordDependentResolutionsVisitor
     return true;
   }
 
+  // The resolved form of a dependent type name: `typename T::Inner` in the
+  // instantiation is a TagTypeLoc (or a typedef, or a template) at the
+  // pattern's token.
+  bool VisitTagTypeLoc(TagTypeLoc TL) {
+    if (const TagDecl* D = TL.getDecl())
+      resolveAt(TL.getNameLoc(), typeKey(D), D);
+    return true;
+  }
+  bool VisitTypedefTypeLoc(TypedefTypeLoc TL) {
+    if (const TypedefNameDecl* D = TL.getTypedefNameDecl())
+      resolveAt(TL.getNameLoc(), D->getCanonicalDecl(), D);
+    return true;
+  }
+  bool VisitTemplateSpecializationTypeLoc(TemplateSpecializationTypeLoc TL) {
+    if (const TemplateDecl* TD =
+            TL.getTypePtr()->getTemplateName().getAsTemplateDecl())
+      resolveAt(TL.getTemplateNameLoc(), templateKey(TD), TD);
+    return true;
+  }
+
   // The resolved form of a qualified dependent name: in an instantiation
   // `Helper<T>::member` becomes an ordinary DeclRefExpr whose location still
   // points at the token in the pattern.
@@ -900,6 +1372,15 @@ class RecordDependentResolutionsVisitor
   }
 
  private:
+  void resolveAt(SourceLocation Loc, const Decl* Key, const NamedDecl* D) {
+    if (!Key || !D->getDeclName().isIdentifier() || D->getName().empty())
+      return;
+    if (!rewriteLocFor(Loc, SM).isValid()) return;
+    auto TK = ownedKey(Loc, SM, CollectFrom);
+    if (!TK || DependentLocs.find(*TK) == DependentLocs.end()) return;
+    resolve(*TK, Key, D, D->getName());
+  }
+
   // One instantiation's answer for the token at \p TokenKey: it binds to
   // \p Member, whose rename-map key is \p MemberKey.
   void resolve(const std::pair<std::string, unsigned>& TokenKey,
@@ -907,18 +1388,52 @@ class RecordDependentResolutionsVisitor
                llvm::StringRef Old) {
     auto It = Renames.find(MemberKey);
     if (It == Renames.end()) {
-      // Not being renamed, so the token must keep its spelling -- normally
-      // because it binds to a member of a type outside the files being
-      // formatted, which is fine.  But if it sits in a template instantiation
-      // and a declaration of that very name *is* being renamed, the likelier
-      // reading is that mapping it back to its pattern failed, and the pattern
-      // will be renamed while this use keeps the old name.  Decline the name.
+      // Not renamed by this rule, so the token must keep its spelling.  That
+      // is the end of it unless this rule renames *another* declaration of
+      // the same name: then some instantiation may bind the token to that one,
+      // and a token that keeps its spelling while one of its targets is
+      // renamed is a build break in that instantiation.  Renaming is
+      // all-or-nothing per token, so every declaration of the spelling is
+      // declined -- by name, since the other targets need not be visible from
+      // here -- unless the binding is simply another rule's business: a
+      // member in a file we format, outside this rule's scope, inside some
+      // other configured rule's (whose own recorder makes the same call).
+      // Three shapes are declined: a member of a type outside the files being
+      // formatted (protobuf's TcParser::GetTable spells T::_table_ for every
+      // message class, checked-in and generated alike); a member this rule
+      // declined (MicroString::kInlineCapacity, captured by a parameter, next
+      // to the derived MicroStringExtraImpl::kInlineCapacity, which renamed);
+      // and an instantiated member the tool could not map back to its pattern,
+      // which is a mapping failure rather than a different entity.
       vetoResolution(DepRes, TokenKey);
-      if (isClassMemberDecl(Member) && isInTemplateInstantiation(Member) &&
-          ByOldName.count(Old.str()) > 0)
-        vetoByName(Vetoes, Conflicts, ByOldName, SM, Old,
-                   "a template-dependent use resolves to an instantiated "
-                   "member that could not be mapped to its declaration");
+      if (ByOldName.count(Old.str()) == 0) return;
+      const bool Owned = shouldCollect(Member->getLocation(), SM, CollectFrom);
+      if (Owned && !matchesScope(Member, Scope) && matchesAnyScope(Member)) {
+        return;
+      }
+      std::string Reason;
+      if (!Owned) {
+        Reason =
+            "a template-dependent use of the name also resolves to a member "
+            "of a type outside the files being formatted, so the use cannot "
+            "be rewritten";
+      } else if (isClassMemberDecl(Member) &&
+                 isInTemplateInstantiation(Member)) {
+        Reason =
+            "a template-dependent use resolves to an instantiated member "
+            "that could not be mapped to its declaration";
+      } else {
+        Reason =
+            "a template-dependent use of the name also resolves to a "
+            "declaration that is not being renamed, so the use cannot be "
+            "rewritten";
+      }
+      const PresumedLoc PL = SM.getPresumedLoc(Member->getLocation());
+      if (PL.isValid())
+        Reason += " (" + Member->getQualifiedNameAsString() + " at " +
+                  relativizeToCwd(PL.getFilename()) + ":" +
+                  std::to_string(PL.getLine()) + ")";
+      vetoByName(Vetoes, Conflicts, ByOldName, SM, Old, Reason);
       return;
     }
     std::pair<std::string, unsigned> Owner = renameOwnerKey(MemberKey, SM);
@@ -955,6 +1470,12 @@ class RecordDependentResolutionsVisitor
                      std::move(RelOwner));
   }
 
+  bool matchesAnyScope(const NamedDecl* D) const {
+    for (VariableScope S : AllScopes)
+      if (matchesScope(D, S)) return true;
+    return AllScopes.empty() && matchesScope(D, Scope);
+  }
+
   SourceManager& SM;
   const RenameMap& Renames;
   const FileSet& CollectFrom;
@@ -963,6 +1484,8 @@ class RecordDependentResolutionsVisitor
   RenameVetoes* Vetoes;
   RenameConflicts* Conflicts;
   const RenamesByOldName& ByOldName;
+  VariableScope Scope;
+  llvm::ArrayRef<VariableScope> AllScopes;
 };
 
 // ---------------------------------------------------------------------------
@@ -1012,6 +1535,24 @@ static const NamedDecl* hiderOnPath(
   return nullptr;
 }
 
+// The object expression a member access is really made on.  A member of an
+// anonymous struct or union is reached through an implicit MemberExpr on the
+// unnamed field -- `init_value_` inside `union { InitValue init_value_; }` is
+// `this-><anon>.init_value_` -- and every check that asks "what is the access
+// made on" has to look through that: protobuf's `auto init_value = init_value_`
+// was not recognised as an implicit-this access, so the local capture rule
+// never ran, and the rewrite produced `auto init_value = init_value;`.
+static const Expr* peelAnonymousMemberBase(const Expr* Base) {
+  for (unsigned Guard = 0; Base && Guard < 32; ++Guard) {
+    const auto* ME = dyn_cast<MemberExpr>(Base->IgnoreImpCasts());
+    if (!ME) break;
+    const auto* FD = dyn_cast<FieldDecl>(ME->getMemberDecl());
+    if (!FD || !FD->isAnonymousStructOrUnion()) break;
+    Base = ME->getBase();
+  }
+  return Base;
+}
+
 // The declaration that would capture \p E's member access once the member is
 // renamed to \p NewName, or null if the access would still bind the member.
 // A qualified access (`Base::m`) starts lookup at the qualifier and is safe.
@@ -1024,7 +1565,8 @@ static const NamedDecl* renameWouldBeHiddenAt(const MemberExpr* E,
   // Sema has already cast the object to the class that declares the member
   // (an implicit UncheckedDerivedToBase), so the base expression's type is
   // Home; the class the *user* went through is underneath the casts.
-  QualType T = E->getBase()->IgnoreImpCasts()->getType();
+  QualType T =
+      peelAnonymousMemberBase(E->getBase())->IgnoreImpCasts()->getType();
   if (E->isArrow()) {
     const auto* PT = T->getAs<PointerType>();
     if (!PT) return nullptr;
@@ -1035,6 +1577,72 @@ static const NamedDecl* renameWouldBeHiddenAt(const MemberExpr* E,
   DeclarationName DN(&Member->getASTContext().Idents.get(NewName));
   llvm::SmallPtrSet<const CXXRecordDecl*, 8> Visited;
   return hiderOnPath(From, Home, DN, Visited);
+}
+
+// ---------------------------------------------------------------------------
+// Would the new name hide something the scope already uses?
+// ---------------------------------------------------------------------------
+//
+// collides() asks whether the new name is *taken* in the scope the rename
+// introduces it into, and scan() case (b) whether a local of the new name
+// would capture a use of the member.  This is the third direction: the new
+// name may already be *used*, unqualified, inside that scope to mean something
+// from further out, which the renamed declaration would then hide.
+// game_arena's Engine::capabilities() renamed to Capabilities() is the name of
+// its own return type, a struct in the enclosing namespace: inside the class
+// and in every class derived from it, `Capabilities` then finds the member
+// function first (GCC rejects the base with -Wchanges-meaning and every
+// override with "does not name a type").  highway's AlignedDeleter::free_
+// renamed to free sits next to a static member function that calls ::free
+// unqualified.  Both are one question, asked per use: after the rename, would
+// unqualified lookup of this name from this site reach the renamed declaration
+// before it reaches what the name means today?
+
+// The identity of a scope for that question.  An instantiation counts as its
+// pattern, so a site inside Outer<int>::f() and a rename keyed on the
+// pattern's member compare equal.
+static const void* contextKey(const DeclContext* DC) {
+  if (const auto* RD = dyn_cast<CXXRecordDecl>(DC)) {
+    if (const CXXRecordDecl* P = instantiationPattern(RD)) RD = P;
+    return RD->getCanonicalDecl();
+  }
+  if (const auto* FD = dyn_cast<FunctionDecl>(DC)) {
+    if (const FunctionDecl* P = FD->getTemplateInstantiationPattern()) FD = P;
+    return FD->getCanonicalDecl();
+  }
+  return DC->getPrimaryContext();
+}
+
+// The scope a declaration's name is found in by unqualified lookup: the
+// nearest enclosing function, named class, or namespace.  An unscoped enum and
+// an anonymous struct or union are looked through, as lookup looks through
+// them.
+static const DeclContext* homeScopeOf(const Decl* D) {
+  for (const DeclContext* DC = D->getDeclContext(); DC; DC = DC->getParent()) {
+    if (isa<FunctionDecl>(DC) || isa<NamespaceDecl>(DC) ||
+        isa<TranslationUnitDecl>(DC))
+      return DC;
+    if (const auto* RD = dyn_cast<CXXRecordDecl>(DC);
+        RD && !RD->isAnonymousStructOrUnion())
+      return DC;
+  }
+  return nullptr;
+}
+
+// True when \p K has a (possibly indirect) base whose scope identity is
+// \p HomeKey.  A dependent base is skipped: the scan pass visits the
+// instantiations too, and checks the same use there with the bases resolved.
+static bool derivesFrom(const CXXRecordDecl* K, const void* HomeKey,
+                        llvm::SmallPtrSetImpl<const CXXRecordDecl*>& Visited) {
+  K = K->getDefinition();
+  if (!K || !Visited.insert(K).second) return false;
+  for (const CXXBaseSpecifier& B : K->bases()) {
+    const CXXRecordDecl* RB = B.getType()->getAsCXXRecordDecl();
+    if (!RB) continue;
+    if (contextKey(RB) == HomeKey || derivesFrom(RB, HomeKey, Visited))
+      return true;
+  }
+  return false;
 }
 
 // The names a function declares: parameters and local variables (ParmVarDecl is
@@ -1073,13 +1681,23 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
         Mode(Mode),
         Vetoes(Vetoes),
         Conflicts(Conflicts) {
-    if (Mode == ApplyMode::Scan) ByOldName = indexByOldName(Renames);
+    if (Mode == ApplyMode::Scan) {
+      ByOldName = indexByOldName(Renames);
+      for (const auto& [Key, NewName] : Renames)
+        if (const auto* ND = dyn_cast<NamedDecl>(Key);
+            ND && ND->getDeclName().isIdentifier())
+          ByNewName.emplace(NewName, NewNameEntry{Key, ND->getName().str()});
+    }
   }
 
   // Scan mode only: lets the scan read macro definitions (see
   // declaredThroughPastingMacro).  Set after construction, when a
   // Preprocessor is available.
   void setPreprocessor(Preprocessor* P) { PP = P; }
+
+  // Scan mode only: the macro-argument tokens the preprocessor consumed, which
+  // the spelling audit must not count (see ConsumedMacroArgs).
+  void setConsumedMacroArgs(const ConsumedMacroArgs* C) { Consumed = C; }
 
   // While scanning, every function pushes the names it declares (parameters and
   // locals), so scan() can tell whether a rename would be captured by one.  The
@@ -1096,16 +1714,142 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
     // constructor template, which the pattern holds as an unresolved overload
     // set -- would be left behind.  The audit must see it as unaccounted.
     const bool Root = isInstantiationRoot(D);
+    // An explicit instantiation (`template struct Box<char>;`) is a root --
+    // its members are compiler-made -- but its own name and template
+    // arguments are written by the user and rewritten by the rewrite pass, so
+    // they count as seen.  Traversed here, before the depth goes up.
+    if (Root)
+      if (const auto* Spec = dyn_cast<ClassTemplateSpecializationDecl>(D)) {
+        const TemplateSpecializationKind K =
+            Spec->getTemplateSpecializationKind();
+        if (K == TSK_ExplicitInstantiationDeclaration ||
+            K == TSK_ExplicitInstantiationDefinition) {
+          markSeen(Spec->getLocation());
+          if (const ASTTemplateArgumentListInfo* Args =
+                  Spec->getTemplateArgsAsWritten())
+            for (const TemplateArgumentLoc& AL : Args->arguments())
+              Base::TraverseTemplateArgumentLoc(AL);
+        }
+      }
     if (Root) ++InstantiationDepth;
     auto* FD = dyn_cast<FunctionDecl>(D);
     if (FD) {
       LocalNames.emplace_back();
       LocalNameCollector(LocalNames.back()).TraverseDecl(FD);
     }
+    // The scope a use is looked up from, for the capture check: the innermost
+    // declaration context being traversed (its semantic parents give the rest
+    // of the path, so an out-of-line member definition still sees its class).
+    const auto* DC = dyn_cast<DeclContext>(D);
+    if (DC) ContextStack.push_back(DC);
     const bool Result = Base::TraverseDecl(D);
+    if (DC) ContextStack.pop_back();
     if (FD) LocalNames.pop_back();
     if (Root) --InstantiationDepth;
     return Result;
+  }
+
+  // A lambda's body is traversed from the expression, not from its closure
+  // class, so the call operator is pushed here: the lambda's own locals live
+  // in it, and its semantic parents lead back to the enclosing function.
+  bool TraverseLambdaExpr(LambdaExpr* E) {
+    using Base = RecursiveASTVisitor<ApplyRenamesVisitor>;
+    if (Mode != ApplyMode::Scan || !E) return Base::TraverseLambdaExpr(E);
+    ContextStack.push_back(E->getCallOperator());
+    const bool Result = Base::TraverseLambdaExpr(E);
+    ContextStack.pop_back();
+    return Result;
+  }
+
+  // A name written with a qualifier (`ns::T`) or an elaborated-type-specifier
+  // (`struct T`) is not found by ordinary unqualified lookup -- the first
+  // starts at the qualifier, the second finds only class names -- so the type
+  // loc it names is excused from the capture check.  Only that loc: a template
+  // argument inside it (`ns::Vec<T>`) is still an unqualified use of T.
+  bool TraverseElaboratedTypeLoc(ElaboratedTypeLoc TL) {
+    using Base = RecursiveASTVisitor<ApplyRenamesVisitor>;
+    if (Mode == ApplyMode::Scan &&
+        (TL.getQualifierLoc().hasQualifier() ||
+         TL.getTypePtr()->getKeyword() != ElaboratedTypeKeyword::None))
+      QualifiedNamedLocs.insert(TL.getNamedTypeLoc().getOpaqueData());
+    return Base::TraverseElaboratedTypeLoc(TL);
+  }
+
+  // The unqualified uses the capture check looks at: a name, a member access,
+  // an overload set, and every spelling of a type.
+  bool VisitUnresolvedLookupExpr(UnresolvedLookupExpr* E) {
+    if (Mode == ApplyMode::Scan && !E->getQualifier() && E->getNumDecls() > 0)
+      checkCaptureOfName((*E->decls_begin())->getUnderlyingDecl(),
+                         E->getNameLoc());
+    return true;
+  }
+  bool VisitUnresolvedMemberExpr(UnresolvedMemberExpr* E) {
+    if (Mode != ApplyMode::Scan || E->getQualifier() || E->getNumDecls() == 0)
+      return true;
+    const NamedDecl* First = (*E->decls_begin())->getUnderlyingDecl();
+    if (E->isImplicitAccess())
+      checkCaptureOfName(First, E->getMemberLoc());
+    else
+      checkCaptureThrough(
+          peelAnonymousMemberBase(E->getBase())->IgnoreImpCasts()->getType(),
+          E->isArrow(), First, E->getMemberLoc());
+    return true;
+  }
+  bool VisitRecordTypeLoc(RecordTypeLoc TL) {
+    checkCaptureOfType(TL, TL.getDecl());
+    return true;
+  }
+  bool VisitEnumTypeLoc(EnumTypeLoc TL) {
+    checkCaptureOfType(TL, TL.getDecl());
+    return true;
+  }
+  bool VisitTypedefTypeLoc(TypedefTypeLoc TL) {
+    checkCaptureOfType(TL, TL.getTypedefNameDecl());
+    if (const TypedefNameDecl* D = TL.getTypedefNameDecl())
+      handle(TL.getNameLoc(), D->getCanonicalDecl(), D->getName(),
+             isUnqualifiedType(TL));
+    return true;
+  }
+  bool VisitInjectedClassNameTypeLoc(InjectedClassNameTypeLoc TL) {
+    checkCaptureOfType(TL, TL.getDecl());
+    if (const CXXRecordDecl* D = TL.getDecl())
+      handle(TL.getNameLoc(), typeKey(D), D->getName(), isUnqualifiedType(TL));
+    return true;
+  }
+  bool VisitTemplateTypeParmTypeLoc(TemplateTypeParmTypeLoc TL) {
+    checkCaptureOfType(TL, TL.getDecl());
+    return true;
+  }
+  bool VisitUnresolvedUsingTypeLoc(UnresolvedUsingTypeLoc TL) {
+    checkCaptureOfType(TL, TL.getDecl());
+    return true;
+  }
+  bool VisitUsingTypeLoc(UsingTypeLoc TL) {
+    checkCaptureOfType(TL, TL.getFoundDecl());
+    if (const UsingShadowDecl* S = TL.getFoundDecl())
+      if (const Decl* Key = typeLikeKey(S->getTargetDecl()))
+        handle(TL.getNameLoc(), Key, S->getTargetDecl()->getName(),
+               isUnqualifiedType(TL));
+    return true;
+  }
+  bool VisitTemplateSpecializationTypeLoc(TemplateSpecializationTypeLoc TL) {
+    const TemplateDecl* TD =
+        TL.getTypePtr()->getTemplateName().getAsTemplateDecl();
+    checkCaptureOfType(TL, TD);
+    if (TD)
+      handle(TL.getTemplateNameLoc(), templateKey(TD), TD->getName(),
+             isUnqualifiedType(TL));
+    return true;
+  }
+  bool VisitDeducedTemplateSpecializationTypeLoc(
+      DeducedTemplateSpecializationTypeLoc TL) {
+    const TemplateDecl* TD =
+        TL.getTypePtr()->getTemplateName().getAsTemplateDecl();
+    checkCaptureOfType(TL, TD);
+    if (TD)
+      handle(TL.getTemplateNameLoc(), templateKey(TD), TD->getName(),
+             isUnqualifiedType(TL));
+    return true;
   }
 
   // Only while scanning.  A dependent token spelled in a macro body has no
@@ -1191,7 +1935,120 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
     return true;
   }
 
+  // ---- types and namespaces: declarations ----
+  bool VisitTagDecl(TagDecl* D) {
+    if (D->isImplicit() || !D->getIdentifier()) return true;
+    handle(D->getLocation(), typeKey(D), D->getName());
+    return true;
+  }
+  bool VisitTypedefNameDecl(TypedefNameDecl* D) {
+    if (D->isImplicit() || !D->getIdentifier()) return true;
+    handle(D->getLocation(), D->getCanonicalDecl(), D->getName());
+    return true;
+  }
+  bool VisitNamespaceDecl(NamespaceDecl* D) {
+    const Decl* Key = namespaceKey(D);
+    if (!Key) return true;
+    handle(D->getLocation(), Key, D->getName());
+    if (Mode == ApplyMode::Rewrite) rewriteNamespaceComment(D, Key);
+    return true;
+  }
+  bool VisitNamespaceAliasDecl(NamespaceAliasDecl* D) {
+    handle(D->getAliasLoc(), D->getCanonicalDecl(), D->getName());
+    if (const NamedDecl* T = D->getAliasedNamespace())
+      handle(D->getTargetNameLoc(), namespaceKey(T), T->getName());
+    return true;
+  }
+  bool VisitUsingDirectiveDecl(UsingDirectiveDecl* D) {
+    if (const NamedDecl* T = D->getNominatedNamespaceAsWritten())
+      handle(D->getIdentLocation(), namespaceKey(T), T->getName());
+    return true;
+  }
+  // `using ns::Type;` names the type once, at the declaration's own name.
+  // (For a member, a using-declaration is deliberately left unaccounted so
+  // the spelling audit declines the rename -- see VisitNamedDecl.)
+  bool VisitUsingDecl(UsingDecl* D) {
+    for (const UsingShadowDecl* S : D->shadows()) {
+      const Decl* Key = typeLikeKey(S->getTargetDecl());
+      if (!Key) continue;
+      handle(D->getLocation(), Key, S->getTargetDecl()->getName());
+      break;
+    }
+    return true;
+  }
+  // A constructor's name is the class's; the destructor's and a conversion
+  // function's names carry a TypeLoc that the type-loc visitors reach.
+  bool VisitCXXConstructorDecl(CXXConstructorDecl* D) {
+    if (D->isImplicit()) return true;
+    const CXXRecordDecl* Parent = D->getParent();
+    if (!Parent || !Parent->getIdentifier()) return true;
+    handle(D->getLocation(), typeKey(Parent), Parent->getName());
+    return true;
+  }
+  bool VisitCXXDeductionGuideDecl(CXXDeductionGuideDecl* D) {
+    if (D->isImplicit()) return true;
+    if (const TemplateDecl* T = D->getDeducedTemplate())
+      handle(D->getLocation(), templateKey(T), T->getName());
+    return true;
+  }
+  // ---- types and namespaces: uses ----
+  bool VisitTagTypeLoc(TagTypeLoc TL) {
+    const TagDecl* D = TL.getDecl();
+    if (!D || !D->getIdentifier()) return true;
+    handle(TL.getNameLoc(), typeKey(D), D->getName(), isUnqualifiedType(TL));
+    return true;
+  }
+  // The qualifier components that name a namespace (`ns::x`), a namespace
+  // alias, or -- inside a template -- a dependent name.  Type components are
+  // TypeLocs the base traversal visits.
+  bool TraverseNestedNameSpecifierLoc(NestedNameSpecifierLoc NNS) {
+    using Base = RecursiveASTVisitor<ApplyRenamesVisitor>;
+    for (NestedNameSpecifierLoc L = NNS; L; L = L.getPrefix()) {
+      const NestedNameSpecifier* S = L.getNestedNameSpecifier();
+      if (!S) break;
+      switch (S->getKind()) {
+        case NestedNameSpecifier::Namespace:
+          if (const NamespaceDecl* N = S->getAsNamespace())
+            handle(L.getLocalBeginLoc(), namespaceKey(N), N->getName());
+          break;
+        case NestedNameSpecifier::NamespaceAlias:
+          if (const NamespaceAliasDecl* A = S->getAsNamespaceAlias())
+            handle(L.getLocalBeginLoc(), A->getCanonicalDecl(), A->getName());
+          break;
+        case NestedNameSpecifier::Identifier:
+          if (const IdentifierInfo* II = S->getAsIdentifier())
+            applyDependentToken(L.getLocalBeginLoc(), II->getName());
+          break;
+        default:
+          break;
+      }
+    }
+    return Base::TraverseNestedNameSpecifierLoc(NNS);
+  }
+  // A template used as a template template argument (`Wrap<Vec>`).
+  bool TraverseTemplateArgumentLoc(const TemplateArgumentLoc& AL) {
+    using Base = RecursiveASTVisitor<ApplyRenamesVisitor>;
+    const TemplateArgument& A = AL.getArgument();
+    if (A.getKind() == TemplateArgument::Template ||
+        A.getKind() == TemplateArgument::TemplateExpansion) {
+      if (const TemplateDecl* TD =
+              A.getAsTemplateOrTemplatePattern().getAsTemplateDecl())
+        handle(AL.getTemplateNameLoc(), templateKey(TD), TD->getName(),
+               !AL.getTemplateQualifierLoc().hasQualifier());
+    }
+    return Base::TraverseTemplateArgumentLoc(AL);
+  }
+  // `typename T::Inner`: which type it names is known only per instantiation,
+  // so it is rewritten from the cross-TU resolutions like `x.val`.
+  bool VisitDependentNameTypeLoc(DependentNameTypeLoc TL) {
+    if (const IdentifierInfo* II = TL.getTypePtr()->getIdentifier())
+      applyDependentToken(TL.getNameLoc(), II->getName());
+    return true;
+  }
+
   bool VisitDeclRefExpr(DeclRefExpr* E) {
+    if (Mode == ApplyMode::Scan && !E->getQualifier())
+      checkCaptureOfName(E->getDecl(), E->getLocation());
     const Decl* Key = nullptr;
     StringRef OldName;
     if (const auto* VD = dyn_cast<VarDecl>(E->getDecl())) {
@@ -1217,6 +2074,16 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
   }
 
   bool VisitMemberExpr(MemberExpr* E) {
+    if (Mode == ApplyMode::Scan && E->getQualifier() == nullptr &&
+        E->getMemberDecl()->getDeclName().isIdentifier()) {
+      const Expr* B = peelAnonymousMemberBase(E->getBase())->IgnoreImpCasts();
+      const auto* T = dyn_cast<CXXThisExpr>(B);
+      if (T != nullptr && T->isImplicit())
+        checkCaptureOfName(E->getMemberDecl(), E->getMemberLoc());
+      else
+        checkCaptureThrough(B->getType(), E->isArrow(), E->getMemberDecl(),
+                            E->getMemberLoc());
+    }
     const Decl* Key = nullptr;
     if (const auto* FD = dyn_cast<FieldDecl>(E->getMemberDecl()))
       Key = primaryTemplateMember(FD);
@@ -1243,7 +2110,10 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
     // `m` alone is an implicit `this->m`, and unqualified lookup finds it -- a
     // local of the new name would capture it.  Anything with a base or a
     // qualifier written out (`this->m`, `obj.m`, `Base::m`) cannot be captured.
-    const auto* This = dyn_cast<CXXThisExpr>(E->getBase()->IgnoreImpCasts());
+    // A member of an anonymous union sits behind an implicit access on the
+    // unnamed field, which is peeled first (see peelAnonymousMemberBase).
+    const Expr* Base = peelAnonymousMemberBase(E->getBase())->IgnoreImpCasts();
+    const auto* This = dyn_cast<CXXThisExpr>(Base);
     const bool Unqualified =
         This != nullptr && This->isImplicit() && E->getQualifier() == nullptr;
     handle(E->getMemberLoc(), Key, E->getMemberDecl()->getName(), Unqualified);
@@ -1367,6 +2237,9 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
       const std::pair<FileID, unsigned> At =
           SM.getDecomposedLoc(Tok.getLocation());
       if (Seen.count(At) > 0) continue;
+      // An argument the macro only pastes or stringizes never reaches the
+      // parser as itself; nothing can refer to the name here.
+      if (Consumed && Consumed->Tokens.count(At) > 0) continue;
       std::string Reason =
           "spelled where no reference the tool understands "
           "accounts for it";
@@ -1546,6 +2419,21 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
     if (!Loc.isMacroID() || !D->getDeclName().isIdentifier()) return;
     auto It = Renames.find(Key);
     if (It == Renames.end()) return;
+    // The preprocessor's own record of which arguments got pasted, at any
+    // nesting depth.  The chain walk below only sees the macros the
+    // declaration's *own* token went through; gmock's MOCK_METHOD spells the
+    // method plainly in GMOCK_INTERNAL_MOCK_METHOD_IMPL and hands the same
+    // argument to GMOCK_MOCKER_, which is where gmock_##Method is formed.
+    if (Consumed) {
+      const SourceLocation Spelling = rewriteLoc(Loc);
+      if (Spelling.isValid() &&
+          Consumed->Pasted.count(SM.getDecomposedLoc(Spelling)) > 0) {
+        veto(Key, D->getName(), It->second,
+             "declared through a macro argument that is pasted with ##; the "
+             "spelling is part of other names the macro forms");
+        return;
+      }
+    }
     for (unsigned Guard = 0; Loc.isMacroID() && Guard < 64; ++Guard) {
       const StringRef Name =
           Lexer::getImmediateMacroName(Loc, SM, PP->getLangOpts());
@@ -1578,6 +2466,183 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
       Out += " at " + relativizeToCwd(PL.getFilename()) + ":" +
              std::to_string(PL.getLine());
     return Out;
+  }
+
+  // Whether a type loc is written without a qualifier or an elaborated-type
+  // keyword (see TraverseElaboratedTypeLoc); only the scan pass asks.
+  bool isUnqualifiedType(TypeLoc TL) const {
+    return Mode == ApplyMode::Scan &&
+           QualifiedNamedLocs.count(TL.getOpaqueData()) == 0;
+  }
+
+  // A dependent token of any kind: seen by the scan, rewritten from the
+  // cross-TU resolution in its own main file (see the member-access variant
+  // in VisitCXXDependentScopeMemberExpr, which this mirrors).
+  void applyDependentToken(SourceLocation Loc, StringRef Name) {
+    if (Mode == ApplyMode::Scan) {
+      markSeen(Loc);
+      return;
+    }
+    if (!DepRes || Edits || !owns(Loc)) return;
+    auto Key = ownedKey(Loc, SM, CollectFrom);
+    if (!Key) return;
+    auto It = DepRes->find(*Key);
+    if (It == DepRes->end() || It->second.Vetoed || !It->second.HasName) return;
+    renameAt(Loc, nullptr, Name, It->second.NewName);
+  }
+
+  // The `}  // namespace foo` comment a namespace definition closes with
+  // (`}  // namespace a::b` for a nested-namespace-definition): the component
+  // spelling this namespace's old name is rewritten along with it.  Only a
+  // line comment directly after the brace, and only the name run after the
+  // word `namespace`; anything else is left as written.
+  void rewriteNamespaceComment(const NamespaceDecl* D, const Decl* Key) {
+    auto It = Renames.find(Key);
+    if (It == Renames.end()) return;
+    const SourceLocation RB = D->getRBraceLoc();
+    if (RB.isInvalid() || RB.isMacroID() || !owns(RB)) return;
+    bool Invalid = false;
+    const char* Data = SM.getCharacterData(RB, &Invalid);
+    if (Invalid || !Data || *Data != '}') return;
+    const char* P = Data + 1;
+    const auto skipBlanks = [&] {
+      while (*P == ' ' || *P == '\t') ++P;
+    };
+    skipBlanks();
+    if (P[0] != '/' || P[1] != '/') return;
+    P += 2;
+    skipBlanks();
+    if (!StringRef(P).starts_with("namespace")) return;
+    P += 9;
+    if (*P != ' ' && *P != '\t') return;
+    skipBlanks();
+    const char* Start = P;
+    while (std::isalnum(static_cast<unsigned char>(*P)) || *P == '_' ||
+           *P == ':')
+      ++P;
+    const StringRef Run(Start, P - Start);
+    const StringRef Old = cast<NamedDecl>(Key)->getName();
+    size_t Pos = 0;
+    while (Pos <= Run.size()) {
+      const size_t E = Run.find("::", Pos);
+      const StringRef Comp =
+          Run.substr(Pos, E == StringRef::npos ? StringRef::npos : E - Pos);
+      if (Comp == Old) {
+        renameAt(RB.getLocWithOffset((Start - Data) + Pos), Key, Old,
+                 It->second);
+        return;
+      }
+      if (E == StringRef::npos) break;
+      Pos = E + 2;
+    }
+  }
+
+  // ---- the capture check (see contextKey above) ----
+
+  // The lookup path from the current site, innermost scope first.
+  llvm::SmallVector<const DeclContext*, 8> siteChain() const {
+    llvm::SmallVector<const DeclContext*, 8> Chain;
+    if (ContextStack.empty()) return Chain;
+    for (const DeclContext* DC = ContextStack.back(); DC; DC = DC->getParent())
+      Chain.push_back(DC);
+    return Chain;
+  }
+
+  // An unqualified name at the current site that today means \p Target.
+  void checkCaptureOfName(const NamedDecl* Target, SourceLocation UseLoc) {
+    if (Mode != ApplyMode::Scan || !Target || ByNewName.empty()) return;
+    if (!Target->getDeclName().isIdentifier()) return;
+    checkCapture(Target->getName(), Target, siteChain(), UseLoc);
+  }
+
+  // A member access `obj.name` / `ptr->name` on an object of type \p T: lookup
+  // starts at the object's class, not at the site.
+  void checkCaptureThrough(QualType T, bool IsArrow, const NamedDecl* Target,
+                           SourceLocation UseLoc) {
+    if (Mode != ApplyMode::Scan || !Target || ByNewName.empty()) return;
+    if (!Target->getDeclName().isIdentifier()) return;
+    if (IsArrow) {
+      const auto* PT = T->getAs<PointerType>();
+      if (!PT) return;
+      T = PT->getPointeeType();
+    }
+    const CXXRecordDecl* From = T->getAsCXXRecordDecl();
+    if (!From) return;
+    const llvm::SmallVector<const DeclContext*, 8> Chain{From};
+    checkCapture(Target->getName(), Target, Chain, UseLoc);
+  }
+
+  // A type spelled by \p TL, unless TraverseElaboratedTypeLoc excused it.
+  void checkCaptureOfType(TypeLoc TL, const NamedDecl* D) {
+    if (Mode != ApplyMode::Scan || !D || ByNewName.empty()) return;
+    if (QualifiedNamedLocs.count(TL.getOpaqueData()) > 0) return;
+    checkCaptureOfName(D, TL.getBeginLoc());
+  }
+
+  // \p Name is looked up from \p Chain (innermost first) and today finds
+  // \p Target.  Every rename whose new spelling is \p Name and whose scope the
+  // lookup passes through *before* it reaches Target is vetoed.
+  void checkCapture(StringRef Name, const NamedDecl* Target,
+                    llvm::ArrayRef<const DeclContext*> Chain,
+                    SourceLocation UseLoc) {
+    if (!Vetoes || Chain.empty()) return;
+    auto Range = ByNewName.equal_range(Name.str());
+    if (Range.first == Range.second) return;
+    const DeclContext* TargetHome = homeScopeOf(Target);
+    const auto* TargetVar = dyn_cast<VarDecl>(Target);
+    const bool TargetIsLocal = TargetVar && TargetVar->isLocalVarDeclOrParm();
+    const auto indexOf = [&](const void* Key) {
+      for (size_t I = 0; I < Chain.size(); ++I)
+        if (contextKey(Chain[I]) == Key) return I;
+      return Chain.size();
+    };
+    for (auto It = Range.first; It != Range.second; ++It) {
+      const Decl* Key = It->second.Key;
+      const DeclContext* Home = isClassMemberDecl(Key)
+                                    ? lookupHomeOf(cast<NamedDecl>(Key))
+                                    : homeScopeOf(Key);
+      if (!Home) continue;
+      const void* HomeKey = contextKey(Home);
+      const bool HomeIsRecord = isa<CXXRecordDecl>(Home);
+      // The first scope on the path that the rename would put the name into:
+      // Home itself, or a class derived from it.
+      size_t Pos = indexOf(HomeKey);
+      if (HomeIsRecord && Pos == Chain.size()) {
+        for (size_t I = 0; I < Chain.size() && Pos == Chain.size(); ++I) {
+          const auto* RD = dyn_cast<CXXRecordDecl>(Chain[I]);
+          llvm::SmallPtrSet<const CXXRecordDecl*, 8> Visited;
+          if (RD && derivesFrom(RD, HomeKey, Visited)) Pos = I;
+        }
+      }
+      if (Pos == Chain.size()) continue;  // lookup from here never gets there
+      // Would what the name means today still be found first?  A local always
+      // precedes class scope; anything declared in a scope inside the one the
+      // rename lands in precedes it; so does a member of a class between the
+      // site and Home on the derivation path (it hides Home's member).  At
+      // Home itself the name is collides()'s business.
+      if (TargetIsLocal && HomeIsRecord) continue;
+      if (TargetHome) {
+        if (indexOf(contextKey(TargetHome)) <= Pos) continue;
+        if (HomeIsRecord) {
+          const auto* RT = dyn_cast<CXXRecordDecl>(TargetHome);
+          llvm::SmallPtrSet<const CXXRecordDecl*, 8> Visited;
+          if (RT &&
+              (contextKey(RT) == HomeKey || derivesFrom(RT, HomeKey, Visited)))
+            continue;
+        }
+      }
+      std::string Reason = "'" + It->first + "' is used unqualified";
+      if (const auto* Scope = dyn_cast_or_null<NamedDecl>(
+              Decl::castFromDeclContext(Chain[Pos])))
+        Reason += " in " + Scope->getQualifiedNameAsString();
+      const PresumedLoc PL = SM.getPresumedLoc(UseLoc);
+      if (PL.isValid())
+        Reason += " (" + relativizeToCwd(PL.getFilename()) + ":" +
+                  std::to_string(PL.getLine()) + ")";
+      Reason += " to mean " + Target->getQualifiedNameAsString() +
+                ", which the renamed '" + It->second.Old + "' would hide";
+      veto(Key, It->second.Old, It->first, Reason);
+    }
   }
 
   // Records that the scan reached the token spelled at \p Loc (its rewrite
@@ -1614,6 +2679,17 @@ class ApplyRenamesVisitor : public RecursiveASTVisitor<ApplyRenamesVisitor> {
   std::set<std::pair<FileID, unsigned>> Seen;  // Scan mode only
   unsigned InstantiationDepth = 0;             // Scan mode only
   Preprocessor* PP = nullptr;                  // Scan mode only, may be null
+  // Scan mode only, for the capture check: the renames by their *new* name,
+  // the declaration contexts being traversed (innermost last), and the type
+  // locs written with a qualifier or an elaborated-type keyword.
+  struct NewNameEntry {
+    const Decl* Key;
+    std::string Old;
+  };
+  std::multimap<std::string, NewNameEntry> ByNewName;
+  std::vector<const DeclContext*> ContextStack;
+  std::set<const void*> QualifiedNamedLocs;
+  const ConsumedMacroArgs* Consumed = nullptr;  // Scan mode only, may be null
 };
 
 // ---------------------------------------------------------------------------
@@ -1771,7 +2847,8 @@ class RenameVariablesConsumer : public ASTConsumer {
       LintReport* Report = nullptr, std::string RuleId = "",
       DependentResolutions* DepRes = nullptr, EditReport* Edits = nullptr,
       RenameConflicts* Conflicts = nullptr, RenameVetoes* Vetoes = nullptr,
-      std::set<std::string>* RenamedNames = nullptr, Preprocessor* PP = nullptr)
+      std::set<std::string>* RenamedNames = nullptr, Preprocessor* PP = nullptr,
+      const ConsumedMacroArgs* Consumed = nullptr)
       : RW(RW),
         CB(std::move(CB)),
         Scope(Scope),
@@ -1784,7 +2861,8 @@ class RenameVariablesConsumer : public ASTConsumer {
         Conflicts(Conflicts),
         Vetoes(Vetoes),
         RenamedNames(RenamedNames),
-        PP(PP) {}
+        PP(PP),
+        Consumed(Consumed) {}
 
   void HandleTranslationUnit(ASTContext& Ctx) override {
     SourceManager& SM = Ctx.getSourceManager();
@@ -1817,7 +2895,7 @@ class RenameVariablesConsumer : public ASTConsumer {
     }
 
     runRenameRuleOnAST(Ctx, RW, CB, Scope, CollectFrom, Report, RuleId, DepRes,
-                       Edits, Conflicts, Vetoes, RenamedNames, PP);
+                       Edits, Conflicts, Vetoes, RenamedNames, PP, Consumed);
   }
 
  private:
@@ -1834,6 +2912,7 @@ class RenameVariablesConsumer : public ASTConsumer {
   RenameVetoes* Vetoes;          // non-null when all-or-nothing is enabled
   std::set<std::string>* RenamedNames;  // names this TU set out to rename
   Preprocessor* PP;                     // for the scan pass; may be null
+  const ConsumedMacroArgs* Consumed;    // for the spelling audit; may be null
 };
 
 // ---------------------------------------------------------------------------
@@ -1892,9 +2971,11 @@ class RenameVariablesAction : public ASTFrontendAction {
   auto CreateASTConsumer(CompilerInstance& CI, StringRef)
       -> std::unique_ptr<ASTConsumer> override {
     TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
+    watchConsumedMacroArgs(CI.getPreprocessor(), Consumed);
     return std::make_unique<RenameVariablesConsumer>(
         TheRewriter, CB, Scope, CollectFrom, Mode, Report, RuleId, DepRes,
-        Edits, Conflicts, Vetoes, RenamedNames, &CI.getPreprocessor());
+        Edits, Conflicts, Vetoes, RenamedNames, &CI.getPreprocessor(),
+        &Consumed);
   }
 
  private:
@@ -1911,6 +2992,7 @@ class RenameVariablesAction : public ASTFrontendAction {
   RenameVetoes* Vetoes;
   std::set<std::string>* RenamedNames;
   Rewriter TheRewriter;
+  ConsumedMacroArgs Consumed;  // filled while this TU is parsed
 };
 
 // ---------------------------------------------------------------------------
@@ -1932,11 +3014,12 @@ class CaptureAction : public ASTFrontendAction {
   auto CreateASTConsumer(CompilerInstance& CI, StringRef)
       -> std::unique_ptr<ASTConsumer> override {
     TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
+    watchConsumedMacroArgs(CI.getPreprocessor(), Consumed);
     return std::make_unique<RenameVariablesConsumer>(
         TheRewriter, CB, Scope, FileSet{}, OutputMode::DryRun,
         /*Report=*/nullptr, /*RuleId=*/"", &DepRes, /*Edits=*/nullptr,
         /*Conflicts=*/nullptr, &Vetoes, /*RenamedNames=*/nullptr,
-        &CI.getPreprocessor());
+        &CI.getPreprocessor(), &Consumed);
   }
 
  private:
@@ -1950,6 +3033,53 @@ class CaptureAction : public ASTFrontendAction {
   // Likewise for vetoes: with one TU the scan pass always runs before the
   // rewrite pass, so no re-run is needed to make them order-independent.
   RenameVetoes Vetoes;
+  ConsumedMacroArgs Consumed;
+};
+
+// The multi-rule twin of CaptureAction, for rewriteWithRules().
+class MultiRuleCaptureAction : public ASTFrontendAction {
+ public:
+  MultiRuleCaptureAction(
+      std::vector<std::pair<VariableScope, VariableRenameCallback>> Rules,
+      std::string& Output)
+      : Rules(std::move(Rules)), Output(Output) {}
+
+  void EndSourceFileAction() override {
+    llvm::raw_string_ostream OS(Output);
+    TheRewriter.getEditBuffer(TheRewriter.getSourceMgr().getMainFileID())
+        .write(OS);
+  }
+
+  auto CreateASTConsumer(CompilerInstance& CI, StringRef)
+      -> std::unique_ptr<ASTConsumer> override {
+    TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
+    watchConsumedMacroArgs(CI.getPreprocessor(), Consumed);
+    struct Consumer : ASTConsumer {
+      MultiRuleCaptureAction& A;
+      Preprocessor& PP;
+      Consumer(MultiRuleCaptureAction& A, Preprocessor& PP) : A(A), PP(PP) {}
+      void HandleTranslationUnit(ASTContext& Ctx) override {
+        A.DepRes.assign(A.Rules.size(), DependentResolutions{});
+        std::vector<RenameRuleSpec> Specs;
+        for (size_t I = 0; I < A.Rules.size(); ++I)
+          Specs.push_back({&A.Rules[I].second, A.Rules[I].first,
+                           "rule" + std::to_string(I), &A.DepRes[I]});
+        runRenameRulesOnAST(Ctx, A.TheRewriter, Specs, FileSet{},
+                            /*Report=*/nullptr, /*Edits=*/nullptr,
+                            /*Conflicts=*/nullptr, &A.Vetoes,
+                            /*RenamedNames=*/nullptr, &PP, &A.Consumed);
+      }
+    };
+    return std::make_unique<Consumer>(*this, CI.getPreprocessor());
+  }
+
+ private:
+  std::vector<std::pair<VariableScope, VariableRenameCallback>> Rules;
+  Rewriter TheRewriter;
+  std::string& Output;
+  std::vector<DependentResolutions> DepRes;
+  RenameVetoes Vetoes;
+  ConsumedMacroArgs Consumed;
 };
 
 }  // namespace
@@ -1960,25 +3090,29 @@ class CaptureAction : public ASTFrontendAction {
 
 namespace {
 
-// Where declarations of this scope live.  Two scopes with the same home can
-// put two declarations in one DeclContext, and then their names must differ.
-enum class ScopeHome { Class, Namespace, Function };
+// Where declarations of this scope live, as a set: a type can be nested in a
+// class, declared in a namespace, or local to a function.  Two scopes with a
+// home in common can put two declarations in one DeclContext.
+enum ScopeHome : unsigned { Class = 1, Namespace = 2, Function = 4 };
 
-ScopeHome homeOf(VariableScope S) {
+unsigned homesOf(VariableScope S) {
   switch (S) {
     case VariableScope::Member:
     case VariableScope::StaticMember:
     case VariableScope::ConstMember:
     case VariableScope::Method:
-      return ScopeHome::Class;
+      return Class;
     case VariableScope::Global:
     case VariableScope::StaticGlobal:
     case VariableScope::ConstGlobal:
-      return ScopeHome::Namespace;
+    case VariableScope::Namespace:
+      return Namespace;
     case VariableScope::Local:
-      return ScopeHome::Function;
+      return Function;
+    case VariableScope::Type:
+      return Class | Namespace | Function;
   }
-  return ScopeHome::Namespace;
+  return Namespace;
 }
 
 bool isDataMemberScope(VariableScope S) {
@@ -2005,7 +3139,7 @@ bool scopesCanMatchSameDecl(VariableScope A, VariableScope B) {
 }
 
 bool scopesShareADeclContext(VariableScope A, VariableScope B) {
-  return homeOf(A) == homeOf(B);
+  return (homesOf(A) & homesOf(B)) != 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -2023,106 +3157,164 @@ void reportRenameConflicts(const RenameConflicts& Conflicts, bool Verbose,
 // runRenameRuleOnAST (public)
 // ---------------------------------------------------------------------------
 
-void runRenameRuleOnAST(ASTContext& Ctx, Rewriter& RW,
-                        const VariableRenameCallback& CB, VariableScope Scope,
-                        const FileSet& CollectFrom, LintReport* Report,
-                        llvm::StringRef RuleId, DependentResolutions* DepRes,
-                        EditReport* Edits, RenameConflicts* Conflicts,
-                        RenameVetoes* Vetoes,
-                        std::set<std::string>* RenamedNames, Preprocessor* PP) {
+void watchConsumedMacroArgs(Preprocessor& PP, ConsumedMacroArgs& Out) {
+  PP.addPPCallbacks(
+      std::make_unique<ConsumedMacroArgsCallbacks>(PP.getSourceManager(), Out));
+}
+
+void runRenameRulesOnAST(ASTContext& Ctx, Rewriter& RW,
+                         llvm::ArrayRef<RenameRuleSpec> Rules,
+                         const FileSet& CollectFrom, LintReport* Report,
+                         EditReport* Edits, RenameConflicts* Conflicts,
+                         RenameVetoes* Vetoes,
+                         std::set<std::string>* RenamedNames, Preprocessor* PP,
+                         const ConsumedMacroArgs* Consumed) {
   SourceManager& SM = Ctx.getSourceManager();
   Decl* TU = Ctx.getTranslationUnitDecl();
+  const size_t N = Rules.size();
 
-  RenameMap Renames;
-  CollectRenamesVisitor Collector(SM, CB, Scope, Renames, CollectFrom,
-                                  Conflicts, Vetoes);
-  Collector.TraverseDecl(TU);
+  // 1. Collect every rule's candidates, then resolve the collisions with all
+  //    of them in view.
+  std::vector<RenamePlan> Plans(N);
+  std::vector<RenamePlan*> PlanPtrs;
+  std::vector<VariableScope> AllScopes;
+  for (size_t I = 0; I < N; ++I) {
+    CollectRenamesVisitor Collector(SM, *Rules[I].CB, Rules[I].Scope,
+                                    Plans[I].Renames, CollectFrom, Conflicts,
+                                    Vetoes, &Plans[I].Order);
+    Collector.TraverseDecl(TU);
+    PlanPtrs.push_back(&Plans[I]);
+    AllScopes.push_back(Rules[I].Scope);
+  }
+  resolveRenameCollisions(Ctx, SM, PlanPtrs, Conflicts);
   if (RenamedNames)
-    for (const auto& [Key, NewName] : Renames)
-      if (const auto* ND = dyn_cast<NamedDecl>(Key);
-          ND && ND->getDeclName().isIdentifier())
-        RenamedNames->insert(ND->getName().str());
+    for (const RenamePlan& P : Plans)
+      for (const auto& [Key, NewName] : P.Renames)
+        if (const auto* ND = dyn_cast<NamedDecl>(Key);
+            ND && ND->getDeclName().isIdentifier())
+          RenamedNames->insert(ND->getName().str());
+  // In Emit mode a dependency has to travel with the records: the veto that
+  // takes the mover down may come from another invocation entirely.
+  if (Edits)
+    for (const RenamePlan& P : Plans)
+      for (const auto& [Root, Movers] : P.Deps) {
+        const auto* RD = cast<NamedDecl>(Root);
+        const std::pair<std::string, unsigned> Owner = renameOwnerKey(Root, SM);
+        const PresumedLoc PL = SM.getPresumedLoc(RD->getLocation());
+        for (const Decl* E : Movers) {
+          const std::pair<std::string, unsigned> On = renameOwnerKey(E, SM);
+          Edits->Dependencies.push_back(
+              {relativizeToCwd(Owner.first), Owner.second,
+               relativizeToCwd(On.first), On.second,
+               cast<NamedDecl>(E)->getName().str(),
+               RenameSkip{PL.isValid() ? PL.getFilename() : "",
+                          PL.isValid() ? PL.getLine() : 0,
+                          PL.isValid() ? PL.getColumn() : 0,
+                          RD->getName().str(), P.Renames.at(Root), ""}});
+        }
+      }
 
   // Scan for references this TU cannot rewrite — a name spelled in a macro
   // body, or formed by token pasting — and drop those renames before anything
   // is applied.  Renaming is all-or-nothing: half a rename does not compile.
-  // Declarations vetoed by an *earlier* TU never made it into Renames above;
+  // Declarations vetoed by an *earlier* TU never made it into the plans above;
   // one vetoed here may already have been renamed by an earlier TU, which is
   // why the drivers re-run the whole tool once when any veto was recorded.
-  // Drops from Renames every declaration that now has a veto.  Called after
-  // each pass that can add one, so nothing vetoed reaches the applier.
+  // Every rule scans before any rule rewrites, so a veto found by a later rule
+  // still reaches the renames of an earlier one -- and the dependents of
+  // whatever it took down.
   const auto PruneVetoed = [&] {
-    if (!Vetoes) return;
-    for (auto It = Renames.begin(); It != Renames.end();) {
-      std::pair<std::string, unsigned> Owner = renameOwnerKey(It->first, SM);
-      if (Vetoes->count({relativizeToCwd(Owner.first), Owner.second}) > 0)
-        It = Renames.erase(It);
-      else
-        ++It;
-    }
+    if (Vetoes) pruneVetoedRenames(PlanPtrs, *Vetoes, SM, Conflicts);
   };
-  if (Vetoes && !Renames.empty()) {
+  if (Vetoes) {
     const size_t Before = Vetoes->size();
-    ApplyRenamesVisitor Scanner(RW, SM, Renames, CollectFrom, DepRes, Report,
-                                RuleId.str(), Edits, ApplyMode::Scan, Vetoes,
-                                Conflicts);
-    Scanner.setPreprocessor(PP);
-    Scanner.TraverseDecl(TU);
-    Scanner.auditSpellings(Ctx.getLangOpts());
+    for (size_t I = 0; I < N; ++I) {
+      if (Plans[I].Renames.empty()) continue;
+      ApplyRenamesVisitor Scanner(RW, SM, Plans[I].Renames, CollectFrom,
+                                  Rules[I].DepRes, Report, Rules[I].RuleId,
+                                  Edits, ApplyMode::Scan, Vetoes, Conflicts);
+      Scanner.setPreprocessor(PP);
+      Scanner.setConsumedMacroArgs(Consumed);
+      Scanner.TraverseDecl(TU);
+      Scanner.auditSpellings(Ctx.getLangOpts());
+    }
     if (Vetoes->size() != Before) PruneVetoed();
   }
 
   // Template-dependent member tokens (e.g. `x.val` where x is a template
   // parameter) spelled in files we own.  Pass A is cheap (no instantiations)
   // and gates the rest: absent such tokens the whole feature is a no-op.
-  DependentTokens DependentLocs;
-  if (DepRes) {
-    DependentTokenCollector Collect(SM, CollectFrom, DependentLocs);
+  std::vector<DependentTokens> Locs(N);
+  bool AnyTokens = false;
+  for (size_t I = 0; I < N; ++I) {
+    DependentResolutions* DepRes = Rules[I].DepRes;
+    if (!DepRes) continue;
+    DependentTokenCollector Collect(SM, CollectFrom, Locs[I]);
     Collect.TraverseDecl(TU);
     // Enter every token as *pending* (spelling only).  A token that is still
     // pending once every TU has run was never resolved by any instantiation,
     // and nothing can rewrite it; the driver (or aggregation) then declines
     // its name.  Without the entry, "never resolved" would look exactly like
     // "never seen", and the declaration would be renamed with the use left.
-    for (const auto& [Key, Name] : DependentLocs)
+    for (const auto& [Key, Name] : Locs[I])
       DepRes->try_emplace(
           Key, DependentResolution{"", false, false, Name,
                                    static_cast<unsigned>(Name.size()), "", 0});
+    AnyTokens = AnyTokens || !Locs[I].empty();
   }
 
   // Record what this TU's instantiations resolve those tokens to.  Runs even
-  // when this rule renames nothing here: a token that binds to a member this
-  // rule is not renaming is *vetoed*, and that is what tells the driver and
+  // when a rule renames nothing here: a token that binds to a member the rule
+  // is not renaming is *vetoed*, and that is what tells the driver and
   // aggregation the token is accounted for rather than never resolved.  Only
   // pays for the instantiation walk when there is a token to resolve.
-  if (DepRes && !DependentLocs.empty()) {
+  if (AnyTokens) {
     const size_t Before = Vetoes ? Vetoes->size() : 0;
-    const RenamesByOldName ByOldName = indexByOldName(Renames);
-    RecordDependentResolutionsVisitor Recorder(SM, Renames, CollectFrom,
-                                               DependentLocs, *DepRes, Vetoes,
-                                               Conflicts, ByOldName);
-    Recorder.TraverseDecl(TU);
+    for (size_t I = 0; I < N; ++I) {
+      if (!Rules[I].DepRes || Locs[I].empty()) continue;
+      const RenamesByOldName ByOldName = indexByOldName(Plans[I].Renames);
+      RecordDependentResolutionsVisitor Recorder(
+          SM, Plans[I].Renames, CollectFrom, Locs[I], *Rules[I].DepRes, Vetoes,
+          Conflicts, ByOldName, Rules[I].Scope, AllScopes);
+      Recorder.TraverseDecl(TU);
+    }
     // The recorder can decline a rename too (instantiations that disagree, or
     // a use it could not tie to its declaration); those must not be applied
     // here either.  The driver re-runs the pass for the other TUs.
     if (Vetoes && Vetoes->size() != Before) PruneVetoed();
   }
 
-  // Apply.  Besides its own declarations/uses (Renames), this TU may spell a
-  // dependent token that an earlier TU already resolved — the header that
-  // defines a template is typically processed after, and declares nothing to
-  // rename itself — so run the apply pass whenever either has work.
-  const bool ApplyDependent =
-      DepRes && std::any_of(DependentLocs.begin(), DependentLocs.end(),
-                            [&](const auto& L) {
-                              auto It = DepRes->find(L.first);
-                              return It != DepRes->end() &&
-                                     It->second.HasName && !It->second.Vetoed;
-                            });
-  if (Renames.empty() && !ApplyDependent) return;
-  ApplyRenamesVisitor Applier(RW, SM, Renames, CollectFrom, DepRes, Report,
-                              RuleId.str(), Edits);
-  Applier.TraverseDecl(TU);
+  // Apply.  Besides its own declarations/uses, a rule may spell a dependent
+  // token that an earlier TU already resolved — the header that defines a
+  // template is typically processed after, and declares nothing to rename
+  // itself — so run the apply pass whenever either has work.
+  for (size_t I = 0; I < N; ++I) {
+    DependentResolutions* DepRes = Rules[I].DepRes;
+    const bool ApplyDependent =
+        DepRes &&
+        std::any_of(Locs[I].begin(), Locs[I].end(), [&](const auto& L) {
+          auto It = DepRes->find(L.first);
+          return It != DepRes->end() && It->second.HasName &&
+                 !It->second.Vetoed;
+        });
+    if (Plans[I].Renames.empty() && !ApplyDependent) continue;
+    ApplyRenamesVisitor Applier(RW, SM, Plans[I].Renames, CollectFrom, DepRes,
+                                Report, Rules[I].RuleId, Edits);
+    Applier.TraverseDecl(TU);
+  }
+}
+
+void runRenameRuleOnAST(ASTContext& Ctx, Rewriter& RW,
+                        const VariableRenameCallback& CB, VariableScope Scope,
+                        const FileSet& CollectFrom, LintReport* Report,
+                        llvm::StringRef RuleId, DependentResolutions* DepRes,
+                        EditReport* Edits, RenameConflicts* Conflicts,
+                        RenameVetoes* Vetoes,
+                        std::set<std::string>* RenamedNames, Preprocessor* PP,
+                        const ConsumedMacroArgs* Consumed) {
+  const RenameRuleSpec Spec{&CB, Scope, RuleId.str(), DepRes};
+  runRenameRulesOnAST(Ctx, RW, Spec, CollectFrom, Report, Edits, Conflicts,
+                      Vetoes, RenamedNames, PP, Consumed);
 }
 
 // ---------------------------------------------------------------------------
@@ -2264,6 +3456,20 @@ auto RenameAllMemberFunctions(VariableRenameCallback CB, OutputMode Mode,
       std::move(CB), VariableScope::Method, Mode, std::move(CollectFrom));
 }
 
+auto RenameAllTypes(VariableRenameCallback CB, OutputMode Mode,
+                    FileSet CollectFrom)
+    -> std::unique_ptr<RenameActionFactory> {
+  return std::make_unique<RenameActionFactory>(
+      std::move(CB), VariableScope::Type, Mode, std::move(CollectFrom));
+}
+
+auto RenameAllNamespaces(VariableRenameCallback CB, OutputMode Mode,
+                         FileSet CollectFrom)
+    -> std::unique_ptr<RenameActionFactory> {
+  return std::make_unique<RenameActionFactory>(
+      std::move(CB), VariableScope::Namespace, Mode, std::move(CollectFrom));
+}
+
 // ---------------------------------------------------------------------------
 // Source ordering helper
 // ---------------------------------------------------------------------------
@@ -2281,13 +3487,27 @@ auto orderSourcesForRename(const std::vector<std::string>& SourcePaths)
 // Test helper
 // ---------------------------------------------------------------------------
 
-auto rewriteVariableNames(llvm::StringRef Code, VariableRenameCallback CB,
-                          VariableScope Scope,
-                          const std::vector<std::string>& Args) -> std::string {
+auto rewriteVariableNames(
+    llvm::StringRef Code, VariableRenameCallback CB, VariableScope Scope,
+    const std::vector<std::string>& Args,
+    const std::vector<std::pair<std::string, std::string>>& VirtualFiles)
+    -> std::string {
   std::string Output;
   bool Ok = runToolOnCodeWithArgs(
-      std::make_unique<CaptureAction>(std::move(CB), Scope, Output), Code,
-      Args);
+      std::make_unique<CaptureAction>(std::move(CB), Scope, Output), Code, Args,
+      "input.cc", "clang-tool", std::make_shared<PCHContainerOperations>(),
+      VirtualFiles);
+  if (!Ok || Output.empty()) return Code.str();
+  return Output;
+}
+
+auto rewriteWithRules(
+    llvm::StringRef Code,
+    const std::vector<std::pair<VariableScope, VariableRenameCallback>>& Rules,
+    const std::vector<std::string>& Args) -> std::string {
+  std::string Output;
+  bool Ok = runToolOnCodeWithArgs(
+      std::make_unique<MultiRuleCaptureAction>(Rules, Output), Code, Args);
   if (!Ok || Output.empty()) return Code.str();
   return Output;
 }

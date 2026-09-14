@@ -344,11 +344,9 @@ echo "PASS: a macro-vetoed rename is absent from lint output, with no re-run dup
 echo "All lint integration tests passed."
 
 # ---------------------------------------------------------------------------
-# Test 9 — unsound rule combinations are refused before anything is parsed
+# Test 9 — rule combinations: the unsound one is refused before anything is
+# parsed, and two rules that can land on one name are resolved together
 # ---------------------------------------------------------------------------
-# Two rules decide in ignorance of each other, so a pair that can land on one
-# name is not reported as a conflict -- it is silently miscompiled.  The only
-# cheap place to catch it is the configuration.
 cat > "$tmpdir/widget.cpp" <<'EOF'
 class Widget {
  public:
@@ -384,19 +382,45 @@ EOF
   "$cpp_format" --config="$tmpdir/rules.yaml" --in-place "$tmpdir/widget.cpp" \
     -- -std=c++17
 }
-expect_refused "can produce the same name" run_rules \
-'  - scope: member
+# Two rules that can land on one name are resolved, not refused: the rules'
+# candidates are collected together, and the first rule in the list keeps a
+# contested name.  member/snake_case takes `value` for the field; the method's
+# rename to `value` is reported as a skip and Widget keeps `Value()`.
+run_rules '  - scope: member
     style: snake_case
   - scope: method
-    style: snake_case'
+    style: snake_case' 2> "$tmpdir/pair.err" || fail "member+method snake_case: exit $?"
+grep -q 'int Value() const { return value; }' "$tmpdir/widget.cpp" \
+  || { cat "$tmpdir/widget.cpp"; fail "member+method snake_case: expected the field renamed and the method kept"; }
+grep -q 'int value;' "$tmpdir/widget.cpp" \
+  || fail "member+method snake_case: field not renamed"
+grep -q "1 rename(s) skipped" "$tmpdir/pair.err" \
+  || { cat "$tmpdir/pair.err"; fail "member+method snake_case: the declined method was not reported"; }
 
-# m_prefix is not safe against snake_case either: a method named MType
-# snake_cases to m_type, which is what m_prefix gives a member named type_.
-expect_refused "can produce the same name" run_rules \
-'  - scope: member
+# And a pair that merely *could* collide but does not here: m_prefix moves the
+# field to m_value, so the method's `value` is free.
+cat > "$tmpdir/widget.cpp" <<'EOF'
+class Widget {
+ public:
+  int Value() const { return value_; }
+ private:
+  int value_;
+};
+EOF
+run_rules '  - scope: member
     style: m_prefix
   - scope: method
-    style: snake_case'
+    style: snake_case' || fail "member m_prefix + method snake_case: exit $?"
+grep -q 'int value() const { return m_value; }' "$tmpdir/widget.cpp" \
+  || { cat "$tmpdir/widget.cpp"; fail "m_prefix + snake_case: both renames expected"; }
+cat > "$tmpdir/widget.cpp" <<'EOF'
+class Widget {
+ public:
+  int Value() const { return value_; }
+ private:
+  int value_;
+};
+EOF
 
 # The fine-grained scopes are subsets of the broad ones, so a static data
 # member would be renamed twice and the second rewrite would corrupt the first.
