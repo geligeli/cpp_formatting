@@ -1,0 +1,38 @@
+# The dogfooding entry: the repo this tool was written for, and the only corpus
+# member that is itself a cpp_format *consumer* -- it imports the kit by URL and
+# keeps its own cpp_format.yaml checked in.  The harness strips that wiring when
+# it materializes the repo (see _strip_cpp_format_wiring); otherwise the
+# scenario would test whichever binary the repo's pinned release tag points at,
+# always green and never the one under test.
+#
+# What it adds over the Google corpora:
+#
+# - Plain aggregates.  googletest, abseil and re2 are class-per-file, and their
+#   data members already end in an underscore, so the `member` rule is nearly a
+#   no-op there.  Here half the data members live in option structs written with
+#   bare names (SandboxRunnerConfig::docker_image, repo_dir, work_dir), so
+#   `trailing_` actually moves them -- and moves them across the aggregate
+#   initializations and designated initializers at every call site.
+# - ABSL_FLAG.  A flag's name is a macro argument that absl only ever pastes
+#   (FLAGS_##name) or stringizes (#name), and several of them are spelled the
+#   same as a member of the config struct they are copied into.  That is what
+#   the spelling audit is for, and it is the scenario's most interesting skip;
+#   see the scenario file.
+# - grpc and protobuf in the graph, so generated headers under bazel-out are in
+#   every TU's include closure -- the aspect has to classify them as not-ours
+#   and leave the generated accessors alone while renaming the hand-written
+#   members around them.
+# - C++23 (.bazelrc forces -std=c++23), and -Werror, which is what the tool's
+#   own `-w` adjuster exists for.
+#
+# //...: the examples are separate Bazel workspaces with their own MODULE.bazel
+# and the repo's .bazelignore already keeps //... out of them.
+#
+# RUN_TESTS=0: a good part of this repo's test suite wants a docker daemon.
+# `build` is the assertion that matters here anyway -- a missed reference is a
+# compile error, not a test failure.
+REPO_KIND=git
+REPO_URL=https://github.com/geligeli/game-arena.git
+REPO_REV=f3e105f0d5dfc1dc6a2a6f39f336167265b8b161   # 2026-09-13
+TARGET_PATTERN='//...'
+RUN_TESTS=0

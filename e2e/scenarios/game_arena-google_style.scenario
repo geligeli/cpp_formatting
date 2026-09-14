@@ -1,0 +1,30 @@
+# The whole ruleset at once over the repo the tool is dogfooded on: six rename
+# scopes plus both rewrite passes.  1538 edits across 92 files apply with 0
+# conflicts, //... rebuilds, and a second pass has nothing left to do.
+#
+# Its first run broke the rebuild with one rename (35 errors, 8 files, one
+# cause): `method: UpperCamelCase` turned Engine::capabilities() into
+# Capabilities(), the name of its own return type, a struct in the enclosing
+# namespace.  Inside the class, and in every class derived from it, unqualified
+# `Capabilities` then found the member function before the type -- GCC rejects
+# the base with -Wchanges-meaning and every `Capabilities Capabilities() const
+# override` with "does not name a type".  collides() only asks whether the new
+# name is *taken* in the class; the missing check was whether it is *used*
+# unqualified inside the class to mean an enclosing-scope entity, which the
+# renamed member would hide.  That is the capture check in scan() now, and
+# highway-member_snake_case hits the same check in its other form (a member
+# renamed to `free` next to a static member function that calls ::free).
+#
+# The run also pinned a skip that was too blunt.  About twenty ABSL_FLAG names
+# (docker_image, repo_dir, work_dir, cpus, ...) are spelled the same as a data
+# member of the config struct they are copied into, and absl only ever pastes
+# or stringizes a flag's name -- so the token at the ABSL_FLAG call site has no
+# AST node at its spelling, and the spelling audit used to decline the member.
+# The audit now knows which macro arguments the preprocessor consumed, and
+# those members rename: 1379 edits before, 1522 after (1538 once the type and
+# namespace rules joined the ruleset).
+#
+# NB: sourced by bash -- no backticks or dollar signs in values.
+REPO=game_arena
+RULESET=google_style
+EXPECT=pass

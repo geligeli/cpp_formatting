@@ -123,18 +123,23 @@ RUN_TESTS=0                   # 1 runs the repo's own tests instead of building
 BUILD_FLAGS=()                # extra flags for its builds
 ```
 
+A repo that **already uses cpp_format** needs nothing extra: `wire()` strips its
+own wiring out of `MODULE.bazel` (the `bazel_dep`, the `archive_override` and
+the `release()` pin) before injecting the harness's. Without that the two
+declarations of `@cpp_format_bin` collide — and if they did not, the scenario
+would quietly test whatever binary the repo's pinned release tag names instead
+of the one this run built. `game_arena` is the case.
+
 **A ruleset** — `e2e/rulesets/<name>.yaml`, a literal `cpp_format.yaml`.
 
-A ruleset that renames in **two scopes at once** has to pick styles whose
-output namespaces cannot overlap. Each rule collects independently, and the
-collision check asks whether a new name is taken in the DeclContext *as the AST
-spells it* — so two rules can pick the same new name for a field and a method
-of one class and neither notices. `member: snake_case` + `method: snake_case`
-turns the ordinary getter/field pair into `int value() const { return value; }`
-next to `int value;`. `cpp_format` refuses a pair it cannot prove disjoint, so
-a ruleset like that fails at `check` with an explanation rather than at
-`rebuild`; `member_trailing_method_snake` is the shape that passes, because
-every member name ends in `_` and no snake_case name does.
+A ruleset that renames in **two scopes at once** may pick styles whose output
+namespaces overlap: the rules' candidates are collected together and the
+collisions resolved with all of them in view, so `member: snake_case` +
+`method: snake_case` gives the getter/field pair `int value() const` /
+`int value_` one rename (the field's -- the first rule in the list keeps a
+contested name) and reports the other as a skip. The one pair `cpp_format`
+still refuses is two scopes that can match the *same declaration*
+(`member` + `static_member`), which would rewrite the same bytes twice.
 
 **A scenario** — `e2e/scenarios/<repo>-<ruleset>.scenario`, pairing the two plus
 the expectation (and optionally a second ruleset, see above). Run it once locally before committing `EXPECT`: a wrong value
@@ -166,6 +171,14 @@ is on). The usual causes, in rough order of likelihood:
    headers, so uses of its declarations are not rewritten.
 4. **Template-dependent tokens outside the passed source set** — documented in
    AGENTS.md under "template-dependent member tokens".
+5. **A capture the scan pass does not model.** Three are modelled: a local of
+   the new name capturing a member use, a derived class declaring the new name
+   hiding the member from accesses through it, and the new name already used
+   unqualified inside the scope to mean an enclosing-scope entity (a type, a
+   free function, a base's member) that the renamed declaration would hide.
+   `game_arena-google_style` (`capabilities()` → `Capabilities()` next to
+   `struct Capabilities`) and `highway-member_snake_case` (`free_` → `free`
+   next to a call to `::free`) found the third; a fourth would look like them.
 
 `normalize_variables --debug-trace` prints every candidate site with `main=`,
 `macro=` and `WILL_RENAME` flags, which is usually the fastest way to confirm

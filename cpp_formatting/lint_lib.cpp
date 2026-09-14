@@ -410,10 +410,24 @@ void EditReport::emitJSON(llvm::raw_ostream& OS) const {
                            {"old", S.OldName},
                            {"new", S.NewName},
                            {"reason", S.Reason}});
+  llvm::json::Array Deps;
+  for (const RenameDependency& D : this->Dependencies)
+    Deps.push_back(llvm::json::Object{
+        {"owner_file", D.OwnerFile},
+        {"owner_offset", static_cast<int64_t>(D.OwnerOffset)},
+        {"on_file", D.OnFile},
+        {"on_offset", static_cast<int64_t>(D.OnOffset)},
+        {"on_name", D.OnName},
+        {"file", D.Site.File},
+        {"line", static_cast<int64_t>(D.Site.Line)},
+        {"column", static_cast<int64_t>(D.Site.Column)},
+        {"old", D.Site.OldName},
+        {"new", D.Site.NewName}});
   llvm::json::Object Root{{"edits", std::move(Edits)},
                           {"resolutions", std::move(Res)},
                           {"vetoes", std::move(Vetoes)},
-                          {"skips", std::move(Skips)}};
+                          {"skips", std::move(Skips)},
+                          {"dependencies", std::move(Deps)}};
   OS << llvm::formatv("{0:2}", llvm::json::Value(std::move(Root))) << "\n";
 }
 
@@ -490,6 +504,29 @@ auto parseEditReport(llvm::StringRef Json, EditReport& Out) -> bool {
       S.Reason = O->getString("reason").value_or("").str();
       if (S.OldName.empty()) return false;
       Out.Skips.push_back(std::move(S));
+    }
+  }
+  // Likewise newer than some records: a missing array is not an error.
+  if (const llvm::json::Array* Deps = Root->getArray("dependencies")) {
+    for (const llvm::json::Value& V : *Deps) {
+      const llvm::json::Object* O = V.getAsObject();
+      if (!O) return false;
+      RenameDependency D;
+      D.OwnerFile = O->getString("owner_file").value_or("").str();
+      D.OwnerOffset =
+          static_cast<unsigned>(O->getInteger("owner_offset").value_or(0));
+      D.OnFile = O->getString("on_file").value_or("").str();
+      D.OnOffset =
+          static_cast<unsigned>(O->getInteger("on_offset").value_or(0));
+      D.OnName = O->getString("on_name").value_or("").str();
+      D.Site.File = O->getString("file").value_or("").str();
+      D.Site.Line = static_cast<unsigned>(O->getInteger("line").value_or(0));
+      D.Site.Column =
+          static_cast<unsigned>(O->getInteger("column").value_or(0));
+      D.Site.OldName = O->getString("old").value_or("").str();
+      D.Site.NewName = O->getString("new").value_or("").str();
+      if (D.OwnerFile.empty() || D.OnFile.empty()) return false;
+      Out.Dependencies.push_back(std::move(D));
     }
   }
   return true;
@@ -606,6 +643,33 @@ auto mergeEditReports(
           {"", 0, 0, Name, "",
            "a template-dependent use of this name was resolved by no "
            "translation unit"});
+
+  // 1b. A rename accepted only because another vacates its name falls with
+  //     that one: if any report vetoed the mover, or its name is declined,
+  //     the dependent is vetoed here too -- transitively, since a dependent
+  //     can itself be a mover.  The emit action could not know: the veto may
+  //     have come from a translation unit it never saw.
+  {
+    bool Changed = true;
+    while (Changed) {
+      Changed = false;
+      for (const EditReport& Rep : Reports)
+        for (const RenameDependency& D : Rep.Dependencies) {
+          if (IsVetoed(D.OwnerFile, D.OwnerOffset)) continue;
+          if (!IsVetoed(D.OnFile, D.OnOffset) && !NameDeclined(D.OnName))
+            continue;
+          Vetoed.emplace(D.OwnerFile, D.OwnerOffset);
+          if (Declined) {
+            RenameSkip S = D.Site;
+            S.Reason =
+                "the name is vacated only by a rename that was declined ('" +
+                D.OnName + "')";
+            Declined->push_back(std::move(S));
+          }
+          Changed = true;
+        }
+    }
+  }
 
   // 2. Gather all edits per file: ordinary edits + surviving resolutions.
   std::map<std::string, std::vector<EditRecord>> ByFile;

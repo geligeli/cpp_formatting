@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include "cpp_formatting/naming_convention.h"
 #include "cpp_formatting/rename_variables_lib.h"
 
 // ---------------------------------------------------------------------------
@@ -1540,4 +1541,593 @@ TEST(RenameAnonymousUnion, TwoAnonymousStructsCannotClaimOneName) {
       "  };\n"
       "};\n";
   EXPECT_EQ(rewriteMember(code, renameOne("aVal", "a_val")), code);
+}
+
+// ---------------------------------------------------------------------------
+// Class-scope capture: the new name is already used, unqualified, inside the
+// scope the rename introduces it into, to mean something from further out.
+// ---------------------------------------------------------------------------
+
+TEST(RenameCapture, MethodRenamedToTheNameOfItsReturnTypeDeclines) {
+  // game_arena: Engine::capabilities() -> Capabilities() is the name of the
+  // struct it returns, from the enclosing namespace.  Inside the class (and
+  // the override in Impl) the name would then find the member function.
+  const char* code =
+      "namespace ns {\n"
+      "struct Capabilities { bool isolates = false; };\n"
+      "class Engine {\n"
+      " public:\n"
+      "  virtual ~Engine() = default;\n"
+      "  virtual Capabilities capabilities() const = 0;\n"
+      "};\n"
+      "class Impl : public Engine {\n"
+      " public:\n"
+      "  Capabilities capabilities() const override { return {}; }\n"
+      "};\n"
+      "}  // namespace ns\n";
+  EXPECT_EQ(rewriteMethod(code, renameOne("capabilities", "Capabilities")),
+            code);
+}
+
+TEST(RenameCapture, MemberRenamedToAFunctionCalledUnqualifiedDeclines) {
+  // highway: AlignedDeleter::free_ -> free, next to a static member function
+  // that calls ::free.  After the rename that call names the data member.
+  const char* code =
+      "void free(void* p);\n"
+      "struct Deleter {\n"
+      "  static void Delete(void* p) { free(p); }\n"
+      "  void (*free_)(void*) = nullptr;\n"
+      "};\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("free_", "free")), code);
+}
+
+TEST(RenameCapture, QualifiedUsesAndUnrelatedScopesAreNotCaptured) {
+  // `ns::Capabilities` starts lookup at the qualifier, `struct Capabilities`
+  // finds only class names, and Other is not on any lookup path from Engine.
+  const char* code =
+      "namespace ns {\n"
+      "struct Capabilities {};\n"
+      "struct Other { Capabilities c; };\n"
+      "class Engine {\n"
+      " public:\n"
+      "  ns::Capabilities capabilities() const;\n"
+      "  struct Capabilities also() const;\n"
+      "};\n"
+      "}  // namespace ns\n"
+      "int use(ns::Engine& e) { e.capabilities(); return 0; }\n";
+  EXPECT_EQ(rewriteMethod(code, renameOne("capabilities", "Capabilities")),
+            "namespace ns {\n"
+            "struct Capabilities {};\n"
+            "struct Other { Capabilities c; };\n"
+            "class Engine {\n"
+            " public:\n"
+            "  ns::Capabilities Capabilities() const;\n"
+            "  struct Capabilities also() const;\n"
+            "};\n"
+            "}  // namespace ns\n"
+            "int use(ns::Engine& e) { e.Capabilities(); return 0; }\n");
+}
+
+TEST(RenameCapture, BaseMemberUsedInDerivedIsHiddenByTheRenamedMember) {
+  // `n` inside D means Base::n today; a D::n would be found first.
+  const char* code =
+      "struct Base { int n = 1; };\n"
+      "struct D : Base {\n"
+      "  int count_ = 2;\n"
+      "  int f() const { return n + count_; }\n"
+      "};\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("count_", "n")), code);
+}
+
+TEST(RenameCapture, AccessThroughADerivedObjectIsCaptured) {
+  // `d.n` looks n up starting at D; today it reaches Base::n.
+  const char* code =
+      "struct Base { int n = 1; };\n"
+      "struct D : Base { int count_ = 2; };\n"
+      "int g(D& d) { return d.n; }\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("count_", "n")), code);
+}
+
+TEST(RenameCapture, DerivedClassOwnMemberStillPrecedes) {
+  // D declares its own n, which hides whatever Base gains: not a capture.
+  const char* code =
+      "struct Base { int count_ = 1; };\n"
+      "struct D : Base { int n = 2; int f() const { return n; } };\n"
+      "int g(D& d) { return d.n; }\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("count_", "n")),
+            "struct Base { int n = 1; };\n"
+            "struct D : Base { int n = 2; int f() const { return n; } };\n"
+            "int g(D& d) { return d.n; }\n");
+}
+
+TEST(RenameCapture, LocalRenamedToAMemberUsedInTheSameFunctionDeclines) {
+  // The parameter `count` renamed to `n` would hide the member n in f.
+  const char* code =
+      "struct S {\n"
+      "  int n = 0;\n"
+      "  int f(int count) { return count + n; }\n"
+      "};\n";
+  EXPECT_EQ(rewriteLocal(code, renameOne("count", "n")), code);
+}
+
+TEST(RenameCapture, ParametersOfTheNewNameArePreceded) {
+  // A parameter is found before class scope, so a member renamed onto a
+  // parameter's name is not a capture of the *parameter* (the reverse -- the
+  // member use captured by the parameter -- is scan() case (b), and it does
+  // not apply here because count_ is never used unqualified in that ctor).
+  const char* code =
+      "struct S {\n"
+      "  explicit S(int count) : count_(count) {}\n"
+      "  int count_;\n"
+      "};\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("count_", "count")),
+            "struct S {\n"
+            "  explicit S(int count) : count(count) {}\n"
+            "  int count;\n"
+            "};\n");
+}
+
+TEST(RenameCapture, DependentBaseCaptureIsSeenInTheInstantiation) {
+  // Base<T>::n is reached through a dependent base; the check runs on the
+  // instantiation, where the base is resolved.
+  const char* code =
+      "template <class T> struct Base { T n = 1; };\n"
+      "template <class T> struct D : Base<T> {\n"
+      "  T count_ = 2;\n"
+      "  T f() const { return this->n + count_; }\n"
+      "};\n"
+      "int use() { D<int> d; return d.f(); }\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("count_", "n")), code);
+}
+
+TEST(RenameAnonymousUnion, LocalOfTheNewNameCapturesAUnionMember) {
+  // protobuf's LazyString: `auto init_value = init_value_;` with init_value_
+  // in an anonymous union.  The access is an implicit this-> behind an
+  // implicit member access on the unnamed field; case (b) must see through
+  // it, or the rewrite is the self-initialization `auto init_value =
+  // init_value;`.
+  const char* code =
+      "struct L {\n"
+      "  union {\n"
+      "    int init_value_;\n"
+      "    char buf_[4];\n"
+      "  };\n"
+      "  int f() const { auto init_value = init_value_; return init_value; }\n"
+      "};\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("init_value_", "init_value")), code);
+}
+
+// ---------------------------------------------------------------------------
+// Spelling audit: macro arguments the preprocessor consumed
+// ---------------------------------------------------------------------------
+
+TEST(RenameSpellingAudit, ArgumentOnlyPastedOrStringizedDoesNotCount) {
+  // absl's ABSL_FLAG(std::string, docker_image, ...) next to a struct member
+  // docker_image: the flag's name is only ever pasted and stringized, so no
+  // token of the expansion is spelled at the argument -- nothing there can
+  // refer to the member, and the member renames.
+  const char* code =
+      "#define FLAG(T, name, help) \\\n"
+      "  T FLAGS_##name;            \\\n"
+      "  const char* HelpFor##name() { return #name \" \" help; }\n"
+      "struct Config { int docker_image = 0; };\n"
+      "FLAG(int, docker_image, \"image\")\n"
+      "int use(Config& c) { return c.docker_image + FLAGS_docker_image; }\n";
+  EXPECT_EQ(
+      rewriteMember(code, renameOne("docker_image", "docker_image_")),
+      "#define FLAG(T, name, help) \\\n"
+      "  T FLAGS_##name;            \\\n"
+      "  const char* HelpFor##name() { return #name \" \" help; }\n"
+      "struct Config { int docker_image_ = 0; };\n"
+      "FLAG(int, docker_image, \"image\")\n"
+      "int use(Config& c) { return c.docker_image_ + FLAGS_docker_image; }\n");
+}
+
+TEST(RenameSpellingAudit, ArgumentForwardedIntoAPasteDoesNotCount) {
+  // The paste happens one macro down; the argument reaches it through an
+  // ordinary use in the outer body, and is still consumed.
+  const char* code =
+      "#define INNER(name) int FLAGS_##name;\n"
+      "#define OUTER(name) INNER(name)\n"
+      "struct Config { int docker_image = 0; };\n"
+      "OUTER(docker_image)\n"
+      "int use(Config& c) { return c.docker_image + FLAGS_docker_image; }\n";
+  EXPECT_EQ(
+      rewriteMember(code, renameOne("docker_image", "docker_image_")),
+      "#define INNER(name) int FLAGS_##name;\n"
+      "#define OUTER(name) INNER(name)\n"
+      "struct Config { int docker_image_ = 0; };\n"
+      "OUTER(docker_image)\n"
+      "int use(Config& c) { return c.docker_image_ + FLAGS_docker_image; }\n");
+}
+
+TEST(RenameSpellingAudit, ArgumentAlsoUsedPlainlyStillCounts) {
+  // A parameter used plainly anywhere in the body is emitted, and here the
+  // emission is a using-declaration -- a reference the tool does not rewrite.
+  const char* code =
+      "struct Base { int val_; };\n"
+      "#define BRING(n) using Base::n; int gmock_##n;\n"
+      "struct D : Base { BRING(val_) int f() const { return val_; } };\n";
+  EXPECT_EQ(rewriteMember(code, renameOne("val_", "value")), code);
+}
+
+// ---------------------------------------------------------------------------
+// Dependent tokens: a binding this rule does not rename declines the others
+// ---------------------------------------------------------------------------
+
+TEST(RenameDependentTokens, BindingToADeclinedMemberDeclinesTheRenamedOne) {
+  // protobuf's MicroString::kInlineCapacity (declined: a parameter of the new
+  // name captures it in a default argument) next to the derived
+  // MicroStringExtraImpl::kInlineCapacity (renamed).  T::kInlineCapacity in
+  // the test binds to both, so the token cannot be rewritten and the derived
+  // one must keep its name too.
+  const char* code =
+      "struct B {\n"
+      "  static constexpr int kCap = 1;\n"
+      "  int f(int cap = kCap) const { return cap; }\n"
+      "};\n"
+      "struct D : private B {\n"
+      "  static constexpr int kCap = 3;\n"
+      "};\n"
+      "template <class T> int g() { return T::kCap; }\n"
+      "int use() { return g<B>() + g<D>(); }\n";
+  EXPECT_EQ(rewriteStaticMember(code, renameOne("kCap", "cap")), code);
+}
+
+TEST(RenameDependentTokens, BindingToAMemberOutsideTheFileSetDeclines) {
+  // protobuf's TcParser::GetTable spells T::_table_ for every message class,
+  // the checked-in ones (renamed) and the build-generated ones (not ours)
+  // alike.  A binding to a member outside the files being formatted keeps the
+  // token, so every renamed target of that token must keep its name.
+  const char* code =
+      "#include \"theirs.h\"\n"
+      "struct Ours { static const int _table_ = 1; };\n"
+      "template <class T> int table() { return T::_table_; }\n"
+      "int use() { return table<Ours>() + table<Theirs>(); }\n";
+  EXPECT_EQ(
+      rewriteVariableNames(
+          code, renameOne("_table_", "table_"), VariableScope::Member,
+          {"-std=c++20", "-xc++"},
+          {{"theirs.h", "struct Theirs { static const int _table_ = 2; };\n"}}),
+      code);
+}
+
+TEST(RenameSpellingAudit, DeclarationPastedByANestedMacroDeclines) {
+  // gmock's real shape: MOCK_METHOD spells the method plainly one macro down
+  // and forwards the same argument to GMOCK_MOCKER_, which pastes it.  The
+  // declaration's own token never passes through a macro whose body contains
+  // ##, so only the preprocessor's record of the paste can catch it -- and
+  // must, because ON_CALL(m, DoThis) forms gmock_DoThis from the old spelling.
+  const char* code =
+      "#define MOCKER(m) gmock_##m\n"
+      "#define IMPL(m) \\\n"
+      "  int m(int x) { return MOCKER(m)(x); } \\\n"
+      "  int MOCKER(m)(int x) { return x; }\n"
+      "#define MOCK(m) IMPL(m)\n"
+      "struct MockFoo { MOCK(DoThis) };\n"
+      "#define ON_CALL(obj, call) (obj).MOCKER(call)\n"
+      "int use(MockFoo& m) { return ON_CALL(m, DoThis)(1) + m.DoThis(2); }\n";
+  EXPECT_EQ(rewriteMethod(code, renameOne("DoThis", "do_this")), code);
+}
+
+// ---------------------------------------------------------------------------
+// Collision resolution across rules
+// ---------------------------------------------------------------------------
+
+static auto memberTrailingMethodSnake() {
+  return std::vector<std::pair<VariableScope, VariableRenameCallback>>{
+      {VariableScope::Member,
+       [](std::string_view n, std::string& out) {
+         out = renameToStyle(n, NamingStyle::TrailingUnderscore);
+         return out != n;
+       }},
+      {VariableScope::Method, [](std::string_view n, std::string& out) {
+         out = renameToStyle(n, NamingStyle::SnakeCase);
+         return out != n;
+       }}};
+}
+
+TEST(RenameResolution, NameVacatedByAnotherRuleIsFreeInTheSamePass) {
+  // googletest's Flags: the method AlsoRun() wants `also_run`, which the
+  // field also_run holds -- until the member rule moves it to also_run_.
+  // Deciding per rule against the AST's names declined the method on the
+  // first run and accepted it on the second; now both go in one pass.
+  const char* code =
+      "struct Flags {\n"
+      "  int also_run = 0;\n"
+      "  static Flags AlsoRun(int also_run) {\n"
+      "    Flags f;\n"
+      "    f.also_run = also_run;\n"
+      "    return f;\n"
+      "  }\n"
+      "};\n";
+  EXPECT_EQ(rewriteWithRules(code, memberTrailingMethodSnake()),
+            "struct Flags {\n"
+            "  int also_run_ = 0;\n"
+            "  static Flags also_run(int also_run) {\n"
+            "    Flags f;\n"
+            "    f.also_run_ = also_run;\n"
+            "    return f;\n"
+            "  }\n"
+            "};\n");
+}
+
+TEST(RenameResolution, TwoRulesForOneNameGoToTheFirstRule) {
+  // The getter/field pair under member/snake_case + method/snake_case: both
+  // want `value`; the member rule is first, so the method keeps its name.
+  std::vector<std::pair<VariableScope, VariableRenameCallback>> rules{
+      {VariableScope::Member, renameOne("value_", "value")},
+      {VariableScope::Method, renameOne("Value", "value")}};
+  const char* code =
+      "class Widget {\n"
+      " public:\n"
+      "  int Value() const { return value_; }\n"
+      " private:\n"
+      "  int value_;\n"
+      "};\n";
+  EXPECT_EQ(rewriteWithRules(code, rules),
+            "class Widget {\n"
+            " public:\n"
+            "  int Value() const { return value; }\n"
+            " private:\n"
+            "  int value;\n"
+            "};\n");
+}
+
+TEST(RenameResolution, RenamesThatWaitOnEachOtherAreBothDeclined) {
+  // a -> b and b -> a: each name is vacated only by the other, so neither
+  // can go first.
+  std::vector<std::pair<VariableScope, VariableRenameCallback>> rules{
+      {VariableScope::Member, [](std::string_view n, std::string& out) {
+         if (n == "a")
+           out = "b";
+         else if (n == "b")
+           out = "a";
+         else
+           return false;
+         return true;
+       }}};
+  const char* code = "struct S { int a; int b; };\n";
+  EXPECT_EQ(rewriteWithRules(code, rules), code);
+}
+
+TEST(RenameResolution, DependentFallsWithAVetoedMover) {
+  // The method's `count` is free only because the field count moves to
+  // count_; a macro body references the field, which vetoes that move -- and
+  // the method's rename with it, or the class would declare both a field and
+  // a method named count.
+  const char* code =
+      "#define BUMP(s) ((s).count += 1)\n"
+      "struct S {\n"
+      "  int count = 0;\n"
+      "  int Count() const { return count; }\n"
+      "};\n"
+      "int use(S& s) { return BUMP(s); }\n";
+  EXPECT_EQ(rewriteWithRules(code, memberTrailingMethodSnake()), code);
+}
+
+// ---------------------------------------------------------------------------
+// Types and namespaces
+// ---------------------------------------------------------------------------
+
+static auto rewriteType(const char* code, VariableRenameCallback cb)
+    -> std::string {
+  return rewriteVariableNames(code, std::move(cb), VariableScope::Type,
+                              {"-std=c++20", "-xc++"});
+}
+static auto rewriteNamespace(const char* code, VariableRenameCallback cb)
+    -> std::string {
+  return rewriteVariableNames(code, std::move(cb), VariableScope::Namespace,
+                              {"-std=c++20", "-xc++"});
+}
+static VariableRenameCallback toStyle(NamingStyle style) {
+  return [style](std::string_view n, std::string& out) {
+    out = renameToStyle(n, style);
+    return out != n;
+  };
+}
+
+TEST(RenameTypes, ClassWithEverySpellingOfItsName) {
+  const char* code =
+      "struct widget;\n"
+      "struct widget {\n"
+      "  widget();\n"
+      "  ~widget();\n"
+      "  widget(const widget&) = default;\n"
+      "  int f() const;\n"
+      "  static widget make();\n"
+      "};\n"
+      "widget::widget() {}\n"
+      "widget::~widget() {}\n"
+      "int widget::f() const { return 0; }\n"
+      "widget widget::make() { return widget(); }\n"
+      "int use(widget* p) {\n"
+      "  widget w = widget::make();\n"
+      "  p->~widget();\n"
+      "  return sizeof(widget) + w.f() + static_cast<widget*>(p)->f();\n"
+      "}\n";
+  EXPECT_EQ(rewriteType(code, renameOne("widget", "Widget")),
+            "struct Widget;\n"
+            "struct Widget {\n"
+            "  Widget();\n"
+            "  ~Widget();\n"
+            "  Widget(const Widget&) = default;\n"
+            "  int f() const;\n"
+            "  static Widget make();\n"
+            "};\n"
+            "Widget::Widget() {}\n"
+            "Widget::~Widget() {}\n"
+            "int Widget::f() const { return 0; }\n"
+            "Widget Widget::make() { return Widget(); }\n"
+            "int use(Widget* p) {\n"
+            "  Widget w = Widget::make();\n"
+            "  p->~Widget();\n"
+            "  return sizeof(Widget) + w.f() + static_cast<Widget*>(p)->f();\n"
+            "}\n");
+}
+
+TEST(RenameTypes, NestedTypesQualifiersFriendsAndUsingDeclarations) {
+  const char* code =
+      "struct outer {\n"
+      "  struct inner { int v; };\n"
+      "  enum mode { kOn };\n"
+      "  friend struct helper;\n"
+      "};\n"
+      "struct helper {};\n"
+      "struct derived : outer { using outer::inner; using outer::mode; };\n"
+      "outer::inner make() { return outer::inner{outer::kOn}; }\n"
+      "struct outer::inner* p = nullptr;\n";
+  EXPECT_EQ(
+      rewriteType(code, toStyle(NamingStyle::UpperCamelCase)),
+      "struct Outer {\n"
+      "  struct Inner { int v; };\n"
+      "  enum Mode { kOn };\n"
+      "  friend struct Helper;\n"
+      "};\n"
+      "struct Helper {};\n"
+      "struct Derived : Outer { using Outer::Inner; using Outer::Mode; };\n"
+      "Outer::Inner make() { return Outer::Inner{Outer::kOn}; }\n"
+      "struct Outer::Inner* p = nullptr;\n");
+}
+
+TEST(RenameTypes, TemplatesSpecializationsAndTemplateArguments) {
+  const char* code =
+      "template <class T> struct box { T v; };\n"
+      "template <> struct box<int> { int v; };\n"
+      "template <class T> struct box<T*> { T* v; };\n"
+      "template struct box<char>;\n"
+      "template <template <class> class W> struct wrap { W<double> w; };\n"
+      "box<double> b;\n"
+      "wrap<box> ww;\n"
+      "template <class T> using boxed = box<T>;\n"
+      "boxed<long> bl;\n";
+  EXPECT_EQ(
+      rewriteType(code, toStyle(NamingStyle::UpperCamelCase)),
+      "template <class T> struct Box { T v; };\n"
+      "template <> struct Box<int> { int v; };\n"
+      "template <class T> struct Box<T*> { T* v; };\n"
+      "template struct Box<char>;\n"
+      "template <template <class> class W> struct Wrap { W<double> w; };\n"
+      "Box<double> b;\n"
+      "Wrap<Box> ww;\n"
+      "template <class T> using Boxed = Box<T>;\n"
+      "Boxed<long> bl;\n");
+}
+
+TEST(RenameTypes, EnumsTypedefsAndAliases) {
+  const char* code =
+      "enum color { red };\n"
+      "enum class shade : int { dark };\n"
+      "typedef color colour_t;\n"
+      "using colour_alias = color;\n"
+      "color c = red;\n"
+      "colour_t d = c;\n"
+      "colour_alias e = c;\n"
+      "shade s = shade::dark;\n";
+  EXPECT_EQ(rewriteType(code, toStyle(NamingStyle::UpperCamelCase)),
+            "enum Color { red };\n"
+            "enum class Shade : int { dark };\n"
+            "typedef Color ColourT;\n"
+            "using ColourAlias = Color;\n"
+            "Color c = red;\n"
+            "ColourT d = c;\n"
+            "ColourAlias e = c;\n"
+            "Shade s = Shade::dark;\n");
+}
+
+TEST(RenameTypes, ProtocolTypeNamesAreDeclined) {
+  // value_type and iterator are what the standard library reads; sibling
+  // names rename.
+  const char* code =
+      "struct vec {\n"
+      "  typedef int value_type;\n"
+      "  struct iterator {};\n"
+      "  struct cursor {};\n"
+      "};\n";
+  EXPECT_EQ(rewriteType(code, toStyle(NamingStyle::UpperCamelCase)),
+            "struct Vec {\n"
+            "  typedef int value_type;\n"
+            "  struct iterator {};\n"
+            "  struct Cursor {};\n"
+            "};\n");
+}
+
+TEST(RenameTypes, DependentTypeNameResolvedThroughTheInstantiation) {
+  const char* code =
+      "struct holder { struct inner { int v; }; };\n"
+      "template <class T> int get(typename T::inner x) { return x.v; }\n"
+      "template <class T> struct user { typename T::inner i; };\n"
+      "int use() { holder::inner i{1}; user<holder> u; return get<holder>(i); "
+      "}\n";
+  EXPECT_EQ(rewriteType(code, renameOne("inner", "Inner")),
+            "struct holder { struct Inner { int v; }; };\n"
+            "template <class T> int get(typename T::Inner x) { return x.v; }\n"
+            "template <class T> struct user { typename T::Inner i; };\n"
+            "int use() { holder::Inner i{1}; user<holder> u; return "
+            "get<holder>(i); }\n");
+}
+
+TEST(RenameTypes, SpecializationOfATemplateThatIsNotOursIsLeftAlone) {
+  const char* code =
+      "#include \"theirs.h\"\n"
+      "template <> struct their_hash<int> { int operator()(int) const; };\n"
+      "struct mine {};\n";
+  EXPECT_EQ(
+      rewriteVariableNames(
+          code, toStyle(NamingStyle::UpperCamelCase), VariableScope::Type,
+          {"-std=c++20", "-xc++"},
+          {{"theirs.h", "template <class T> struct their_hash;\n"}}),
+      "#include \"theirs.h\"\n"
+      "template <> struct their_hash<int> { int operator()(int) const; };\n"
+      "struct Mine {};\n");
+}
+
+TEST(RenameNamespaces, EverySpellingIncludingTheClosingComment) {
+  const char* code =
+      "namespace MyLib {\n"
+      "int f();\n"
+      "}  // namespace MyLib\n"
+      "namespace MyLib {\n"
+      "int h();\n"
+      "}  // namespace MyLib\n"
+      "namespace ML = MyLib;\n"
+      "using namespace MyLib;\n"
+      "int g() { return MyLib::f() + ML::h(); }\n";
+  EXPECT_EQ(rewriteNamespace(code, toStyle(NamingStyle::SnakeCase)),
+            "namespace my_lib {\n"
+            "int f();\n"
+            "}  // namespace my_lib\n"
+            "namespace my_lib {\n"
+            "int h();\n"
+            "}  // namespace my_lib\n"
+            "namespace ml = my_lib;\n"
+            "using namespace my_lib;\n"
+            "int g() { return my_lib::f() + ml::h(); }\n");
+}
+
+TEST(RenameNamespaces, NestedDefinitionAndTheOnesLeftAlone) {
+  // A namespace first declared in a file we do not own (TheirLib, reopened
+  // here the way `namespace std` is reopened for a specialization) keeps its
+  // name; the anonymous namespace has none; an inline namespace renames.
+  const char* code =
+      "#include \"theirs.h\"\n"
+      "namespace TheirLib { int g(); }\n"
+      "namespace a::BadName {\n"
+      "int f();\n"
+      "}  // namespace a::BadName\n"
+      "namespace { int g(); }\n"
+      "inline namespace V1 { int k(); }\n"
+      "int use() { return a::BadName::f() + V1::k() + TheirLib::f(); }\n";
+  EXPECT_EQ(
+      rewriteVariableNames(code, toStyle(NamingStyle::SnakeCase),
+                           VariableScope::Namespace, {"-std=c++20", "-xc++"},
+                           {{"theirs.h", "namespace TheirLib { int f(); }\n"}}),
+      "#include \"theirs.h\"\n"
+      "namespace TheirLib { int g(); }\n"
+      "namespace a::bad_name {\n"
+      "int f();\n"
+      "}  // namespace a::bad_name\n"
+      "namespace { int g(); }\n"
+      "inline namespace v1 { int k(); }\n"
+      "int use() { return a::bad_name::f() + v1::k() + TheirLib::f(); }\n");
 }

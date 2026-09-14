@@ -17,6 +17,7 @@
 #include "cpp_formatting/output_mode.h"
 #include "cpp_formatting/rename_state.h"
 #include "cpp_formatting/tu_driver.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -75,6 +76,15 @@ enum class VariableScope {
   Method,  ///< Member functions, static and non-static (CXXMethodDecl).
            ///< Constructors, destructors, conversion functions, and overloaded
            ///< operators are never renamed.
+
+  // Type and namespace scopes
+  Type,       ///< Classes, structs, unions, enums (nested ones included),
+              ///< class templates, typedefs and alias declarations.  A type
+              ///< the standard library reads by name (value_type, iterator,
+              ///< type, ...) is never renamed; see isProtocolTypeName.
+  Namespace,  ///< Named namespaces (inline ones included) and namespace
+              ///< aliases.  The closing `}  // namespace x` comment is
+              ///< rewritten along with the declaration.
 };
 
 // True when one declaration can match both scopes -- the fine-grained scopes
@@ -197,6 +207,35 @@ class RenameActionFactory : public TUSlotClient {
 // Per-TU rename helper
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Macro arguments the preprocessor consumed
+// ---------------------------------------------------------------------------
+
+/// The macro-argument tokens that never reached the parser.  A function-like
+/// macro that only ever pastes a parameter (`FLAGS_##name`), stringizes it
+/// (`#name`) or does not use it at all emits no token of its own for that
+/// argument, so no AST node can refer to the identifier at its spelling -- and
+/// a rename of a declaration that merely shares the spelling leaves nothing
+/// behind there.  absl's ABSL_FLAG(std::string, docker_image, ...) next to a
+/// struct member `docker_image` is the case: the flag's name is only ever
+/// pasted and stringized, and the spelling audit used to decline the member.
+/// Keyed by (file, offset) of the argument token as written.  Filled during
+/// parsing by the PPCallbacks watchConsumedMacroArgs() installs.
+struct ConsumedMacroArgs {
+  /// Argument tokens no expansion ever emitted as themselves.
+  std::set<std::pair<clang::FileID, unsigned>> Tokens;
+  /// Argument tokens some expansion pasted with `##` -- at any nesting depth,
+  /// so an argument forwarded from MOCK_METHOD down to GMOCK_MOCKER_ counts.
+  /// A declaration spelled at one of these is never renamed: the paste forms
+  /// other identifiers from its spelling, and a use written the same way
+  /// (`ON_CALL(m, DoThis())`) forms them again from the *old* spelling.
+  std::set<std::pair<clang::FileID, unsigned>> Pasted;
+};
+
+/// Installs the callbacks that fill \p Out; call before the TU is parsed.
+/// \p Out must outlive the Preprocessor's use of it.
+void watchConsumedMacroArgs(clang::Preprocessor& PP, ConsumedMacroArgs& Out);
+
 /// Runs one rename rule (collect declarations, then apply renames) on an
 /// already-parsed translation unit, writing edits into \p RW.  Used by
 /// cpp_format to run several rules in a single ClangTool pass.
@@ -219,6 +258,13 @@ class RenameActionFactory : public TUSlotClient {
 /// dependent tokens no TU resolved to decline those names (see nameVetoKey).
 /// \p PP, when non-null, lets the scan pass read macro definitions, to decline
 /// a declaration spelled as an argument of a macro that pastes with `##`.
+/// \p Consumed, when non-null, tells the spelling audit which macro-argument
+/// tokens the preprocessor consumed without ever emitting (see
+/// ConsumedMacroArgs); an identifier there is not a reference and does not
+/// decline anything.
+/// \p AllScopes lists every rule's scope when several rules run over one AST
+/// (empty means just \p Scope): the dependent-token recorder uses it to tell
+/// "another rule renames this member" from "nobody does".
 void runRenameRuleOnAST(clang::ASTContext& Ctx, clang::Rewriter& RW,
                         const VariableRenameCallback& CB, VariableScope Scope,
                         const FileSet& CollectFrom,
@@ -229,7 +275,37 @@ void runRenameRuleOnAST(clang::ASTContext& Ctx, clang::Rewriter& RW,
                         RenameConflicts* Conflicts = nullptr,
                         RenameVetoes* Vetoes = nullptr,
                         std::set<std::string>* RenamedNames = nullptr,
-                        clang::Preprocessor* PP = nullptr);
+                        clang::Preprocessor* PP = nullptr,
+                        const ConsumedMacroArgs* Consumed = nullptr);
+
+/// One rule of a multi-rule run (see runRenameRulesOnAST).
+struct RenameRuleSpec {
+  const VariableRenameCallback* CB;
+  VariableScope Scope;
+  std::string RuleId;
+  DependentResolutions* DepRes;  ///< this rule's map, or null
+};
+
+/// Runs several rules over one AST as a unit: every rule collects its
+/// candidates first, then the collisions are resolved with all of them in
+/// view (a new name blocked only by a declaration another rule renames away
+/// is free; two candidates for one name in one scope go to the first rule in
+/// the list), then every rule's scan pass runs, then the dependent-token
+/// recorders, then the rewrites -- in rule order at each step.  A rename
+/// accepted because another vacates its name is recorded as depending on it,
+/// so a later veto of the mover takes the dependent down with it (in this
+/// pass, and through the edit records in Emit mode).  runRenameRuleOnAST is
+/// this with one rule.
+void runRenameRulesOnAST(clang::ASTContext& Ctx, clang::Rewriter& RW,
+                         llvm::ArrayRef<RenameRuleSpec> Rules,
+                         const FileSet& CollectFrom,
+                         LintReport* Report = nullptr,
+                         EditReport* Edits = nullptr,
+                         RenameConflicts* Conflicts = nullptr,
+                         RenameVetoes* Vetoes = nullptr,
+                         std::set<std::string>* RenamedNames = nullptr,
+                         clang::Preprocessor* PP = nullptr,
+                         const ConsumedMacroArgs* Consumed = nullptr);
 
 // ---------------------------------------------------------------------------
 // Convenience factories
@@ -289,6 +365,12 @@ auto RenameAllConstGlobalVariables(VariableRenameCallback CB,
 /// together with its entire override hierarchy; if any member of the
 /// hierarchy is declared outside \p CollectFrom, the rename is skipped so
 /// `override` checking is never broken.
+auto RenameAllTypes(VariableRenameCallback CB, OutputMode Mode,
+                    FileSet CollectFrom)
+    -> std::unique_ptr<RenameActionFactory>;
+auto RenameAllNamespaces(VariableRenameCallback CB, OutputMode Mode,
+                         FileSet CollectFrom)
+    -> std::unique_ptr<RenameActionFactory>;
 auto RenameAllMemberFunctions(VariableRenameCallback CB,
                               OutputMode Mode = OutputMode::DryRun,
                               FileSet CollectFrom = {})
@@ -343,9 +425,17 @@ auto orderSourcesForRename(const std::vector<std::string>& SourcePaths)
 
 /// Parses \p Code as C++17, applies the variable rename, and returns the
 /// transformed source.  Returns the original string if the tool fails.
-auto rewriteVariableNames(llvm::StringRef Code, VariableRenameCallback CB,
-                          VariableScope Scope,
-                          const std::vector<std::string>& Args = {
-                              "-std=c++17", "-xc++"}) -> std::string;
+auto rewriteVariableNames(
+    llvm::StringRef Code, VariableRenameCallback CB, VariableScope Scope,
+    const std::vector<std::string>& Args = {"-std=c++17", "-xc++"},
+    const std::vector<std::pair<std::string, std::string>>& VirtualFiles = {})
+    -> std::string;
+
+/// Test helper for several rules at once (in-memory TU, rules in order).
+auto rewriteWithRules(
+    llvm::StringRef Code,
+    const std::vector<std::pair<VariableScope, VariableRenameCallback>>& Rules,
+    const std::vector<std::string>& Args = {"-std=c++17", "-xc++"})
+    -> std::string;
 
 #endif  // CPP_FORMATTING_RENAME_VARIABLES_LIB_H_

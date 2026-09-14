@@ -518,6 +518,7 @@ cc_test(
         "-DGTEST_HAS_RTTI=0",
     ],
     deps = [
+        ":naming_convention",
         ":rename_variables_lib",
         "@googletest//:gtest",
         "@googletest//:gtest_main",

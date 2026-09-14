@@ -1,0 +1,13 @@
+# A checked-in fixture for the `type` and `namespace` scopes: a namespace, a
+# nested namespace, an aggregate, a nested struct, an enum, a typedef, an
+# alias, a class template with STL protocol members, a class with out-of-line
+# constructor and destructor, a namespace alias and a using-directive, all
+# written against the Google style so that every one of them has to move --
+# across three targets, so the spellings in a dependent's TU are reached
+# through --owned-files, and with a dependent type name (`typename R::dims`)
+# that only the instantiating TUs can resolve.  RUN_TESTS=1: shapes_test
+# exercises the renamed code, not merely its compilation.
+REPO_KIND=local
+REPO_PATH=e2e/testdata/naming_repo
+TARGET_PATTERN='//...'
+RUN_TESTS=1

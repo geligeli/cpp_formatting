@@ -3,7 +3,7 @@
 # the target repo, and wire the vendored cpp_format kit into it.
 #
 # Sourced by run_e2e.sh.  Expects assert.sh to be sourced first, and these
-# globals to be set by the driver: REPO_ROOT, WORK, TOOL_SPEC, TOOL_CONFIG.
+# globals to be set by the driver: REPO_ROOT, WORK, TOOL_SPEC.
 #
 # Exports on success: TOOL_BIN, TOOL_VERSION, TOOL_BASE_URL, TOOL_SHA256, TOOL_ASSET.
 
@@ -51,8 +51,7 @@ stage_tool() {
     # Build from source in this repo.  Deliberately a separate Bazel server from
     # the target repo's; shut it down afterwards so the LLVM build's memory is
     # released before the target's server starts.
-    local cfg=()
-    [[ "$TOOL_CONFIG" == opt ]] && cfg=(-c opt)
+    local cfg=(-c opt)
     # shellcheck disable=SC2086  # E2E_TOOL_BAZEL_FLAGS is an intentional word list
     if ! run_logged "$logdir/tool-build.log" \
            env -C "$REPO_ROOT" bazel build "${cfg[@]}" ${E2E_TOOL_BAZEL_FLAGS:-} \
@@ -80,7 +79,7 @@ stage_tool() {
 
   local desc="$TOOL_VERSION"
   if [[ "$TOOL_SPEC" == source ]]; then
-    desc="$desc (HEAD $(git -C "$REPO_ROOT" rev-parse --short HEAD), $TOOL_CONFIG)"
+    desc="$desc (HEAD $(git -C "$REPO_ROOT" rev-parse --short HEAD))"
   fi
   pass "cpp_format $desc"
 }
@@ -105,7 +104,18 @@ materialize() {
 
   # A depth-1 fetch of a pinned SHA: immutable by construction, so no tarball
   # hash bookkeeping, and ~10-30 MB even for a large repo.
-  if [[ -n "${FRESH:-}" ]]; then rm -rf "$src"; fi
+  #
+  # --fresh also discards the workspace's Bazel output base.  Bazel keys it by
+  # the workspace *path*, so a checkout re-created at the same path finds the
+  # previous one's action cache -- and its emit records -- still there; the
+  # `check` tripwire then reports stale records from a build that no longer
+  # exists.  An expunge is the only thing that clears it.
+  if [[ -n "${FRESH:-}" ]]; then
+    if [[ -f "$src/MODULE.bazel" ]]; then
+      env -C "$src" bazel clean --expunge >/dev/null 2>&1 || true
+    fi
+    rm -rf "$src"
+  fi
   if [[ -d "$src/.git" ]] && git -C "$src" rev-parse -q --verify "$REPO_REV^{commit}" >/dev/null 2>&1; then
     # Already fetched: restoring is much cheaper than refetching.
     git -C "$src" reset -q --hard "$REPO_REV" || { fail "git reset failed"; return 1; }
@@ -144,6 +154,61 @@ _git_init_pristine() {
   git -C "$src" tag -f e2e-pristine >/dev/null
 }
 
+# _strip_cpp_format_wiring <MODULE.bazel> -- remove a target repo's *own*
+# cpp_format wiring, so wire() can put the binary under test in its place.
+#
+# A repo that already uses the kit (game_arena does: bazel_dep +
+# archive_override on a published tag, plus a release() pin) declares
+# @cpp_format_bin itself.  Appending the harness's use_repo next to it is a
+# duplicate repo name, and leaving the repo's own pin in place would test a
+# *published* binary rather than the one this run built -- silently, and always
+# green.  So the wiring goes, and the harness's replaces it.
+#
+# Removal is by top-level statement, not by line: archive_override(),
+# use_extension() and release() all span several lines.  A statement is
+# everything from a line that starts at paren depth 0 until the parens balance
+# again; it is dropped, together with the comment block directly above it, when
+# its own text mentions cpp_format.  The comments are judged by what follows
+# them, never by their own text, so a comment that happens to mention the
+# formatter does not take an unrelated statement with it.
+_strip_cpp_format_wiring() {
+  local module="$1"
+  grep -qi 'cpp_format' "$module" 2>/dev/null || return 0
+  local tmp="$module.e2e-stripped"
+  awk '
+    function cnt(s, c,   n, i) {
+      n = 0
+      for (i = 1; i <= length(s); i++) if (substr(s, i, 1) == c) n++
+      return n
+    }
+    function emit(   i) {
+      if (tolower(stext) !~ /cpp_format/) {
+        for (i = 1; i <= nc; i++) print cbuf[i]
+        for (i = 1; i <= ns; i++) print sbuf[i]
+      }
+      nc = 0; ns = 0; stext = ""
+    }
+    BEGIN { nc = 0; ns = 0; depth = 0; stext = "" }
+    {
+      if (depth == 0 && ns == 0) {
+        if ($0 ~ /^[[:space:]]*$/) {
+          for (i = 1; i <= nc; i++) print cbuf[i]
+          nc = 0
+          print
+          next
+        }
+        if ($0 ~ /^[[:space:]]*#/) { cbuf[++nc] = $0; next }
+      }
+      sbuf[++ns] = $0
+      stext = stext "\n" $0
+      depth += cnt($0, "(") - cnt($0, ")")
+      if (depth <= 0) { depth = 0; emit() }
+    }
+    END { if (ns > 0) emit(); for (i = 1; i <= nc; i++) print cbuf[i] }
+  ' "$module" > "$tmp" && mv "$tmp" "$module"
+  note "  stripped the target repo's own cpp_format wiring from MODULE.bazel"
+}
+
 # wire <src-dir> <ruleset-yaml> <disk-cache-dir> -- inject the vendored kit, the
 # ruleset, and the harness's Bazel settings, then commit so that everything
 # `git diff` reports afterwards is exactly what the tool wrote.
@@ -158,8 +223,10 @@ wire() {
      "$src/third_party/cpp_format/"
   install -m 0755 "$REPO_ROOT/bazel/integration/cpp_format.sh" "$src/tools/cpp_format.sh"
 
-  # 2. Wire the staged binary in through the kit's own release() tag class.
+  # 2. Wire the staged binary in through the kit's own release() tag class,
+  #    after taking out any wiring the repo already had of its own.
   [[ -f "$src/MODULE.bazel" ]] || printf 'module(name = "e2e_target")\n' > "$src/MODULE.bazel"
+  _strip_cpp_format_wiring "$src/MODULE.bazel"
 
   # A *vendored* kit lives in the root module, so its `load("@rules_cc//...")`
   # resolves through the root module's repo mapping -- which means the consumer
@@ -198,14 +265,23 @@ wire() {
       >> "$root_build"
   fi
 
-  # 4. Bazel settings.  The workspace rc is read after /etc/bazel.bazelrc, so
-  #    these win over the devcontainer's machine-wide defaults -- which matters
-  #    most for --disk_cache: edit records hold absolute paths, so two
-  #    workspaces sharing a disk cache can restore each other's records.
+  # 4. Bazel settings.  Appended last, and to the workspace rc, so they win
+  #    over both the devcontainer's machine-wide defaults and anything the
+  #    target repo set for itself -- which matters most for --disk_cache: edit
+  #    records hold absolute paths, so two workspaces sharing a disk cache can
+  #    restore each other's records.  Both a `common` and a `build` line: a
+  #    repo that points its own rc at a shared cache does so for every command
+  #    (game_arena's /large_nfs), and only a `common` line reaches `bazel
+  #    query`; but Bazel applies every `common` option *before* the
+  #    command-specific ones whatever file they came from, so against the
+  #    devcontainer's system-rc `build --disk_cache` only a `build` line wins.
+  #    The `applied` phase's tripwire is what caught that: two scenarios
+  #    running at once restored each other's records through the system cache.
   {
     printf '\n# ---- cpp_format e2e harness (appended, do not commit) ----\n'
     printf 'common --lockfile_mode=off\n'
     printf 'common --repository_cache=%s\n' "$WORK/repo-cache"
+    printf 'common --disk_cache=%s\n' "$disk_cache"
     printf 'build --disk_cache=%s\n' "$disk_cache"
     printf 'build --spawn_strategy=local\n'
     printf 'build --experimental_convenience_symlinks=ignore\n'

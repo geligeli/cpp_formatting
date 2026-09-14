@@ -1,0 +1,5 @@
+# The six-rule Google ruleset over the fixture written for its two newest
+# scopes: every type and namespace in it is spelled against the style.
+REPO=naming_repo
+RULESET=google_style
+EXPECT=pass

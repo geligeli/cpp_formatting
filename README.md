@@ -369,6 +369,8 @@ bazel run //cpp_formatting:normalize_variables -- \
 | `static_global` | file- and namespace-scope variables declared `static` |
 | `const_global` | file- and namespace-scope variables that are `const` or `constexpr` |
 | `method` | member functions, static and non-static (never constructors, destructors, conversion functions, or overloaded operators; a virtual function is renamed together with its whole override hierarchy — if any override is declared outside the listed files, the rename is skipped) |
+| `type` | classes, structs, unions, enums (nested ones too), class templates, typedefs and aliases; STL protocol names such as `value_type` and `iterator` are never renamed |
+| `namespace` | named namespaces and namespace aliases; the closing `}  // namespace x` comment is rewritten with the declaration |
 
 **Cross-file renaming:** list all files that share declarations — order does not matter. The tool parses every non-header first and every header after them (each group in parallel), so each `.cpp` is parsed against the original on-disk header content and the header sees what the `.cpp` files instantiated; edits are buffered per TU and committed atomically once every TU has been processed.
 
@@ -476,7 +478,7 @@ const_placement: east
 return_types: trailing
 
 # Rename variables — multiple rules are applied in order.
-# Supported scopes: member, local, global,
+# Supported scopes: member, local, global, type, namespace,
 #                   static_member, const_member,
 #                   static_global, const_global, method
 normalize_variables:
@@ -526,7 +528,7 @@ bazel run //cpp_formatting:cpp_format -- \
 | `--trailing-return-types` | Enable the trailing-return-type pass (same as `--return-types=trailing`) |
 | `--return-types=<style>` | Return type style: `trailing` or `leading`. Cannot be combined with `--trailing-return-types`. |
 | `--const-placement=<style>` | Where cv-qualifiers go: `east` (`int const x`) or `west` (`const int x`) |
-| `--normalize-variables-scope=<scope>` | One of `member`, `local`, `global`, `static_member`, `const_member`, `static_global`, `const_global`, `method` |
+| `--normalize-variables-scope=<scope>` | One of `member`, `local`, `global`, `static_member`, `const_member`, `static_global`, `const_global`, `method`, `type`, `namespace` |
 | `--normalize-variables-style=<style>` | Target naming style |
 | `--in-place` / `-i` | Overwrite files on disk (default: dry-run) |
 | `--lint` | Analyze only — report violations, modify nothing, exit 1 if any are found |
