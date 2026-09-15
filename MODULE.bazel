@@ -20,6 +20,15 @@ bazel_dep(name = "rules_pkg", version = "1.2.0")
 # release whose own abseil pin has the fix.
 bazel_dep(name = "protobuf", version = "31.1")
 
+# The code browser (//code_browser): an HTTP server on Boost.Beast/Asio over an
+# index imported into SQLite.  The three Boost modules pull the rest of Boost in
+# transitively; nothing SSL is fetched (boost.asio's ssl flag defaults to off).
+# sqlite3 is the BCR amalgamation with default options (thread-safe, no FTS5 --
+# the browser's search uses its own trigram table).
+bazel_dep(name = "boost.asio", version = "1.90.0.bcr.1")
+bazel_dep(name = "boost.beast", version = "1.90.0.bcr.1")
+bazel_dep(name = "sqlite3", version = "3.53.4")
+
 # Transitive dependencies required by the LLVM Bazel overlay's BUILD files.
 bazel_dep(name = "bazel_skylib", version = "1.8.2")
 bazel_dep(name = "platforms", version = "1.0.0")

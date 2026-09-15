@@ -59,10 +59,22 @@ cpp_format_targets(
 # definitions and references across both, as byte ranges.
 cpp_index_targets(
     name = "index",
+    # //code_browser:smoke_test serves this index over a copy of the sources.
+    visibility = ["//code_browser:__pkg__"],
     deps = [
         ":demo",
         ":demo_main",
     ],
+)
+
+exports_files(
+    [
+        "budget.h",
+        "demo.cpp",
+        "demo.h",
+        "demo_main.cpp",
+    ],
+    visibility = ["//code_browser:__pkg__"],
 )
 
 # Reads the merged index back with `cpp_format --dump-index` and asserts the

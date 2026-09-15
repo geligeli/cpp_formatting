@@ -17,6 +17,13 @@
 
 build --spawn_strategy=local
 
+# //code_browser is C++20 (Boost.Asio coroutines).  The BCR boost.asio module
+# compiles Asio's separately-compiled source with the toolchain's default
+# standard (C++17 here), which leaves out impl/awaitable.ipp -- the coroutine
+# launch functions -- and the browser then fails to link.  Compile that one
+# external file with C++20 too; nothing else in the build sees the flag.
+build --per_file_copt=external/boost\.asio.*@-std=c++20
+
 # Pick up build:linux / build:macos / build:windows sections below based on
 # the host platform.
 common --enable_platform_specific_config

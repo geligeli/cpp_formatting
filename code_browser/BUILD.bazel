@@ -1,0 +1,262 @@
+# The code browser: an HTTP server (Boost.Beast/Asio) that serves a git
+# checkout with every indexed token annotated from the symbol index, which it
+# reads from SQLite.  See README.md and the "code_browser" section of AGENTS.md.
+load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+# Asio's coroutines need C++20; every target that includes a header from this
+# package is built with it (the rest of the repo stays on the toolchain
+# default).  .bazelrc compiles the BCR boost.asio source the same way.
+CODE_BROWSER_COPTS = ["-std=c++20"]
+
+TEST_COPTS = CODE_BROWSER_COPTS + ["-DGTEST_HAS_RTTI=0"]
+
+proto_library(
+    name = "api_proto",
+    srcs = ["api.proto"],
+    deps = ["//cpp_formatting:index_proto"],
+)
+
+cc_proto_library(
+    name = "api_cc_proto",
+    deps = [":api_proto"],
+)
+
+cc_library(
+    name = "sqlite_util",
+    srcs = ["sqlite_util.cpp"],
+    hdrs = ["sqlite_util.h"],
+    copts = CODE_BROWSER_COPTS,
+    deps = ["@sqlite3//:sqlite3"],
+)
+
+cc_library(
+    name = "index_schema",
+    srcs = ["index_schema.cpp"],
+    hdrs = ["index_schema.h"],
+    copts = CODE_BROWSER_COPTS,
+    deps = [
+        ":sqlite_util",
+        "//cpp_formatting:index_cc_proto",
+        "@sqlite3//:sqlite3",
+    ],
+)
+
+cc_binary(
+    name = "index_import",
+    srcs = ["index_import.cpp"],
+    copts = CODE_BROWSER_COPTS,
+    linkstatic = True,
+    visibility = ["//visibility:public"],
+    deps = [
+        ":index_schema",
+        "//cpp_formatting:cpp_index_merge",
+        "//cpp_formatting:index_cc_proto",
+        "@llvm-project//llvm:Support",
+    ],
+)
+
+cc_library(
+    name = "index_db",
+    srcs = ["index_db.cpp"],
+    hdrs = ["index_db.h"],
+    copts = CODE_BROWSER_COPTS,
+    deps = [
+        ":index_schema",
+        ":sqlite_util",
+        "//cpp_formatting:index_cc_proto",
+        "@sqlite3//:sqlite3",
+    ],
+)
+
+cc_test(
+    name = "index_db_test",
+    size = "small",
+    srcs = ["index_db_test.cpp"],
+    copts = TEST_COPTS,
+    deps = [
+        ":index_db",
+        "//cpp_formatting:cpp_index_merge",
+        "//cpp_formatting:index_cc_proto",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "repo",
+    srcs = ["repo.cpp"],
+    hdrs = ["repo.h"],
+    copts = CODE_BROWSER_COPTS,
+    deps = ["//cpp_formatting:index_cc_proto"],
+)
+
+cc_library(
+    name = "file_cache",
+    srcs = ["file_cache.cpp"],
+    hdrs = ["file_cache.h"],
+    copts = CODE_BROWSER_COPTS,
+    deps = [":repo"],
+)
+
+cc_test(
+    name = "repo_test",
+    size = "small",
+    srcs = ["repo_test.cpp"],
+    copts = TEST_COPTS,
+    deps = [
+        ":file_cache",
+        ":repo",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "api",
+    srcs = ["api.cpp"],
+    hdrs = ["api.h"],
+    copts = CODE_BROWSER_COPTS,
+    deps = [
+        ":api_cc_proto",
+        ":file_cache",
+        ":index_db",
+        ":repo",
+        "//cpp_formatting:cpp_index_merge",
+        "//cpp_formatting:index_cc_proto",
+        "@protobuf//:protobuf",
+    ],
+)
+
+cc_test(
+    name = "api_test",
+    size = "small",
+    srcs = ["api_test.cpp"],
+    copts = TEST_COPTS,
+    deps = [
+        ":api",
+        ":api_cc_proto",
+        ":file_cache",
+        ":index_db",
+        ":repo",
+        "//cpp_formatting:cpp_index_merge",
+        "//cpp_formatting:index_cc_proto",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@protobuf//:protobuf",
+    ],
+)
+
+# The pages, embedded so the binary is self-contained.  --assets-dir serves
+# web/ from disk instead while they are being edited.
+[
+    genrule(
+        name = "web_" + name.replace(".", "_") + "_cc",
+        srcs = ["web/" + name],
+        outs = ["web_" + name.replace(".", "_") + ".cc"],
+        cmd = "$(execpath //cpp_formatting:embed_file) $(location web/" + name + ") $@ " + symbol,
+        tools = ["//cpp_formatting:embed_file"],
+    )
+    for name, symbol in [
+        ("index.html", "kWebIndexHtml"),
+        ("app.js", "kWebAppJs"),
+        ("app.css", "kWebAppCss"),
+    ]
+]
+
+cc_library(
+    name = "static_assets",
+    srcs = [
+        "static_assets.cpp",
+        ":web_app_css_cc",
+        ":web_app_js_cc",
+        ":web_index_html_cc",
+    ],
+    hdrs = ["static_assets.h"],
+    copts = CODE_BROWSER_COPTS,
+)
+
+cc_library(
+    name = "http_server",
+    srcs = ["http_server.cpp"],
+    hdrs = ["http_server.h"],
+    copts = CODE_BROWSER_COPTS,
+    deps = [
+        ":api",
+        ":static_assets",
+        "@boost.asio",
+        "@boost.beast",
+    ],
+)
+
+cc_binary(
+    name = "code_browser",
+    srcs = ["main.cpp"],
+    copts = CODE_BROWSER_COPTS,
+    linkstatic = True,
+    visibility = ["//visibility:public"],
+    deps = [
+        ":api",
+        ":file_cache",
+        ":http_server",
+        ":index_db",
+        ":index_schema",
+        ":repo",
+        ":static_assets",
+        "//cpp_formatting:cpp_index_merge",
+        "//cpp_formatting:index_cc_proto",
+        "@llvm-project//llvm:Support",
+    ],
+)
+
+cc_binary(
+    name = "http_get",
+    srcs = ["tools/http_get.cpp"],
+    copts = CODE_BROWSER_COPTS,
+    deps = [
+        "@boost.asio",
+        "@boost.beast",
+    ],
+)
+
+cc_test(
+    name = "http_server_test",
+    size = "small",
+    srcs = ["http_server_test.cpp"],
+    copts = TEST_COPTS,
+    deps = [
+        ":api",
+        ":file_cache",
+        ":http_server",
+        ":index_db",
+        ":repo",
+        ":static_assets",
+        "//cpp_formatting:cpp_index_merge",
+        "//cpp_formatting:index_cc_proto",
+        "@boost.asio",
+        "@boost.beast",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+sh_test(
+    name = "smoke_test",
+    size = "medium",
+    srcs = ["smoke_test.sh"],
+    data = [
+        ":code_browser",
+        ":http_get",
+        ":index_import",
+        "//bazel/testdata:budget.h",
+        "//bazel/testdata:demo.cpp",
+        "//bazel/testdata:demo.h",
+        "//bazel/testdata:demo_main.cpp",
+        "//bazel/testdata:index.index",
+        "//cpp_formatting:cpp_format",
+    ],
+)

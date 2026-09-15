@@ -406,6 +406,7 @@ cc_library(
     name = "cpp_index_merge",
     srcs = ["cpp_index_merge.cpp"],
     hdrs = ["cpp_index_merge.h"],
+    visibility = ["//code_browser:__pkg__"],
     deps = [
         ":index_cc_proto",
         "@llvm-project//llvm:Support",
@@ -538,6 +539,7 @@ pkg_tar(
 cc_binary(
     name = "embed_file",
     srcs = ["embed_file.cpp"],
+    visibility = ["//code_browser:__pkg__"],
 )
 
 # Convert clang_include_headers.tar.gz into a C++ source file embedding the
