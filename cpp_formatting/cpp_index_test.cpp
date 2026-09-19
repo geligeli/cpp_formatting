@@ -1,10 +1,17 @@
 #include <gtest/gtest.h>
 
+#include <cstddef>
+#include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "clang/Tooling/Tooling.h"
 #include "cpp_formatting/cpp_index_lib.h"
 #include "cpp_formatting/cpp_index_merge.h"
+#include "cpp_formatting/index.pb.h"
+#include "google/protobuf/message.h"
+#include "llvm/ADT/StringRef.h"
 
 using cpp_index::IndexUnit;
 using cpp_index::Occurrence;

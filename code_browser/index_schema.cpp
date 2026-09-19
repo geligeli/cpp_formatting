@@ -2,12 +2,13 @@
 
 #include <sqlite3.h>
 
-#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
+#include <initializer_list>
+#include <system_error>
 #include <unordered_set>
 #include <vector>
 

@@ -7,8 +7,10 @@
 // index.proto for the schema and cpp_index_merge.h for what happens to the
 // units afterwards.
 
+#include <cstddef>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "clang/Frontend/FrontendAction.h"

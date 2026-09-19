@@ -5,7 +5,11 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <compare>
+#include <cstdlib>
 #include <filesystem>
+#include <system_error>
+#include <tuple>
 #include <utility>
 
 #include "code_browser/sqlite_util.h"
@@ -205,6 +209,7 @@ auto IndexDb::Acquire() const -> Lease {
   return Lease(*this, std::move(c));
 }
 
+IndexDb::IndexDb() = default;
 IndexDb::~IndexDb() = default;
 
 auto IndexDb::Open(const std::string& path, std::string* error)

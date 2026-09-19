@@ -1,0 +1,90 @@
+# include-what-you-use mappings for this repository, passed to every run by
+# //tools/iwyu:iwyu.bzl.  Format:
+# https://github.com/include-what-you-use/include-what-you-use/blob/master/docs/IWYUMappings.md
+#
+# Every entry is here because IWYU suggested something nobody should write;
+# the comment says what it suggested.  `private` means "never name this
+# header"; the header on the right is what to include instead, and when
+# several lines map the same private header, any one of them satisfies IWYU.
+[
+  # --- C++ standard library --------------------------------------------------
+  # libstdc++ 15 is newer than the mappings IWYU 0.25 ships: it finds these in
+  # whichever header happens to forward-declare them first (<iterator> for
+  # pair, <format> for vector, <variant> for tuple).
+  { symbol: ["std::pair", private, "<utility>", public] },
+  { symbol: ["std::vector", private, "<vector>", public] },
+  { symbol: ["std::tuple", private, "<tuple>", public] },
+
+  # --- LLVM / Clang ----------------------------------------------------------
+  # Found at a forward declaration in an unrelated header (ArrayRef in
+  # APInt.h, SmallPtrSetImpl in IR/Type.h).
+  { symbol: ["llvm::ArrayRef", private, "\"llvm/ADT/ArrayRef.h\"", public] },
+  { symbol: ["llvm::SmallPtrSetImpl", private, "\"llvm/ADT/SmallPtrSet.h\"", public] },
+  { symbol: ["llvm::SmallPtrSet", private, "\"llvm/ADT/SmallPtrSet.h\"", public] },
+  { symbol: ["llvm::raw_ostream", private, "\"llvm/Support/raw_ostream.h\"", public] },
+
+  # Implementation headers behind a public one.
+  { include: ["<llvm/Support/FormatVariadicDetails.h>", private, "\"llvm/Support/FormatVariadic.h\"", public] },
+  { include: ["\"llvm/Support/FormatVariadicDetails.h\"", private, "\"llvm/Support/FormatVariadic.h\"", public] },
+  { include: ["<clang/ASTMatchers/ASTMatchersInternal.h>", private, "\"clang/ASTMatchers/ASTMatchers.h\"", public] },
+  { include: ["\"clang/ASTMatchers/ASTMatchersInternal.h\"", private, "\"clang/ASTMatchers/ASTMatchers.h\"", public] },
+  { include: ["<clang/ASTMatchers/ASTMatchersMacros.h>", private, "\"clang/ASTMatchers/ASTMatchers.h\"", public] },
+  { include: ["\"clang/ASTMatchers/ASTMatchersMacros.h\"", private, "\"clang/ASTMatchers/ASTMatchers.h\"", public] },
+
+  # The default allocator of StringMap / BumpPtrAllocator, never named here.
+  { include: ["<llvm/Support/AllocatorBase.h>", private, "\"llvm/Support/Allocator.h\"", public] },
+  { include: ["<llvm/Support/AllocatorBase.h>", private, "\"llvm/ADT/StringMap.h\"", public] },
+  { include: ["<llvm/Support/AllocatorBase.h>", private, "\"llvm/ADT/StringSet.h\"", public] },
+
+  # --- zlib ------------------------------------------------------------------
+  { include: ["\"zconf.h\"", private, "<zlib.h>", public] },
+  { include: ["<zconf.h>", private, "<zlib.h>", public] },
+
+  # --- protobuf / abseil -----------------------------------------------------
+  # A generated header is the public interface of its messages, repeated
+  # fields included; nobody includes repeated_ptr_field.h to iterate one.
+  { include: ["\"google/protobuf/repeated_ptr_field.h\"", private, "\"cpp_formatting/index.pb.h\"", public] },
+  { include: ["\"google/protobuf/repeated_ptr_field.h\"", private, "\"code_browser/api.pb.h\"", public] },
+  { include: ["\"google/protobuf/repeated_field.h\"", private, "\"cpp_formatting/index.pb.h\"", public] },
+  { include: ["\"google/protobuf/repeated_field.h\"", private, "\"code_browser/api.pb.h\"", public] },
+
+  # abseil is reached only through protobuf's own API here (the absl::Status
+  # that the JSON functions return); it is not a dependency of ours.
+  { include: ["\"absl/status/status.h\"", private, "\"google/protobuf/json/json.h\"", public] },
+  { include: ["\"absl/status/status.h\"", private, "\"google/protobuf/util/json_util.h\"", public] },
+
+  # --- Boost -----------------------------------------------------------------
+  # Beast is used through its two umbrella headers, as its documentation does.
+  { include: ["@<boost/beast/core/.*>", private, "<boost/beast/core.hpp>", public] },
+  { include: ["@<boost/beast/http/.*>", private, "<boost/beast/http.hpp>", public] },
+
+  # Asio's implementation directories.  A free function template lives in
+  # impl/<name>.hpp behind the public <name>.hpp that declares it -- mapped one
+  # by one, because a regex cannot carry the name across, and a blanket mapping
+  # to some other header makes IWYU call the right include unused.  Everything
+  # else in there is machinery; every Asio user here runs an io_context, so
+  # that is the header that stands for it.
+  { include: ["<boost/asio/impl/co_spawn.hpp>", private, "<boost/asio/co_spawn.hpp>", public] },
+  { include: ["<boost/asio/impl/connect.hpp>", private, "<boost/asio/connect.hpp>", public] },
+  { include: ["<boost/asio/impl/read.hpp>", private, "<boost/asio/read.hpp>", public] },
+  { include: ["<boost/asio/impl/write.hpp>", private, "<boost/asio/write.hpp>", public] },
+  { include: ["<boost/asio/impl/awaitable.hpp>", private, "<boost/asio/awaitable.hpp>", public] },
+  { include: ["<boost/asio/impl/io_context.hpp>", private, "<boost/asio/io_context.hpp>", public] },
+  { include: ["<boost/asio/impl/execution_context.hpp>", private, "<boost/asio/io_context.hpp>", public] },
+  { include: ["@<boost/asio/(detail|execution)/.*>", private, "<boost/asio/io_context.hpp>", public] },
+  { include: ["@<boost/asio/ip/(detail|impl)/.*>", private, "<boost/asio/ip/tcp.hpp>", public] },
+  { include: ["<boost/asio/ip/basic_resolver_iterator.hpp>", private, "<boost/asio/ip/tcp.hpp>", public] },
+  { include: ["<boost/asio/ip/basic_resolver_results.hpp>", private, "<boost/asio/ip/tcp.hpp>", public] },
+  { include: ["<boost/asio/ip/basic_endpoint.hpp>", private, "<boost/asio/ip/tcp.hpp>", public] },
+  { include: ["<boost/asio/ip/address.hpp>", private, "<boost/asio/ip/tcp.hpp>", public] },
+  { include: ["<boost/asio/socket_base.hpp>", private, "<boost/asio/ip/tcp.hpp>", public] },
+  { include: ["<boost/asio/any_io_executor.hpp>", private, "<boost/asio/io_context.hpp>", public] },
+  { include: ["<boost/asio/async_result.hpp>", private, "<boost/asio/io_context.hpp>", public] },
+  { include: ["<boost/asio/associated_cancellation_slot.hpp>", private, "<boost/asio/io_context.hpp>", public] },
+  { include: ["<boost/asio/associated_immediate_executor.hpp>", private, "<boost/asio/io_context.hpp>", public] },
+  { include: ["<boost/asio/cancellation_type.hpp>", private, "<boost/asio/io_context.hpp>", public] },
+
+  # The Boost libraries Beast and Asio are built from.  Nothing here uses them
+  # directly; IWYU sees them through templates it instantiates on our types.
+  { include: ["@<boost/(intrusive|mp11|move|smart_ptr|optional|core|system|assert|config|type_traits|utility)/.*>", private, "<boost/beast/core.hpp>", public] },
+]

@@ -3,14 +3,15 @@
 // instead.  Exits 22 on a non-2xx status (curl -f), 1 on a connection error.
 //
 //   http_get [-I] [-H 'Name: value']... http://host:port/path
-#include <boost/asio/connect.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <cstdio>
+#include <exception>
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace beast = boost::beast;

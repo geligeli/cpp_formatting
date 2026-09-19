@@ -4,7 +4,9 @@
 
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "code_browser/file_cache.h"
 

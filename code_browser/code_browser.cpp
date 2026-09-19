@@ -6,11 +6,15 @@
 // The pages are embedded; --assets-dir=code_browser/web serves them from
 // disk instead while they are being developed.
 #include <chrono>
+#include <compare>
+#include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <string>
+#include <system_error>
 
 #include "code_browser/api.h"
 #include "code_browser/file_cache.h"
@@ -21,6 +25,7 @@
 #include "code_browser/static_assets.h"
 #include "cpp_formatting/cpp_index_merge.h"
 #include "cpp_formatting/index.pb.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/raw_ostream.h"
 

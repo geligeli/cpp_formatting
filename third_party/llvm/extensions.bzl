@@ -10,6 +10,14 @@ load("//third_party/llvm:configure.bzl", "llvm_configure")
 LLVM_VERSION = "21.1.8"
 LLVM_SHA256 = "7ba3f2a8d8fda88be18a31d011e8195d3b7f87f9fa92b20c94cba2d7f65b0e3f"
 
+# include-what-you-use is built against the Clang above and only ever supports
+# one Clang release per IWYU release (0.25 <-> Clang 21, the `clang_21`
+# branch), so the two pins move together: bump this whenever LLVM_VERSION
+# changes major version.  See https://include-what-you-use.org/ and
+# //third_party/iwyu.
+IWYU_VERSION = "0.25"
+IWYU_SHA256 = "2e8381368ec0a6ecb770834bce00fc62efa09a2b2f9710ed569acbb823ead9cc"
+
 def _zlib_shim_impl(rctx):
     rctx.file("BUILD.bazel", """\
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
@@ -58,6 +66,17 @@ def _llvm_impl(_module_ctx):
         sha256 = "7c42d56fac126929a6a85dbc73ff1db2411d04f104fae9bdea51305663a83fd0",
         strip_prefix = "zstd-1.5.2",
         urls = ["https://github.com/facebook/zstd/releases/download/v1.5.2/zstd-1.5.2.tar.gz"],
+    )
+
+    # Developer tooling (`tools/iwyu.sh`), never part of a shipped binary.  The
+    # repo is fetched lazily, so nothing is downloaded until something asks
+    # for @iwyu.
+    http_archive(
+        name = "iwyu",
+        build_file = "//third_party/iwyu:iwyu.BUILD",
+        sha256 = IWYU_SHA256,
+        strip_prefix = "include-what-you-use-" + IWYU_VERSION,
+        urls = ["https://github.com/include-what-you-use/include-what-you-use/archive/refs/tags/{v}.tar.gz".format(v = IWYU_VERSION)],
     )
 
     # Only the host backends are needed: the tools use Clang's AST/tooling

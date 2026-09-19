@@ -1,6 +1,7 @@
 #include "code_browser/file_cache.h"
 
 #include <algorithm>
+#include <optional>
 
 namespace code_browser {
 

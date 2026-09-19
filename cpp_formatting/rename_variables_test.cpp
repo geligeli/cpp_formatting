@@ -1,7 +1,13 @@
 #include <gtest/gtest.h>
 
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
 #include "cpp_formatting/naming_convention.h"
 #include "cpp_formatting/rename_variables_lib.h"
+#include "llvm/ADT/StringRef.h"
 
 // ---------------------------------------------------------------------------
 // Helpers

@@ -35,3 +35,8 @@ jobs:
         with:
           runCmd: |
             bazel test --disk_cache=/workspace/.disk_cache --repository_cache=/workspace/.bazel_cache //... --test_output=errors
+            # The BUILD files' deps are generated from the #includes; fail if
+            # they are stale (prints the diff `bazel run //tools/gazelle` would
+            # apply).  include-what-you-use is not gated here: its suggestions
+            # want review, and building it costs an LLVM code generator.
+            bazel run --disk_cache=/workspace/.disk_cache --repository_cache=/workspace/.bazel_cache //tools/gazelle -- -mode=diff

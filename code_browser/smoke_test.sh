@@ -10,7 +10,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 here="$PWD"
 browser="$here/code_browser/code_browser"
 import="$here/code_browser/index_import"
-get="$here/code_browser/http_get"
+get="$here/code_browser/tools/http_get"
 cpp_format="$here/cpp_formatting/cpp_format"
 index="$here/bazel/testdata/index.index.pb"
 [[ -x "$browser" && -x "$import" && -x "$get" && -f "$index" ]] \

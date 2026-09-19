@@ -8,7 +8,6 @@
 //   extern "C" const unsigned char <symbol>[];
 //   extern "C" const size_t <symbol>Size;
 
-#include <cstddef>
 #include <cstdio>
 #include <fstream>
 

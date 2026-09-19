@@ -1,3 +1,48 @@
 # Root package: exports the cpp_format ruleset consumed by the Bazel aspect in
 # bazel/cpp_format.bzl.
 exports_files(["cpp_format.yaml"])
+
+# Gazelle configuration (`bazel run //tools/gazelle`, see tools/gazelle/BUILD.bazel).
+# Directives are comments, so they cost nothing when this module is a
+# dependency; the targets that need @gazelle are in //tools/gazelle.
+#
+# One cc_library per header/source pair, which is how the packages are already
+# laid out -- the default would fold a directory into a single library.
+# gazelle:cc_group unit
+#
+# Not code Gazelle should own: rewrite fixtures and demo targets whose exact
+# shape is what their tests assert, the self-contained e2e workspaces, and
+# vendored build files.
+# gazelle:exclude bazel/testdata
+# gazelle:exclude cpp_formatting/testdata
+# gazelle:exclude e2e
+# gazelle:exclude third_party
+#
+# @llvm-project is not a BCR module, so gazelle_cc's built-in index does not
+# know its headers; this one is generated from the overlay's own BUILD files
+# by tools/gazelle/llvm_index.sh.
+# gazelle:cc_indexfile tools/gazelle/llvm.ccindex
+#
+# The built-in index knows zconf.h but not zlib.h.  This matters more than it
+# looks: `cc_unresolved_deps error` below only covers "quoted" includes -- an
+# <angled> one nothing resolves is taken for a system header and the dep is
+# dropped without a word, which is what happened to this one.
+# gazelle:resolve cc zlib.h @zlib//:zlib
+#
+# protobuf's public target, for every header of it: the built-in index names
+# internal sub-packages for some (io, json) and knows nothing for others
+# (message.h, text_format.h).
+# gazelle:resolve_regexp cc ^google/protobuf/ @protobuf//:protobuf
+#
+# The proto rules are written by hand (the proto language is not enabled, so
+# the cc_proto_library names stay ours); tell the C++ side where the generated
+# headers come from.
+# gazelle:resolve cc cpp_formatting/index.pb.h //cpp_formatting:index_cc_proto
+# gazelle:resolve cc code_browser/api.pb.h //code_browser:api_cc_proto
+#
+# Every test here takes its main() from gtest_main, which no #include names.
+# gtest_main exports gtest, so resolving the header to it gives a test both.
+# gazelle:resolve cc gtest/gtest.h @googletest//:gtest_main
+#
+# An include nothing resolves is an error rather than a silently missing dep.
+# gazelle:cc_unresolved_deps error

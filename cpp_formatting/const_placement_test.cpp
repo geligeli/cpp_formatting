@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <string>
+#include <vector>
 
 #include "cpp_formatting/const_placement_lib.h"
 

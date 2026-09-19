@@ -1,5 +1,7 @@
 #include "cpp_formatting/rename_state.h"
 
+#include "llvm/ADT/StringRef.h"
+
 void recordResolution(DependentResolutions& DepRes,
                       const std::pair<std::string, unsigned>& Key,
                       const std::string& NewName, llvm::StringRef OldName,

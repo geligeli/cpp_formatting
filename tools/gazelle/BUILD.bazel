@@ -1,0 +1,31 @@
+# Gazelle with the C++ extension (https://github.com/EngFlow/gazelle_cc):
+#
+#   bazel run //tools/gazelle                 # rewrite the BUILD files
+#   bazel run //tools/gazelle -- -mode=diff   # print what would change, exit 1
+#                                             # if anything would (the CI gate)
+#
+# It derives every cc_* target's `deps` / `implementation_deps` from the
+# #includes of its sources, so the dependency lists are a function of the code
+# rather than something maintained by hand.  The configuration -- which
+# directories it manages, how includes of external repositories resolve -- is
+# the `# gazelle:` directives in the root BUILD.bazel.
+#
+# The targets live here rather than in the root package because gazelle and
+# gazelle_cc are dev dependencies: a root BUILD file that loads from them would
+# not even load when this module is somebody's dependency.
+load("@gazelle//:def.bzl", "gazelle", "gazelle_binary")
+
+gazelle_binary(
+    name = "gazelle_cc",
+    languages = ["@gazelle_cc//language/cc"],
+)
+
+gazelle(
+    name = "gazelle",
+    gazelle = ":gazelle_cc",
+)
+
+# Header -> label index for @llvm-project, which is not a BCR module and so is
+# unknown to gazelle_cc's built-in index.  Regenerate it after an LLVM bump with
+# tools/gazelle/llvm_index.sh.
+exports_files(["llvm.ccindex"])

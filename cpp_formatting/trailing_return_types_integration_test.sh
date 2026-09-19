@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Integration tests for the trailing_return_types binary.
 #
-# Usage: integration_test.sh <binary> <input1> <expected1> <input2> <expected2> \
-#                             <input3> <expected3>
+# Usage: trailing_return_types_integration_test.sh <binary> \
+#          <input1> <expected1> <input2> <expected2> <input3> <expected3>
 #
 # Tests:
 #   1. Dry-run on a single file  — rewritten source goes to stdout.

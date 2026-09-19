@@ -2,13 +2,14 @@
 //
 //   index_import index.pb                 # writes index.pb.sqlite next to it
 //   index_import index.pb --out=x.sqlite --force
-#include <cstdio>
 #include <filesystem>
 #include <string>
+#include <system_error>
 
 #include "code_browser/index_schema.h"
 #include "cpp_formatting/cpp_index_merge.h"
 #include "cpp_formatting/index.pb.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/raw_ostream.h"
 

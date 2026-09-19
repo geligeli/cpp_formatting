@@ -1,7 +1,7 @@
 #ifndef CPP_FORMATTING_CPP_FORMAT_LIB_H_
 #define CPP_FORMATTING_CPP_FORMAT_LIB_H_
 
-#include <memory>
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <vector>
@@ -9,9 +9,11 @@
 #include "cpp_formatting/const_placement_lib.h"
 #include "cpp_formatting/lint_lib.h"
 #include "cpp_formatting/output_mode.h"
+#include "cpp_formatting/rename_state.h"
 #include "cpp_formatting/rename_variables_lib.h"
 #include "cpp_formatting/trailing_return_types_lib.h"
 #include "cpp_formatting/tu_driver.h"
+#include "llvm/Support/raw_ostream.h"
 
 // ---------------------------------------------------------------------------
 // NormalizeRule

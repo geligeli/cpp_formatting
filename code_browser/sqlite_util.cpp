@@ -2,6 +2,7 @@
 
 #include <sqlite3.h>
 
+#include <cstddef>
 #include <utility>
 
 namespace code_browser {
