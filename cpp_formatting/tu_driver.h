@@ -1,12 +1,14 @@
 #ifndef CPP_FORMATTING_TU_DRIVER_H_
 #define CPP_FORMATTING_TU_DRIVER_H_
 
+#include <cstddef>
 #include <memory>
 #include <set>
 #include <string>
 #include <unordered_set>
 #include <vector>
 
+#include "clang/Basic/SourceLocation.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Frontend/FrontendAction.h"
 #include "clang/Tooling/ArgumentsAdjusters.h"

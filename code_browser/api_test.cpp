@@ -10,6 +10,7 @@
 #include "code_browser/api.pb.h"
 #include "code_browser/file_cache.h"
 #include "code_browser/index_db.h"
+#include "code_browser/index_schema.h"
 #include "code_browser/repo.h"
 #include "cpp_formatting/cpp_index_merge.h"
 #include "cpp_formatting/index.pb.h"

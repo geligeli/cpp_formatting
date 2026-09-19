@@ -1,0 +1,6 @@
+# include-what-you-use for this repository: the aspect (iwyu.bzl), the mapping
+# file it passes to every run, and the driver script.  See iwyu.sh.
+exports_files([
+    "iwyu.bzl",
+    "mappings.imp",
+])

@@ -1,3 +1,12 @@
+# Install once with `pre-commit install`.  The hooks run in this order on
+# purpose: the includes are settled before the deps derived from them.
+#
+# buildifier goes last so it also formats whatever Gazelle just wrote (Gazelle
+# uses the same formatter, so that is normally nothing).
+#
+# The two Bazel hooks take no file names: Bazel already knows what changed, and
+# re-analyses only that.  They are serial because a workspace has one Bazel
+# server.
 repos:
   - repo: local
     hooks:
@@ -6,3 +15,45 @@ repos:
         entry: clang-format -i -style=file
         language: system
         files: \.(h|cpp)$
+
+      # include-what-you-use, check only: it prints what it would change and
+      # fails; `tools/iwyu/iwyu.sh fix` applies it.  Not a fixing hook like the
+      # other two because its edits want a look -- fix_includes.py is
+      # line-based and has rewritten C++ embedded in a test's raw string.
+      #
+      # One cached action per file, so a commit re-analyses the files it
+      # touches (and the .cpp files that include a touched header).  The very
+      # first run builds IWYU itself against the repo's Clang, which takes a
+      # while; `SKIP=iwyu git commit` gets past it.
+      - id: iwyu
+        name: include-what-you-use
+        entry: tools/iwyu/iwyu.sh check
+        language: system
+        pass_filenames: false
+        require_serial: true
+        # What iwyu.sh analyses by default, plus what decides its verdict.
+        files: ^((cpp_formatting|code_browser)/.*\.(h|cpp)|tools/iwyu/.*)$
+        exclude: ^cpp_formatting/testdata/
+
+      # Gazelle rewrites the cc_* deps from the #includes.  Like clang-format it
+      # fixes in place: when it changes a BUILD file the commit stops, and
+      # `git add` of the result lets it through.  An include nothing resolves is
+      # an error (`cc_unresolved_deps error` in the root BUILD.bazel).
+      - id: gazelle
+        name: Gazelle (cc deps from #includes)
+        entry: bazel run //tools/gazelle
+        language: system
+        pass_filenames: false
+        require_serial: true
+        files: (\.(h|cpp|proto)$|(^|/)BUILD(\.bazel)?$|^MODULE\.bazel$|^tools/gazelle/)
+        # The trees `# gazelle:exclude` keeps it out of.
+        exclude: ^(e2e|third_party|bazel/testdata|cpp_formatting/testdata)/
+
+      # Formatting only (no -lint): every BUILD, MODULE, .bzl and *.BUILD file,
+      # the e2e fixture workspaces included.  The binary is pinned in the
+      # devcontainer (BUILDIFIER_VERSION).
+      - id: buildifier
+        name: Buildifier
+        entry: buildifier -mode=fix -lint=off
+        language: system
+        files: ((^|/)(BUILD|WORKSPACE)(\.bazel)?|(^|/)MODULE\.bazel|\.bzl|\.BUILD)$

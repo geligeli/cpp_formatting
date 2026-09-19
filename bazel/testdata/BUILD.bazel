@@ -108,7 +108,7 @@ sh_test(
     srcs = ["browse_test.sh"],
     args = [
         "$(location :index.browse)",
-        "$(location //code_browser:http_get)",
+        "$(location //code_browser/tools:http_get)",
         "$(location budget.h)",
         "$(location demo.cpp)",
         "$(location demo.h)",
@@ -120,7 +120,7 @@ sh_test(
         "demo.h",
         "demo_main.cpp",
         ":index.browse",
-        "//code_browser:http_get",
+        "//code_browser/tools:http_get",
     ],
 )
 

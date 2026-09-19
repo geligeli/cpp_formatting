@@ -10,6 +10,32 @@ load("//third_party/llvm:configure.bzl", "llvm_configure")
 LLVM_VERSION = "21.1.8"
 LLVM_SHA256 = "7ba3f2a8d8fda88be18a31d011e8195d3b7f87f9fa92b20c94cba2d7f65b0e3f"
 
+# include-what-you-use is built against the Clang above and only ever supports
+# one Clang release per IWYU release (0.25 <-> Clang 21, the `clang_21`
+# branch), so the two pins move together: bump this whenever LLVM_VERSION
+# changes major version.  See https://include-what-you-use.org/ and
+# //third_party/iwyu.
+IWYU_VERSION = "0.25"
+IWYU_SHA256 = "2e8381368ec0a6ecb770834bce00fc62efa09a2b2f9710ed569acbb823ead9cc"
+
+def _zlib_shim_impl(rctx):
+    rctx.file("BUILD.bazel", """\
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+cc_library(
+    name = "zlib",
+    # What the overlay's own zlib target exports; llvm/Config reads it.
+    defines = ["LLVM_ENABLE_ZLIB=1"],
+    visibility = ["//visibility:public"],
+    deps = ["@zlib"],
+)
+""")
+
+# `@zlib` and `@rules_cc` resolve through this module's repo mapping (an
+# extension's repos see what the module hosting the extension sees), hence the
+# `bazel_dep(name = "zlib")` in MODULE.bazel.
+_zlib_shim = repository_rule(implementation = _zlib_shim_impl)
+
 def _llvm_impl(_module_ctx):
     http_archive(
         name = "llvm-raw",
@@ -25,13 +51,14 @@ def _llvm_impl(_module_ctx):
         urls = ["https://github.com/llvm/llvm-project/archive/refs/tags/llvmorg-{v}.tar.gz".format(v = LLVM_VERSION)],
     )
 
-    http_archive(
-        name = "llvm_zlib",
-        build_file = "@llvm-raw//utils/bazel/third_party_build:zlib-ng.BUILD",
-        sha256 = "e36bb346c00472a1f9ff2a0a4643e590a254be6379da7cddd9daeb9a7f296731",
-        strip_prefix = "zlib-ng-2.0.7",
-        urls = ["https://github.com/zlib-ng/zlib-ng/archive/refs/tags/2.0.7.zip"],
-    )
+    # The overlay links `@llvm_zlib//:zlib` into llvm:Support.  Upstream's
+    # recipe for that repo is a private copy of zlib-ng in zlib-compat mode --
+    # but protobuf already links the BCR `zlib` into the same binaries, and the
+    # two export the same symbols: one program, two zlibs, the winner of each
+    # symbol decided by link order.  AddressSanitizer reports it as an ODR
+    # violation on `deflate_copyright` before main() runs.  So `llvm_zlib` is a
+    # shim over the one zlib the module graph already has.
+    _zlib_shim(name = "llvm_zlib")
 
     http_archive(
         name = "llvm_zstd",
@@ -39,6 +66,17 @@ def _llvm_impl(_module_ctx):
         sha256 = "7c42d56fac126929a6a85dbc73ff1db2411d04f104fae9bdea51305663a83fd0",
         strip_prefix = "zstd-1.5.2",
         urls = ["https://github.com/facebook/zstd/releases/download/v1.5.2/zstd-1.5.2.tar.gz"],
+    )
+
+    # Developer tooling (`tools/iwyu.sh`), never part of a shipped binary.  The
+    # repo is fetched lazily, so nothing is downloaded until something asks
+    # for @iwyu.
+    http_archive(
+        name = "iwyu",
+        build_file = "//third_party/iwyu:iwyu.BUILD",
+        sha256 = IWYU_SHA256,
+        strip_prefix = "include-what-you-use-" + IWYU_VERSION,
+        urls = ["https://github.com/include-what-you-use/include-what-you-use/archive/refs/tags/{v}.tar.gz".format(v = IWYU_VERSION)],
     )
 
     # Only the host backends are needed: the tools use Clang's AST/tooling

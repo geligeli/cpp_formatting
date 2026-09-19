@@ -131,6 +131,32 @@ def _resource_dir(builtin_headers):
             return f.path[:idx] + "/staging"
     return None
 
+# The attributes a cc_* target's C++ dependencies arrive through.  Both are
+# followed: `implementation_deps` are compiled against exactly like `deps` --
+# their headers are included by this target's sources, so their declarations
+# are renamed at use sites here and their records belong to the same change --
+# they are just not re-exported to the target's own dependents.
+_DEP_ATTRS = ["deps", "implementation_deps"]
+
+def _cc_deps(ctx):
+    return [d for attr in _DEP_ATTRS for d in getattr(ctx.rule.attr, attr, [])]
+
+# The compilation context the target's own sources are compiled with.  A
+# target's CcInfo is what it exports, which by design leaves out its
+# `implementation_deps`; their include paths, defines and headers have to be
+# merged back in, or a source that includes one of their headers does not parse
+# ('sqlite3.h' file not found) and the target's compile_commands entry is wrong
+# in the same way.
+def _compilation_context(target, ctx):
+    contexts = [target[CcInfo].compilation_context] + [
+        d[CcInfo].compilation_context
+        for d in getattr(ctx.rule.attr, "implementation_deps", [])
+        if CcInfo in d
+    ]
+    if len(contexts) == 1:
+        return contexts[0]
+    return cc_common.merge_compilation_contexts(compilation_contexts = contexts)
+
 # The target's own `copts`, so the tool parses each file under the same
 # preprocessor conditions the compiler does.  abseil's randen_hwaes.cc is the
 # case: its body sits behind `#if ABSL_HAVE_ACCELERATED_AES`, which only
@@ -206,7 +232,7 @@ def _compile_commands_fragment(ctx, srcs, compiler, flags):
 def _aspect_impl(target, ctx):
     dep_infos = [
         d[CppFormatEditsInfo]
-        for d in getattr(ctx.rule.attr, "deps", [])
+        for d in _cc_deps(ctx)
         if CppFormatEditsInfo in d
     ]
     transitive = [i.records for i in dep_infos]
@@ -232,7 +258,7 @@ def _aspect_impl(target, ctx):
         )]
 
     cc_toolchain = find_cc_toolchain(ctx)
-    cc_ctx = target[CcInfo].compilation_context
+    cc_ctx = _compilation_context(target, ctx)
     compiler, flags = _compile_flags(ctx, cc_toolchain, cc_ctx)
 
     # The compilation-database fragment is written for every first-party target
@@ -360,7 +386,7 @@ def _aspect_impl(target, ctx):
 
 cpp_format_aspect = aspect(
     implementation = _aspect_impl,
-    attr_aspects = ["deps"],
+    attr_aspects = _DEP_ATTRS,
     fragments = ["cpp"],
     toolchains = use_cc_toolchain(),
     attrs = {
@@ -628,7 +654,7 @@ def _index_owned(ctx):
 def _index_aspect_impl(target, ctx):
     dep_infos = [
         d[CppIndexInfo]
-        for d in getattr(ctx.rule.attr, "deps", [])
+        for d in _cc_deps(ctx)
         if CppIndexInfo in d
     ]
     transitive = depset(transitive = [i.units for i in dep_infos])
@@ -651,7 +677,7 @@ def _index_aspect_impl(target, ctx):
         return [CppIndexInfo(units = transitive, headers = mine_headers)]
 
     cc_toolchain = find_cc_toolchain(ctx)
-    cc_ctx = target[CcInfo].compilation_context
+    cc_ctx = _compilation_context(target, ctx)
     _compiler, flags = _compile_flags(ctx, cc_toolchain, cc_ctx)
     builtin = ctx.files._builtin_headers
     res_dir = _resource_dir(builtin)
@@ -708,7 +734,7 @@ def _index_aspect_impl(target, ctx):
 
 cpp_index_aspect = aspect(
     implementation = _index_aspect_impl,
-    attr_aspects = ["deps"],
+    attr_aspects = _DEP_ATTRS,
     fragments = ["cpp"],
     toolchains = use_cc_toolchain(),
     attrs = {

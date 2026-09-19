@@ -5,6 +5,7 @@
 #ifndef CODE_BROWSER_FILE_CACHE_H_
 #define CODE_BROWSER_FILE_CACHE_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <list>

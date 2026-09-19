@@ -8,7 +8,7 @@
 set -euo pipefail
 
 launcher="$1"     # the generated index.browse.sh
-get="$2"          # code_browser/http_get
+get="$2"          # code_browser/tools/http_get
 shift 2
 srcs=("$@")       # runfiles-relative demo sources
 

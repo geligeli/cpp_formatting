@@ -2,7 +2,8 @@
 
 #include <gtest/gtest.h>
 
-#include <boost/asio/connect.hpp>
+#include <atomic>
+#include <boost/asio/buffer.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/beast/core.hpp>
@@ -11,13 +12,16 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "code_browser/api.h"
 #include "code_browser/file_cache.h"
 #include "code_browser/index_db.h"
+#include "code_browser/index_schema.h"
 #include "code_browser/repo.h"
 #include "code_browser/static_assets.h"
 #include "cpp_formatting/cpp_index_merge.h"

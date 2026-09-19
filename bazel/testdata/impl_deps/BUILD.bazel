@@ -1,0 +1,35 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//bazel:cpp_format.bzl", "cpp_format_targets", "cpp_index_targets")
+
+# Fixture for `implementation_deps`.  A target's CcInfo is what it *exports*,
+# and an implementation dep is by definition not exported -- so an aspect that
+# derives a target's compile command from its CcInfo alone loses the include
+# path below, and meter.cpp does not parse ('gauge.h' file not found).  That is
+# why gauge.h sits behind an `includes` directory of its own: next to meter.cpp
+# it would be found relative to the including file and prove nothing.
+cc_library(
+    name = "gauge",
+    hdrs = ["include/gauge.h"],
+    includes = ["include"],
+)
+
+cc_library(
+    name = "meter",
+    srcs = ["meter.cpp"],
+    hdrs = ["meter.h"],
+    implementation_deps = [":gauge"],
+)
+
+# :format.check is the test: building it runs the emit action for meter.cpp,
+# and passing it means the use of Gauge::level_ there was seen with gauge.h
+# owned (the aspect propagates along implementation_deps as it does along deps).
+cpp_format_targets(
+    name = "format",
+    deps = [":meter"],
+)
+
+# The same for the index aspect; `bazel build //...` builds :index.index.
+cpp_index_targets(
+    name = "index",
+    deps = [":meter"],
+)

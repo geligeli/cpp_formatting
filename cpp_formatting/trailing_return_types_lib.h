@@ -1,23 +1,22 @@
 #ifndef CPP_FORMATTING_TRAILING_RETURN_TYPES_LIB_H_
 #define CPP_FORMATTING_TRAILING_RETURN_TYPES_LIB_H_
 
+#include <cstddef>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "clang/AST/Decl.h"
 #include "clang/AST/TypeLoc.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
-#include "clang/Frontend/FrontendActions.h"
+#include "clang/Basic/SourceManager.h"
+#include "clang/Frontend/FrontendAction.h"
 #include "clang/Rewrite/Core/Rewriter.h"
 #include "cpp_formatting/lint_lib.h"
 #include "cpp_formatting/output_mode.h"
 #include "cpp_formatting/tu_driver.h"
 #include "llvm/ADT/StringRef.h"
-
-namespace clang {
-class ASTConsumer;
-class CompilerInstance;
-}  // namespace clang
 
 // ---------------------------------------------------------------------------
 // ReturnTypeStyle

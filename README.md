@@ -193,6 +193,27 @@ bazel build //cpp_formatting:normalize_variables
 bazel build //cpp_formatting:cpp_format
 ```
 
+### Keeping includes and BUILD deps in sync
+
+The `deps` of every `cc_*` target are generated from the `#include`s of its
+sources by [Gazelle](https://github.com/bazel-contrib/bazel-gazelle) with the
+[gazelle_cc](https://github.com/EngFlow/gazelle_cc) extension, and
+[include-what-you-use](https://include-what-you-use.org/) keeps the `#include`s
+themselves honest. After adding or removing an include:
+
+```sh
+tools/iwyu/iwyu.sh check       # optional: what IWYU would change (exit 1 if anything)
+tools/iwyu/iwyu.sh fix         # ... apply it; review the diff
+bazel run //tools/gazelle      # regenerate deps / implementation_deps
+```
+
+`pre-commit install` wires all of it into `git commit`: clang-format, an IWYU
+check, Gazelle and buildifier, in that order (see `.pre-commit-config.yaml`).
+CI fails when `bazel run //tools/gazelle -- -mode=diff` has anything to say.
+IWYU is built from source against the same Clang as the tools (the first run
+takes a while); its mappings live in `tools/iwyu/mappings.imp`. Both are
+dev-only and invisible to a repository that imports this one.
+
 ---
 
 ## `trailing_return_types`
@@ -1040,7 +1061,7 @@ cpp_formatting/
   trailing_return_types_lib.h             # public API: callback, action, test helper
   trailing_return_types_lib.cpp           # implementation
   trailing_return_types_test.cpp          # gtest unit tests
-  integration_test.sh                     # shell integration tests
+  trailing_return_types_integration_test.sh  # shell integration tests
 
   # const_placement
   const_placement.cpp                     # main(): CLI parsing, ActionFactory

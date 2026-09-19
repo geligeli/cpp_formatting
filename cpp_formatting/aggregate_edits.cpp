@@ -13,7 +13,9 @@
 #include <vector>
 
 #include "cpp_formatting/lint_lib.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
 

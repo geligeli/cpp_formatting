@@ -1,6 +1,7 @@
 #include "cpp_formatting/naming_convention.h"
 
 #include <cctype>
+#include <cstddef>
 
 // ---------------------------------------------------------------------------
 // Internal helpers

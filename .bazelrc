@@ -117,6 +117,67 @@ build:minify --action_env=CXX=clang++
 build:minify --features=fully_static_link
 build:minify --platform_suffix=-minify
 
+# Sanitizers: `bazel test --config=asan //...` (or tsan / ubsan).
+#
+# Everything in the target configuration is instrumented -- LLVM, protobuf and
+# Boost included -- because most of what these tools can get wrong is a lifetime
+# error on something of Clang's (a StringRef into a buffer that went away, an
+# AST node outliving its ASTContext), and the faulting access is then as likely
+# to be inside LLVM as in our code.  So the first build under each config is a
+# from-source LLVM build, and each config gets a --platform_suffix: its outputs
+# live in their own bazel-out directory and switching configs does not evict
+# anything.  Build tools (tablegen, protoc, the aspects' cpp_format) are in the
+# exec configuration, which --copt does not reach, and stay uninstrumented.
+#
+# -O1 rather than the fastbuild -O0: instrumented -O0 LLVM is too slow to run
+# the rename tests, and the sanitizers' documentation recommends it.  -g1 is
+# line tables and function names -- enough for a symbolized report -- without
+# the multi-gigabyte objects full debug info makes of LLVM.
+build:sanitizer --copt=-O1
+build:sanitizer --copt=-g1
+build:sanitizer --copt=-fno-omit-frame-pointer
+build:sanitizer --strip=never
+
+# AddressSanitizer (+ LeakSanitizer, which it includes on Linux).
+build:asan --config=sanitizer
+build:asan --platform_suffix=asan
+build:asan --copt=-fsanitize=address
+build:asan --linkopt=-fsanitize=address
+
+# ThreadSanitizer: the TU driver's worker pool (--jobs) and the code browser's
+# multi-threaded io_context are what it is for.
+build:tsan --config=sanitizer
+build:tsan --platform_suffix=tsan
+build:tsan --copt=-fsanitize=thread
+build:tsan --linkopt=-fsanitize=thread
+
+# UndefinedBehaviorSanitizer.  `vptr` is off because it needs RTTI and the whole
+# build is -fno-rtti (Clang refuses the combination outright; GCC drops the
+# check silently).  Without -fno-sanitize-recover a finding is a line on stderr
+# and a passing test.
+build:ubsan --config=sanitizer
+build:ubsan --platform_suffix=ubsan
+build:ubsan --copt=-fsanitize=undefined
+build:ubsan --copt=-fno-sanitize=vptr
+# The three null checks are off because of GCC, not because of us: any one of
+# them makes GCC drop -fdelete-null-pointer-checks, after which `&function ==
+# nullptr` is no longer a constant expression -- and abseil's hash containers
+# (so protobuf, so everything that links it) do exactly that in a constexpr:
+# "'(TypeErasedApplyToSlotFn<...> == 0)' is not a constant expression".  All
+# three have to go for abseil to compile; the cost is small, since a null
+# dereference still dies with SIGSEGV and --config=asan reports it with a stack.
+build:ubsan --copt=-fno-sanitize=null
+build:ubsan --copt=-fno-sanitize=nonnull-attribute
+build:ubsan --copt=-fno-sanitize=returns-nonnull-attribute
+build:ubsan --copt=-fno-sanitize-recover=all
+build:ubsan --linkopt=-fsanitize=undefined
+build:ubsan --test_env=UBSAN_OPTIONS=print_stacktrace=1
+
+# There is no msan config.  MemorySanitizer is Clang-only and needs an
+# instrumented C++ standard library as well -- against the system libstdc++ it
+# reports correct code (anything that reads what libstdc++.so wrote) -- so it
+# is a libc++ build and a toolchain switch, not a set of flags.
+
 # cpp_format lint: run the aspect over the build graph and materialise each
 # target's edit-record JSON (see bazel/cpp_format.bzl).  The failing lint gate
 # is `bazel test //path:<name>.check`; this config just builds the records

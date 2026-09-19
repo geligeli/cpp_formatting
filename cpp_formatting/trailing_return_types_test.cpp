@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <string>
+#include <vector>
+
 #include "cpp_formatting/trailing_return_types_lib.h"
 
 // ---------------------------------------------------------------------------

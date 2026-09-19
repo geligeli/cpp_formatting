@@ -1,13 +1,21 @@
 #include "cpp_formatting/lint_lib.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <fstream>
-#include <ios>
 #include <map>
+#include <memory>
 #include <set>
+#include <system_error>
 #include <tuple>
 #include <utility>
 
+#include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/Twine.h"
+#include "llvm/Support/Error.h"
+#include "llvm/Support/ErrorOr.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/JSON.h"

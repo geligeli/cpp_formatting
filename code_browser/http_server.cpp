@@ -1,7 +1,9 @@
 #include "code_browser/http_server.h"
 
+#include <algorithm>
 #include <atomic>
 #include <boost/asio/as_tuple.hpp>
+#include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/io_context.hpp>
@@ -12,10 +14,17 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
+#include <compare>
+#include <coroutine>
+#include <csignal>
 #include <cstdio>
 #include <exception>
 #include <mutex>
+#include <optional>
+#include <string_view>
 #include <thread>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 namespace code_browser {

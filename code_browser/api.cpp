@@ -3,8 +3,11 @@
 #include <algorithm>
 #include <charconv>
 #include <ctime>
+#include <filesystem>
+#include <initializer_list>
 #include <map>
 #include <memory>
+#include <system_error>
 
 #include "code_browser/api.pb.h"
 #include "cpp_formatting/cpp_index_merge.h"

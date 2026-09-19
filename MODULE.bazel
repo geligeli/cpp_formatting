@@ -5,6 +5,7 @@ module(
 
 # Good practice to include rules_cc when building C++ with Bzlmod
 bazel_dep(name = "rules_cc", version = "0.2.17")
+
 # 1.15.2 is what protobuf's abseil pin resolves the graph to anyway; naming it
 # here keeps Bazel's direct-dependency check quiet.
 bazel_dep(name = "googletest", version = "1.15.2")
@@ -29,18 +30,31 @@ bazel_dep(name = "boost.asio", version = "1.90.0.bcr.1")
 bazel_dep(name = "boost.beast", version = "1.90.0.bcr.1")
 bazel_dep(name = "sqlite3", version = "3.53.4")
 
+# The one zlib every binary links: protobuf's, LLVM's (through the `llvm_zlib`
+# shim in //third_party/llvm:extensions.bzl) and the embedded Clang resource
+# directory's.  The version is the one protobuf resolves the graph to.
+bazel_dep(name = "zlib", version = "1.3.1.bcr.5")
+
 # Transitive dependencies required by the LLVM Bazel overlay's BUILD files.
 bazel_dep(name = "bazel_skylib", version = "1.8.2")
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "rules_python", version = "1.9.0")
 bazel_dep(name = "apple_support", version = "1.24.1", repo_name = "build_bazel_apple_support")
 
+# BUILD file maintenance (`bazel run //tools/gazelle`): Gazelle with the C++
+# extension derives every cc_* target's deps from its #includes.  Dev-only --
+# nothing a consumer of the prebuilt kit builds needs them, and as ordinary
+# dependencies they would drag rules_go and a Go SDK into every consumer's
+# module graph.
+bazel_dep(name = "gazelle", version = "0.50.0", dev_dependency = True)
+bazel_dep(name = "gazelle_cc", version = "0.6.0", dev_dependency = True)
+
 # Clang/LLVM is built from source via LLVM's own Bazel overlay.  The Bazel
 # Central Registry only ships llvm-project up to 17.0.4, so newer Clang
 # releases (21.1.8 here) are pulled in through a local module extension that
 # fetches the monorepo source and runs the upstream `llvm_configure` rule.
 llvm = use_extension("//third_party/llvm:extensions.bzl", "llvm")
-use_repo(llvm, "llvm-project", "llvm-raw", "llvm_zlib", "llvm_zstd")
+use_repo(llvm, "iwyu", "llvm-project", "llvm-raw", "llvm_zlib", "llvm_zstd")
 
 # The prebuilt-binary kit's own extension, used through two proxies.  The
 # `use_extension`/`use_repo` pair is NOT a dev dependency: the kit's .bzl names

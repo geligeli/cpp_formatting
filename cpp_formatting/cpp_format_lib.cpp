@@ -2,15 +2,27 @@
 
 #include <fstream>
 #include <iterator>
+#include <map>
+#include <memory>
+#include <set>
 #include <utility>
 
+#include "clang/AST/ASTConsumer.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
 #include "clang/Basic/FileEntry.h"
+#include "clang/Basic/LLVM.h"
+#include "clang/Basic/SourceLocation.h"
+#include "clang/Basic/SourceManager.h"
 #include "clang/Frontend/CompilerInstance.h"
+#include "clang/Frontend/FrontendAction.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Rewrite/Core/Rewriter.h"
+#include "clang/Tooling/ArgumentsAdjusters.h"
 #include "cpp_formatting/const_placement_lib.h"
 #include "cpp_formatting/trailing_return_types_lib.h"
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/RewriteBuffer.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace clang;

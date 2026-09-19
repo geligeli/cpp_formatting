@@ -1,31 +1,29 @@
 #ifndef CPP_FORMATTING_RENAME_VARIABLES_LIB_H_
 #define CPP_FORMATTING_RENAME_VARIABLES_LIB_H_
 
+#include <cstddef>
 #include <functional>
-#include <map>
 #include <memory>
 #include <set>
 #include <string>
 #include <string_view>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
-#include "clang/Basic/Diagnostic.h"
-#include "clang/Tooling/Tooling.h"
+#include "clang/AST/ASTContext.h"
+#include "clang/AST/DeclBase.h"
+#include "clang/Basic/SourceLocation.h"
+#include "clang/Lex/Preprocessor.h"
 #include "cpp_formatting/lint_lib.h"
 #include "cpp_formatting/output_mode.h"
 #include "cpp_formatting/rename_state.h"
 #include "cpp_formatting/tu_driver.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
 
 namespace clang {
-class Preprocessor;
-class ASTConsumer;
-class ASTContext;
-class CompilerInstance;
 class Rewriter;
 }  // namespace clang
 

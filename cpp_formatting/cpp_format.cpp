@@ -1,5 +1,11 @@
+#include <cstddef>
+#include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
 #include <vector>
 
 #include "clang/Tooling/CommonOptionsParser.h"
@@ -10,9 +16,16 @@
 #include "cpp_formatting/embedded_clang_resource.h"
 #include "cpp_formatting/lint_lib.h"
 #include "cpp_formatting/naming_convention.h"
+#include "cpp_formatting/output_mode.h"
 #include "cpp_formatting/rename_variables_lib.h"
+#include "cpp_formatting/trailing_return_types_lib.h"
 #include "cpp_formatting/tu_driver.h"
+#include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Error.h"
+#include "llvm/Support/ErrorOr.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/YAMLTraits.h"

@@ -1,18 +1,24 @@
 #include "cpp_formatting/cpp_index_merge.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <fstream>
-#include <ios>
+#include <iterator>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
+#include <system_error>
 #include <tuple>
 #include <utility>
 #include <vector>
 
-#include "google/protobuf/io/zero_copy_stream_impl.h"
+#include "google/protobuf/io/coded_stream.h"
+#include "google/protobuf/io/zero_copy_stream_impl_lite.h"
 #include "google/protobuf/json/json.h"
 #include "google/protobuf/text_format.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/Support/ErrorOr.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 

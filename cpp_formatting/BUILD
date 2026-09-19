@@ -1,10 +1,14 @@
+load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
 load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
-load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
-load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
-load("@protobuf//bazel:proto_library.bzl", "proto_library")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+# Stated so that Gazelle leaves visibility alone: gazelle_cc makes every
+# library it touches public in a package that declares no default.
+package(default_visibility = ["//visibility:private"])
 
 cc_library(
     name = "output_mode",
@@ -15,9 +19,7 @@ cc_library(
     name = "lint_lib",
     srcs = ["lint_lib.cpp"],
     hdrs = ["lint_lib.h"],
-    deps = [
-        "@llvm-project//llvm:Support",
-    ],
+    deps = ["@llvm-project//llvm:Support"],
 )
 
 cc_test(
@@ -28,8 +30,8 @@ cc_test(
     ],
     deps = [
         ":lint_lib",
-        "@googletest//:gtest",
         "@googletest//:gtest_main",
+        "@llvm-project//llvm:Support",
     ],
 )
 
@@ -54,7 +56,6 @@ cc_test(
     ],
     deps = [
         ":rename_state",
-        "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
 )
@@ -67,6 +68,7 @@ cc_library(
     name = "tu_driver",
     srcs = ["tu_driver.cpp"],
     hdrs = ["tu_driver.h"],
+    implementation_deps = ["@llvm-project//clang:serialization"],
     deps = [
         ":lint_lib",
         ":rename_state",
@@ -85,10 +87,8 @@ cc_test(
     ],
     deps = [
         ":tu_driver",
-        "@googletest//:gtest",
         "@googletest//:gtest_main",
         "@llvm-project//clang:tooling",
-        "@llvm-project//llvm:Support",
     ],
 )
 
@@ -97,15 +97,19 @@ cc_library(
     name = "trailing_return_types_lib",
     srcs = ["trailing_return_types_lib.cpp"],
     hdrs = ["trailing_return_types_lib.h"],
+    implementation_deps = [
+        "@llvm-project//clang:lex",
+        "@llvm-project//clang:tooling",
+    ],
     deps = [
         ":lint_lib",
         ":output_mode",
         ":tu_driver",
+        "@llvm-project//clang:ast",
         "@llvm-project//clang:ast_matchers",
+        "@llvm-project//clang:basic",
         "@llvm-project//clang:frontend",
-        "@llvm-project//clang:lex",
         "@llvm-project//clang:rewrite",
-        "@llvm-project//clang:tooling",
         "@llvm-project//llvm:Support",
     ],
 )
@@ -117,12 +121,9 @@ cc_binary(
     deps = [
         ":embedded_clang_resource",
         ":lint_lib",
+        ":output_mode",
         ":trailing_return_types_lib",
         ":tu_driver",
-        "@llvm-project//clang:ast_matchers",
-        "@llvm-project//clang:frontend",
-        "@llvm-project//clang:lex",
-        "@llvm-project//clang:rewrite",
         "@llvm-project//clang:tooling",
         "@llvm-project//llvm:Support",
     ],
@@ -136,14 +137,13 @@ cc_test(
     ],
     deps = [
         ":trailing_return_types_lib",
-        "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
 )
 
 sh_test(
     name = "trailing_return_types_integration_test",
-    srcs = ["integration_test.sh"],
+    srcs = ["trailing_return_types_integration_test.sh"],
     args = [
         "$(location //cpp_formatting:trailing_return_types)",
         "$(location testdata/input.cpp)",
@@ -170,16 +170,18 @@ cc_library(
     name = "const_placement_lib",
     srcs = ["const_placement_lib.cpp"],
     hdrs = ["const_placement_lib.h"],
+    implementation_deps = [
+        "@llvm-project//clang:basic",
+        "@llvm-project//clang:lex",
+        "@llvm-project//clang:tooling",
+    ],
     deps = [
         ":lint_lib",
         ":output_mode",
         ":tu_driver",
         "@llvm-project//clang:ast",
-        "@llvm-project//clang:basic",
         "@llvm-project//clang:frontend",
-        "@llvm-project//clang:lex",
         "@llvm-project//clang:rewrite",
-        "@llvm-project//clang:tooling",
         "@llvm-project//llvm:Support",
     ],
 )
@@ -192,7 +194,6 @@ cc_test(
     ],
     deps = [
         ":const_placement_lib",
-        "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
 )
@@ -205,8 +206,8 @@ cc_binary(
         ":const_placement_lib",
         ":embedded_clang_resource",
         ":lint_lib",
+        ":output_mode",
         ":tu_driver",
-        "@llvm-project//clang:frontend",
         "@llvm-project//clang:tooling",
         "@llvm-project//llvm:Support",
     ],
@@ -239,7 +240,6 @@ cc_test(
     ],
     deps = [
         ":naming_convention",
-        "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
 )
@@ -248,15 +248,20 @@ cc_library(
     name = "rename_variables_lib",
     srcs = ["rename_variables_lib.cpp"],
     hdrs = ["rename_variables_lib.h"],
+    implementation_deps = [
+        "@llvm-project//clang:frontend",
+        "@llvm-project//clang:rewrite",
+        "@llvm-project//clang:serialization",
+        "@llvm-project//clang:tooling",
+    ],
     deps = [
         ":lint_lib",
         ":output_mode",
         ":rename_state",
         ":tu_driver",
         "@llvm-project//clang:ast",
-        "@llvm-project//clang:frontend",
-        "@llvm-project//clang:rewrite",
-        "@llvm-project//clang:tooling",
+        "@llvm-project//clang:basic",
+        "@llvm-project//clang:lex",
         "@llvm-project//llvm:Support",
     ],
 )
@@ -269,9 +274,9 @@ cc_binary(
         ":embedded_clang_resource",
         ":lint_lib",
         ":naming_convention",
+        ":output_mode",
         ":rename_variables_lib",
         ":tu_driver",
-        "@llvm-project//clang:frontend",
         "@llvm-project//clang:tooling",
         "@llvm-project//llvm:Support",
     ],
@@ -349,17 +354,23 @@ cc_library(
     name = "cpp_format_lib",
     srcs = ["cpp_format_lib.cpp"],
     hdrs = ["cpp_format_lib.h"],
+    implementation_deps = [
+        "@llvm-project//clang:ast",
+        "@llvm-project//clang:ast_matchers",
+        "@llvm-project//clang:basic",
+        "@llvm-project//clang:frontend",
+        "@llvm-project//clang:lex",
+        "@llvm-project//clang:rewrite",
+        "@llvm-project//clang:tooling",
+    ],
     deps = [
         ":const_placement_lib",
         ":lint_lib",
         ":output_mode",
+        ":rename_state",
         ":rename_variables_lib",
         ":trailing_return_types_lib",
         ":tu_driver",
-        "@llvm-project//clang:ast_matchers",
-        "@llvm-project//clang:frontend",
-        "@llvm-project//clang:rewrite",
-        "@llvm-project//clang:tooling",
         "@llvm-project//llvm:Support",
     ],
 )
@@ -377,9 +388,10 @@ cc_binary(
         ":embedded_clang_resource",
         ":lint_lib",
         ":naming_convention",
+        ":output_mode",
         ":rename_variables_lib",
+        ":trailing_return_types_lib",
         ":tu_driver",
-        "@llvm-project//clang:frontend",
         "@llvm-project//clang:tooling",
         "@llvm-project//llvm:Support",
     ],
@@ -410,7 +422,7 @@ cc_library(
     deps = [
         ":index_cc_proto",
         "@llvm-project//llvm:Support",
-        "@protobuf//:protobuf",
+        "@protobuf",
     ],
 )
 
@@ -422,7 +434,6 @@ cc_test(
     ],
     deps = [
         ":cpp_index_merge",
-        "@googletest//:gtest",
         "@googletest//:gtest_main",
         "@llvm-project//llvm:Support",
     ],
@@ -435,20 +446,23 @@ cc_library(
     name = "cpp_index_lib",
     srcs = ["cpp_index_lib.cpp"],
     hdrs = ["cpp_index_lib.h"],
-    deps = [
+    implementation_deps = [
         ":cpp_index_merge",
-        ":index_cc_proto",
         ":lint_lib",
-        ":rename_variables_lib",
-        ":tu_driver",
         "@llvm-project//clang:ast",
         "@llvm-project//clang:basic",
+        "@llvm-project//clang:lex",
+        "@llvm-project//clang:serialization",
+        "@protobuf",
+    ],
+    deps = [
+        ":index_cc_proto",
+        ":rename_variables_lib",
+        ":tu_driver",
         "@llvm-project//clang:frontend",
         "@llvm-project//clang:index",
-        "@llvm-project//clang:lex",
         "@llvm-project//clang:tooling",
         "@llvm-project//llvm:Support",
-        "@protobuf//:protobuf",
     ],
 )
 
@@ -461,9 +475,11 @@ cc_test(
     deps = [
         ":cpp_index_lib",
         ":cpp_index_merge",
-        "@googletest//:gtest",
+        ":index_cc_proto",
         "@googletest//:gtest_main",
         "@llvm-project//clang:tooling",
+        "@llvm-project//llvm:Support",
+        "@protobuf",
     ],
 )
 
@@ -521,16 +537,16 @@ cc_test(
     deps = [
         ":naming_convention",
         ":rename_variables_lib",
-        "@googletest//:gtest",
         "@googletest//:gtest_main",
+        "@llvm-project//llvm:Support",
     ],
 )
 
 pkg_tar(
     name = "clang_include_headers",
     srcs = ["@llvm-project//clang:builtin_headers_gen"],
-    strip_prefix = "/external/+llvm+llvm-project/clang/staging",
     extension = "tar.gz",
+    strip_prefix = "/external/+llvm+llvm-project/clang/staging",
 )
 
 # Host tool that converts a binary file into a C++ source file embedding its
@@ -557,10 +573,8 @@ cc_library(
     name = "embedded_clang_resource",
     srcs = [
         "embedded_clang_resource.cpp",
-        ":clang_include_headers_embed_cc",
+        ":clang_include_headers_embed_cc",  # keep
     ],
     hdrs = ["embedded_clang_resource.h"],
-    deps = [
-        "@llvm_zlib//:zlib",
-    ],
+    implementation_deps = ["@zlib"],
 )

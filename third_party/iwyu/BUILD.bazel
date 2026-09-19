@@ -1,0 +1,5 @@
+# include-what-you-use (https://include-what-you-use.org/), built from source
+# against this repo's own Clang.  The source archive is `@iwyu` (pinned next
+# to LLVM_VERSION in //third_party/llvm:extensions.bzl); iwyu.BUILD is its
+# BUILD file.  See tools/iwyu.sh for how it is run.
+exports_files(["iwyu.BUILD"])

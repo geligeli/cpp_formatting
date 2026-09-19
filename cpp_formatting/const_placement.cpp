@@ -4,8 +4,11 @@
 #include "cpp_formatting/const_placement_lib.h"
 #include "cpp_formatting/embedded_clang_resource.h"
 #include "cpp_formatting/lint_lib.h"
+#include "cpp_formatting/output_mode.h"
 #include "cpp_formatting/tu_driver.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace clang::tooling;

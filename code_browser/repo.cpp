@@ -1,8 +1,11 @@
 #include "code_browser/repo.h"
 
 #include <chrono>
+#include <cstddef>
 #include <fstream>
+#include <initializer_list>
 #include <sstream>
+#include <system_error>
 
 namespace code_browser {
 

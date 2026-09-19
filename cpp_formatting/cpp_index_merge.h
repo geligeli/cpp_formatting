@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "cpp_formatting/index.pb.h"
+#include "google/protobuf/message.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
 

@@ -7,6 +7,7 @@
 #ifndef CODE_BROWSER_INDEX_DB_H_
 #define CODE_BROWSER_INDEX_DB_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -166,7 +167,11 @@ class IndexDb {
  private:
   struct Connection;
   class Lease;
-  IndexDb() = default;
+
+  // Defined in the .cpp like the destructor: a defaulted constructor has to be
+  // able to destroy the members it already built, and Connection is incomplete
+  // here.
+  IndexDb();
   auto Init(std::string* error) -> bool;
   auto Acquire() const -> Lease;
 
