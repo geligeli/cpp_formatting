@@ -347,7 +347,7 @@
     },
     "//third_party/llvm:extensions.bzl%llvm": {
       "general": {
-        "bzlTransitiveDigest": "m8exVlE5DpxNbqUPP39f2br0STbj2e2qpzRgirle5qQ=",
+        "bzlTransitiveDigest": "VLTENKvXleyIkeJz/I1VgkNpIK0ngxIkfCetpjtmfRM=",
         "usagesDigest": "CrcKKa5oBdOTLY3ZeaVBiY2x3U16aVNPJGOoRUUcsgs=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
@@ -362,7 +362,7 @@
               ],
               "patches": [
                 "@@//patches:llvm_blake3_no_asm_on_windows.patch",
-                "@@//patches:llvm_zlib_std_c11_msvc.patch",
+                "@@//patches:llvm_enable_zlib_define.patch",
                 "@@//patches:llvm_zstd_no_asm_on_windows.patch"
               ],
               "sha256": "7ba3f2a8d8fda88be18a31d011e8195d3b7f87f9fa92b20c94cba2d7f65b0e3f",
@@ -373,7 +373,7 @@
             }
           },
           "llvm_zlib": {
-            "repoRuleId": "@@//third_party/llvm:extensions.bzl%_zlib_shim",
+            "repoRuleId": "@@//third_party/llvm:extensions.bzl%_zlib_alias",
             "attributes": {}
           },
           "llvm_zstd": {

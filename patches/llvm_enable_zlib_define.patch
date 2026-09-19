@@ -1,0 +1,15 @@
+--- a/utils/bazel/llvm-project-overlay/llvm/config.bzl
++++ b/utils/bazel/llvm-project-overlay/llvm/config.bzl
+@@ -114,6 +114,12 @@
+     r'LLVM_VERSION_STRING=\"{}\"'.format(PACKAGE_VERSION),
+     # Set globally in HandleLLVMOptions.cmake
+     "EXPERIMENTAL_KEY_INSTRUCTIONS",
++    # Upstream sets this from the `defines` of @llvm_zlib//:zlib, its private
++    # zlib-ng.  Here @llvm_zlib//:zlib is an alias of the module graph's one
++    # zlib (see //third_party/llvm:extensions.bzl), and an alias carries no
++    # defines -- so zlib support is declared where the other facts about the
++    # configuration are.
++    "LLVM_ENABLE_ZLIB=1",
+     # These shouldn't be needed by the C++11 standard, but are for some
+     # platforms (e.g. glibc < 2.18. See
+     # https://sourceware.org/bugzilla/show_bug.cgi?id=15366). These are also

@@ -18,23 +18,19 @@ LLVM_SHA256 = "7ba3f2a8d8fda88be18a31d011e8195d3b7f87f9fa92b20c94cba2d7f65b0e3f"
 IWYU_VERSION = "0.25"
 IWYU_SHA256 = "2e8381368ec0a6ecb770834bce00fc62efa09a2b2f9710ed569acbb823ead9cc"
 
-def _zlib_shim_impl(rctx):
+def _zlib_alias_impl(rctx):
     rctx.file("BUILD.bazel", """\
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
-
-cc_library(
+alias(
     name = "zlib",
-    # What the overlay's own zlib target exports; llvm/Config reads it.
-    defines = ["LLVM_ENABLE_ZLIB=1"],
+    actual = "@zlib",
     visibility = ["//visibility:public"],
-    deps = ["@zlib"],
 )
 """)
 
-# `@zlib` and `@rules_cc` resolve through this module's repo mapping (an
-# extension's repos see what the module hosting the extension sees), hence the
-# `bazel_dep(name = "zlib")` in MODULE.bazel.
-_zlib_shim = repository_rule(implementation = _zlib_shim_impl)
+# `@zlib` resolves through this module's repo mapping (an extension's repos see
+# what the module hosting the extension sees), hence the `bazel_dep(name =
+# "zlib")` in MODULE.bazel.
+_zlib_alias = repository_rule(implementation = _zlib_alias_impl)
 
 def _llvm_impl(_module_ctx):
     http_archive(
@@ -43,7 +39,7 @@ def _llvm_impl(_module_ctx):
         patch_args = ["-p1"],
         patches = [
             "//patches:llvm_blake3_no_asm_on_windows.patch",
-            "//patches:llvm_zlib_std_c11_msvc.patch",
+            "//patches:llvm_enable_zlib_define.patch",
             "//patches:llvm_zstd_no_asm_on_windows.patch",
         ],
         sha256 = LLVM_SHA256,
@@ -56,9 +52,17 @@ def _llvm_impl(_module_ctx):
     # but protobuf already links the BCR `zlib` into the same binaries, and the
     # two export the same symbols: one program, two zlibs, the winner of each
     # symbol decided by link order.  AddressSanitizer reports it as an ODR
-    # violation on `deflate_copyright` before main() runs.  So `llvm_zlib` is a
-    # shim over the one zlib the module graph already has.
-    _zlib_shim(name = "llvm_zlib")
+    # violation on `deflate_copyright` before main() runs.  So `llvm_zlib` is
+    # the one zlib the module graph already has.
+    #
+    # An alias, not a cc_library wrapping it: llvm:Support includes <zlib.h>,
+    # and under Clang's layering_check (every release build) the target it
+    # depends on must be the one that owns the header -- a wrapper fails with
+    # "does not directly depend on a module exporting 'zlib.h'".  An alias
+    # cannot carry the LLVM_ENABLE_ZLIB=1 define upstream's target exported,
+    # so //patches:llvm_enable_zlib_define.patch puts it in the overlay's
+    # llvm_config_defines instead.
+    _zlib_alias(name = "llvm_zlib")
 
     http_archive(
         name = "llvm_zstd",
