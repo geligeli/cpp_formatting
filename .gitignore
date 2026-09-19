@@ -11,6 +11,6 @@ compile_commands.json
 /.disk_cache
 /.bazel_cache
 .claude/worktrees/
-
+.cache
 # Generated when the e2e harness builds a fixture workspace in place.
 e2e/testdata/*/MODULE.bazel.lock
