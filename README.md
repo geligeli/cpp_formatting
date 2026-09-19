@@ -118,7 +118,9 @@ bazel run //:format.compile_commands      # write compile_commands.json
 
 The same dep set can be **indexed**: `cpp_index_targets(name = "index", deps =
 [...])` defines `//:index.index`, an ordinary build target whose output is the
-merged symbol index of those targets (see [Symbol index](#symbol-index)).
+merged symbol index of those targets (see [Symbol index](#symbol-index)), and
+-- in this repository, which builds the browser from source -- `//:index.browse`,
+which `bazel run` to serve the workspace with every indexed token annotated.
 
 **A `compile_commands.json` for free.** The aspect already derives every
 target's compile command, so both entry points can also write it out as a
@@ -846,10 +848,14 @@ instead generates four graph targets:
 | `<name>.fix` | `bazel run` | Applies the edits in `$BUILD_WORKSPACE_DIRECTORY` (outside the action graph, since Bazel actions cannot mutate sources). |
 | `<name>.compile_commands` | `bazel run` | Writes a `compile_commands.json` for the deps (transitively) in `$BUILD_WORKSPACE_DIRECTORY`. Also available standalone as the `cpp_format_compile_commands(name, deps)` rule. |
 
-and `cpp_index_targets(name, deps)` generates one more, `<name>.index` -- a
+and `cpp_index_targets(name, deps)` generates `<name>.index` -- a
 `bazel build` target whose output is the merged symbol index of the deps (see
 [Symbol index](#symbol-index)); `cpp_format.sh index [pattern]` is its
-query-driven twin.
+query-driven twin. In this repository the same macro also generates
+`<name>.db` (the index imported into SQLite, another cached build action) and
+`<name>.browse` (`bazel run` it to build both and serve the workspace in
+[code_browser/](code_browser/)); the prebuilt kit's copy defines only
+`.index`, since the browser is built from source.
 
 **Compilation database.** The aspect writes each target's compile command out
 as a `<name>.compile_commands.jsonl` fragment (one JSON object per source
@@ -943,6 +949,15 @@ identical occurrences deduplicated. Merging mutates nothing, so
 `bazel build //:index.index` produces `index.index.pb` -- while
 `cpp_format.sh index` does the same for any target pattern. An index is itself
 a valid merge input, so it can be extended with further units.
+
+**Browsing it.** [code_browser/](code_browser/) is an HTTP server that serves
+a checkout with every indexed token annotated: click an identifier to see
+what it is, jump to its definition, list its references. It reads the index
+from SQLite (`index_import`, or `<name>.db` under Bazel), so nothing is loaded
+up front. `bazel run //:index.browse` builds the index, imports it and serves
+the workspace at `http://127.0.0.1:8080/` (`-- --port=N` picks a port); see
+[code_browser/README.md](code_browser/README.md) for the routes. It is built
+from source alongside Clang and is not part of the prebuilt kit.
 
 **Extending it.** Any producer may emit `IndexUnit`s -- a proto-aware indexer
 would describe `.proto` files with `Language.PROTO` symbols and let the C++

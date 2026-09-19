@@ -7,6 +7,11 @@ its references. The index is the one `cpp_format --merge-index` produces (see
 into SQLite.
 
 ```sh
+# One command, over the targets a cpp_index_targets() names: builds the index
+# (<name>.index), imports it (<name>.db) and serves the workspace on it.
+bazel run //bazel/testdata:index.browse             # -- --port=N to pick a port
+
+# Or by hand:
 # 1. An index of the repository (any of the three ways the README describes):
 tools/cpp_format.sh index                          # writes index.pb
 # 2. Serve it.  --index imports into index.pb.sqlite when that is missing or

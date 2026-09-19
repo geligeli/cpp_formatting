@@ -56,7 +56,9 @@ cpp_format_targets(
 
 # Generates :index.index, a build target whose output (index.index.pb) is the
 # merged symbol index of the demo targets: every symbol's declarations,
-# definitions and references across both, as byte ranges.
+# definitions and references across both, as byte ranges; :index.db, the same
+# index imported into SQLite; and :index.browse, which `bazel run` to serve
+# this workspace in the code browser over it.
 cpp_index_targets(
     name = "index",
     # //code_browser:smoke_test serves this index over a copy of the sources.
@@ -95,6 +97,30 @@ sh_test(
         "demo_main.cpp",
         ":index.index",
         "//cpp_formatting:cpp_format",
+    ],
+)
+
+# Runs :index.browse the way `bazel run` would (BUILD_WORKSPACE_DIRECTORY set
+# to a copy of the demo sources) and checks that the server it starts serves
+# that checkout over the index the build imported.
+sh_test(
+    name = "browse_test",
+    srcs = ["browse_test.sh"],
+    args = [
+        "$(location :index.browse)",
+        "$(location //code_browser:http_get)",
+        "$(location budget.h)",
+        "$(location demo.cpp)",
+        "$(location demo.h)",
+        "$(location demo_main.cpp)",
+    ],
+    data = [
+        "budget.h",
+        "demo.cpp",
+        "demo.h",
+        "demo_main.cpp",
+        ":index.browse",
+        "//code_browser:http_get",
     ],
 )
 

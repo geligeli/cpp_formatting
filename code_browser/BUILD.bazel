@@ -217,6 +217,7 @@ cc_binary(
     name = "http_get",
     srcs = ["tools/http_get.cpp"],
     copts = CODE_BROWSER_COPTS,
+    visibility = ["//bazel/testdata:__pkg__"],
     deps = [
         "@boost.asio",
         "@boost.beast",
