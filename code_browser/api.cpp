@@ -1,0 +1,608 @@
+#include "code_browser/api.h"
+
+#include <algorithm>
+#include <charconv>
+#include <ctime>
+#include <map>
+#include <memory>
+
+#include "code_browser/api.pb.h"
+#include "cpp_formatting/cpp_index_merge.h"
+#include "cpp_formatting/index.pb.h"
+#include "google/protobuf/json/json.h"
+
+namespace code_browser {
+
+namespace {
+
+namespace api = code_browser::api;
+
+constexpr uint32_t kDefaultRefLimit = 500;
+constexpr uint32_t kMaxRefLimit = 5000;
+constexpr size_t kDefaultSearchLimit = 20;
+constexpr size_t kMaxSearchLimit = 200;
+constexpr size_t kMaxLocations = 50;  // definitions/declarations in SymbolInfo
+
+auto Quote(std::string_view etag) -> std::string {
+  return "\"" + std::string(etag) + "\"";
+}
+
+// If-None-Match may carry several tags, weak ones, or `*`.
+auto MatchesEtag(std::string_view header, std::string_view quoted) -> bool {
+  if (quoted.empty() || header.empty()) return false;
+  size_t pos = 0;
+  while (pos <= header.size()) {
+    size_t comma = header.find(',', pos);
+    if (comma == std::string_view::npos) comma = header.size();
+    std::string_view tag = header.substr(pos, comma - pos);
+    while (!tag.empty() && tag.front() == ' ') tag.remove_prefix(1);
+    while (!tag.empty() && tag.back() == ' ') tag.remove_suffix(1);
+    if (tag.rfind("W/", 0) == 0) tag.remove_prefix(2);
+    if (tag == "*" || tag == quoted) return true;
+    pos = comma + 1;
+  }
+  return false;
+}
+
+auto HttpDate(int64_t ns) -> std::string {
+  const std::time_t secs = static_cast<std::time_t>(ns / 1000000000LL);
+  std::tm tm{};
+  gmtime_r(&secs, &tm);
+  char buf[64];
+  std::strftime(buf, sizeof buf, "%a, %d %b %Y %H:%M:%S GMT", &tm);
+  return buf;
+}
+
+auto ParseUint(std::string_view s, uint32_t& out) -> bool {
+  if (s.empty()) return false;
+  uint32_t v = 0;
+  const auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
+  if (ec != std::errc() || ptr != s.data() + s.size()) return false;
+  out = v;
+  return true;
+}
+
+auto ParseInt(std::string_view s, int32_t& out) -> bool {
+  if (s.empty()) return false;
+  int32_t v = 0;
+  const auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
+  if (ec != std::errc() || ptr != s.data() + s.size()) return false;
+  out = v;
+  return true;
+}
+
+class Params {
+ public:
+  explicit Params(std::string_view query) : pairs_(ParseQuery(query)) {}
+  auto Get(std::string_view key) const -> std::optional<std::string> {
+    for (const auto& [k, v] : pairs_)
+      if (k == key) return v;
+    return std::nullopt;
+  }
+
+ private:
+  std::vector<std::pair<std::string, std::string>> pairs_;
+};
+
+auto Json(const google::protobuf::Message& m, int status = 200) -> ApiResponse {
+  ApiResponse r;
+  r.status = status;
+  r.body = ToJson(m);
+  return r;
+}
+
+// Adds the ETag and answers 304 when the client already has it.
+auto WithEtag(ApiResponse r, std::string_view etag, const ApiRequest& request)
+    -> ApiResponse {
+  r.etag = Quote(etag);
+  if (MatchesEtag(request.if_none_match, r.etag)) {
+    r.status = 304;
+    r.body.clear();
+  }
+  return r;
+}
+
+}  // namespace
+
+auto PercentDecode(std::string_view s) -> std::optional<std::string> {
+  std::string out;
+  out.reserve(s.size());
+  for (size_t i = 0; i < s.size(); ++i) {
+    const char c = s[i];
+    if (c == '%') {
+      if (i + 2 >= s.size()) return std::nullopt;
+      const auto hex = [](char h) -> int {
+        if (h >= '0' && h <= '9') return h - '0';
+        if (h >= 'a' && h <= 'f') return h - 'a' + 10;
+        if (h >= 'A' && h <= 'F') return h - 'A' + 10;
+        return -1;
+      };
+      const int hi = hex(s[i + 1]), lo = hex(s[i + 2]);
+      if (hi < 0 || lo < 0) return std::nullopt;
+      const char decoded = static_cast<char>(hi * 16 + lo);
+      if (decoded == '\0') return std::nullopt;
+      out += decoded;
+      i += 2;
+    } else if (c == '+') {
+      out += ' ';
+    } else {
+      out += c;
+    }
+  }
+  return out;
+}
+
+auto ParseQuery(std::string_view query)
+    -> std::vector<std::pair<std::string, std::string>> {
+  std::vector<std::pair<std::string, std::string>> out;
+  size_t pos = 0;
+  while (pos < query.size()) {
+    size_t amp = query.find('&', pos);
+    if (amp == std::string_view::npos) amp = query.size();
+    const std::string_view pair = query.substr(pos, amp - pos);
+    pos = amp + 1;
+    if (pair.empty()) continue;
+    const size_t eq = pair.find('=');
+    const std::optional<std::string> key = PercentDecode(pair.substr(0, eq));
+    const std::optional<std::string> value =
+        eq == std::string_view::npos ? std::string()
+                                     : PercentDecode(pair.substr(eq + 1));
+    if (key && value) out.emplace_back(*key, *value);
+  }
+  return out;
+}
+
+auto ParseRoles(std::string_view spec) -> std::optional<uint32_t> {
+  if (spec.empty()) return 0;
+  uint32_t number = 0;
+  if (ParseUint(spec, number)) return number;
+  uint32_t mask = 0;
+  size_t pos = 0;
+  while (pos <= spec.size()) {
+    size_t bar = spec.find('|', pos);
+    if (bar == std::string_view::npos) bar = spec.size();
+    const std::string name(spec.substr(pos, bar - pos));
+    cpp_index::Role value = cpp_index::ROLE_NONE;
+    if (name.empty() || !cpp_index::Role_Parse(name, &value) ||
+        value == cpp_index::ROLE_NONE)
+      return std::nullopt;
+    mask |= static_cast<uint32_t>(value);
+    pos = bar + 1;
+  }
+  return mask;
+}
+
+auto ToJson(const google::protobuf::Message& message) -> std::string {
+  google::protobuf::json::PrintOptions opts;
+  opts.preserve_proto_field_names = true;
+  std::string out;
+  if (!google::protobuf::json::MessageToJsonString(message, &out, opts).ok())
+    return "{}";
+  return out;
+}
+
+auto ErrorResponse(int status, std::string_view message) -> ApiResponse {
+  api::Error e;
+  e.set_status(status);
+  e.set_message(std::string(message));
+  ApiResponse r = Json(e, status);
+  r.cache_control = "no-store";
+  return r;
+}
+
+// ---------------------------------------------------------------------------
+// Building blocks shared by the routes
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Resolves index files to their bytes once per request.
+class FileResolver {
+ public:
+  FileResolver(const IndexDb& db, const Repo& repo, FileCache& files)
+      : db_(db), repo_(repo), files_(files) {}
+
+  struct Entry {
+    FileRow row;
+    std::shared_ptr<const CachedFile> bytes;  // null when not available
+  };
+
+  auto Get(int32_t file_id) -> const Entry* {
+    auto it = entries_.find(file_id);
+    if (it != entries_.end()) return &it->second;
+    const std::optional<FileRow> row = db_.File(file_id);
+    if (!row) return nullptr;
+    Entry e;
+    e.row = *row;
+    if (const std::optional<std::filesystem::path> p =
+            repo_.Resolve(row->path, row->kind))
+      e.bytes = files_.Get(repo_, *p);
+    return &entries_.emplace(file_id, std::move(e)).first->second;
+  }
+
+  void Fill(api::Location* loc, int32_t file_id, uint32_t begin, uint32_t end) {
+    loc->set_file_id(file_id);
+    loc->set_begin(begin);
+    loc->set_end(end);
+    const Entry* e = Get(file_id);
+    if (!e) return;
+    loc->set_path(e->row.path);
+    if (e->bytes) {
+      const auto [line, column] = e->bytes->LineOf(begin);
+      loc->set_line(line);
+      loc->set_column(column);
+    }
+  }
+
+ private:
+  const IndexDb& db_;
+  const Repo& repo_;
+  FileCache& files_;
+  std::map<int32_t, Entry> entries_;
+};
+
+void FillSummary(const IndexDb& db, FileResolver& files, const SymbolRow& s,
+                 api::SymbolSummary* out) {
+  out->set_id(s.id);
+  out->set_usr(s.usr);
+  out->set_name(s.name);
+  out->set_qualified_name(s.qualified_name);
+  out->set_kind(s.kind);
+  out->set_sub_kind(s.sub_kind);
+  out->set_properties(s.properties);
+  out->set_type(s.type);
+  if (s.definition_occ != 0) {
+    if (const std::optional<OccRow> o = db.Occurrence(s.definition_occ)) {
+      files.Fill(out->mutable_definition(), o->file, o->begin, o->end);
+      return;
+    }
+  }
+  if (s.has_canonical)
+    files.Fill(out->mutable_definition(), s.canonical_file, s.canonical_begin,
+               s.canonical_end);
+}
+
+void FillSpan(const OccRow& o, api::Span* span) {
+  span->set_begin(o.begin);
+  span->set_end(o.end);
+  span->set_symbol(o.symbol);
+  span->set_roles(o.roles);
+  span->set_macro(o.macro);
+}
+
+// The `path` parameter, normalised, with what the index knows about it.
+struct RequestedFile {
+  std::string path;
+  std::optional<FileRow> row;  // absent when not indexed
+  auto kind() const -> cpp_index::FileKind {
+    return row ? row->kind : cpp_index::FILE_KIND_UNSPECIFIED;
+  }
+};
+
+auto RequestedFileOf(const IndexDb& db, const Params& params,
+                     ApiResponse* error) -> std::optional<RequestedFile> {
+  const std::optional<std::string> raw = params.Get("path");
+  if (!raw) {
+    *error = ErrorResponse(400, "missing parameter: path");
+    return std::nullopt;
+  }
+  const std::optional<std::string> path = Repo::NormalizeRequestPath(*raw);
+  if (!path) {
+    *error = ErrorResponse(400, "invalid path");
+    return std::nullopt;
+  }
+  RequestedFile f;
+  f.path = *path;
+  if (const std::optional<int32_t> id = db.FileIdOf(*path))
+    f.row = db.File(*id);
+  return f;
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// Routes
+// ---------------------------------------------------------------------------
+
+auto ApiHandler::Handle(const ApiRequest& request) const -> ApiResponse {
+  if (request.method != "GET" && request.method != "HEAD") {
+    ApiResponse r = ErrorResponse(405, "method not allowed");
+    r.headers.emplace_back("Allow", "GET, HEAD");
+    return r;
+  }
+  const std::string_view path = request.path;
+  if (path == "/api/repo") return RepoInfo();
+  if (path == "/api/files") return Files(request);
+  if (path == "/api/file") return FileBytes(request);
+  if (path == "/api/annotations") return Annotations(request);
+  if (path == "/api/search") return Search(request);
+  if (path == "/api/at") return At(request);
+  if (path == "/api/symbol") return SymbolInfo(request, "");
+  if (path.rfind("/api/symbol/", 0) == 0)
+    return SymbolInfo(request, path.substr(12));
+  if (path.rfind("/api/refs/", 0) == 0)
+    return References(request, path.substr(10));
+  return ErrorResponse(404, "no such endpoint");
+}
+
+auto ApiHandler::RepoInfo() const -> ApiResponse {
+  api::RepoInfo info;
+  info.set_root(repo_.root().string());
+  if (repo_.exec_root()) info.set_exec_root(repo_.exec_root()->string());
+  const GitHead head = repo_.ReadHead();
+  info.set_head_commit(head.commit);
+  info.set_head_ref(head.ref);
+  info.set_db_path(db_.path());
+  info.set_index_etag(db_.etag());
+  const DbStats& s = db_.stats();
+  api::IndexStats* stats = info.mutable_stats();
+  stats->set_files(s.files);
+  stats->set_symbols(s.symbols);
+  stats->set_occurrences(s.occurrences);
+  stats->set_unresolved(s.unresolved);
+  stats->set_db_bytes(s.db_bytes);
+  stats->set_imported_at(s.imported_at);
+  stats->set_source_path(s.source_path);
+  return Json(info);
+}
+
+auto ApiHandler::Files(const ApiRequest& request) const -> ApiResponse {
+  const Params params(request.query);
+  const std::optional<std::string> prefix = Repo::NormalizeRequestPath(
+      params.Get("prefix").value_or(""), /*allow_empty=*/true);
+  if (!prefix) return ErrorResponse(400, "invalid prefix");
+  const std::optional<std::vector<DirEntry>> entries = db_.ListDir(*prefix);
+  if (!entries) return ErrorResponse(404, "no such directory in the index");
+  api::FileList list;
+  list.set_prefix(*prefix);
+  for (const DirEntry& e : *entries) {
+    api::TreeEntry* t = list.add_entries();
+    t->set_name(e.name);
+    t->set_path(e.path);
+    t->set_is_dir(e.is_dir);
+    if (!e.is_dir) {
+      t->set_kind(e.kind);
+      t->set_file_id(e.file_id);
+      t->set_available(repo_.Resolve(e.path, e.kind).has_value());
+    }
+  }
+  return Json(list);
+}
+
+auto ApiHandler::FileBytes(const ApiRequest& request) const -> ApiResponse {
+  ApiResponse error;
+  const Params params(request.query);
+  const std::optional<RequestedFile> f = RequestedFileOf(db_, params, &error);
+  if (!f) return error;
+  const std::optional<std::filesystem::path> resolved =
+      repo_.Resolve(f->path, f->kind());
+  if (!resolved) {
+    if (f->row && f->row->kind != cpp_index::SOURCE)
+      return ErrorResponse(
+          404,
+          "not present in the checkout; build the target that generates "
+          "it, or point --exec-root at a build that did");
+    return ErrorResponse(404, "no such file in the checkout");
+  }
+  const std::shared_ptr<const CachedFile> bytes = files_.Get(repo_, *resolved);
+  if (!bytes) return ErrorResponse(404, "no such file in the checkout");
+  ApiResponse r;
+  r.content_type = "text/plain; charset=utf-8";
+  r.body = bytes->data;
+  r.headers.emplace_back("Last-Modified", HttpDate(bytes->mtime_ns));
+  if (f->row) {
+    r.headers.emplace_back("X-File-Id", std::to_string(f->row->id));
+    r.headers.emplace_back("X-File-Kind",
+                           cpp_index::FileKind_Name(f->row->kind));
+  }
+  if (db_.stats().source_mtime_ns != 0 &&
+      bytes->mtime_ns > db_.stats().source_mtime_ns)
+    r.headers.emplace_back("X-Newer-Than-Index", "1");
+  return WithEtag(std::move(r), bytes->etag, request);
+}
+
+auto ApiHandler::Annotations(const ApiRequest& request) const -> ApiResponse {
+  ApiResponse error;
+  const Params params(request.query);
+  const std::optional<RequestedFile> f = RequestedFileOf(db_, params, &error);
+  if (!f) return error;
+  if (!f->row) return ErrorResponse(404, "file not in the index");
+  api::Annotations out;
+  out.set_path(f->row->path);
+  out.set_file_id(f->row->id);
+  FileResolver files(db_, repo_, files_);
+  std::map<int32_t, bool> seen;
+  for (const OccRow& o : db_.FileOccurrences(f->row->id)) {
+    FillSpan(o, out.add_spans());
+    if (seen.emplace(o.symbol, true).second)
+      if (const std::optional<SymbolRow> s = db_.Symbol(o.symbol))
+        FillSummary(db_, files, *s, out.add_symbols());
+  }
+  for (const UnresolvedRow& u : db_.Unresolved(f->row->id)) {
+    api::Unresolved* t = out.add_unresolved();
+    t->set_begin(u.begin);
+    t->set_end(u.end);
+    t->set_name(u.name);
+  }
+  return WithEtag(Json(out), db_.etag(), request);
+}
+
+auto ApiHandler::SymbolInfo(const ApiRequest& request,
+                            std::string_view rest) const -> ApiResponse {
+  const Params params(request.query);
+  std::optional<SymbolRow> sym;
+  if (!rest.empty()) {
+    int32_t id = -1;
+    if (!ParseInt(rest, id) || id < 0)
+      return ErrorResponse(400, "bad symbol id");
+    sym = db_.Symbol(id);
+  } else if (const std::optional<std::string> usr = params.Get("usr")) {
+    sym = db_.SymbolByUsr(*usr);
+  } else {
+    return ErrorResponse(400, "missing parameter: usr");
+  }
+  if (!sym) return ErrorResponse(404, "no such symbol");
+  FileResolver files(db_, repo_, files_);
+  api::SymbolInfo info;
+  FillSummary(db_, files, *sym, info.mutable_symbol());
+  if (sym->has_canonical)
+    files.Fill(info.mutable_canonical(), sym->canonical_file,
+               sym->canonical_begin, sym->canonical_end);
+  RefQuery defs;
+  defs.role_mask = cpp_index::DEFINITION;
+  defs.limit = kMaxLocations;
+  for (const OccRow& o : db_.SymbolOccurrences(sym->id, defs))
+    files.Fill(info.add_definitions(), o.file, o.begin, o.end);
+  RefQuery decls;
+  decls.role_mask = cpp_index::DECLARATION;
+  decls.exclude_mask = cpp_index::DEFINITION;
+  decls.limit = kMaxLocations;
+  for (const OccRow& o : db_.SymbolOccurrences(sym->id, decls))
+    files.Fill(info.add_declarations(), o.file, o.begin, o.end);
+  for (const bool reverse : {false, true})
+    for (const RelationRow& r : db_.Related(sym->id, reverse)) {
+      const std::optional<SymbolRow> other = db_.Symbol(r.symbol);
+      if (!other) continue;
+      api::Related* rel = info.add_related();
+      rel->set_kind(r.kind);
+      rel->set_reverse(reverse);
+      FillSummary(db_, files, *other, rel->mutable_symbol());
+    }
+  api::RefCounts* counts = info.mutable_counts();
+  counts->set_total(db_.CountSymbolOccurrences(sym->id, RefQuery{}));
+  counts->set_definitions(db_.CountSymbolOccurrences(sym->id, defs));
+  counts->set_declarations(db_.CountSymbolOccurrences(sym->id, decls));
+  RefQuery refs;
+  refs.role_mask = cpp_index::REFERENCE;
+  counts->set_references(db_.CountSymbolOccurrences(sym->id, refs));
+  counts->set_files(db_.CountSymbolFiles(sym->id));
+  return WithEtag(Json(info), db_.etag(), request);
+}
+
+auto ApiHandler::References(const ApiRequest& request,
+                            std::string_view rest) const -> ApiResponse {
+  int32_t id = -1;
+  if (!ParseInt(rest, id) || id < 0) return ErrorResponse(400, "bad symbol id");
+  const std::optional<SymbolRow> sym = db_.Symbol(id);
+  if (!sym) return ErrorResponse(404, "no such symbol");
+  const Params params(request.query);
+  RefQuery q;
+  q.limit = kDefaultRefLimit;
+  if (const std::optional<std::string> role = params.Get("role")) {
+    const std::optional<uint32_t> mask = ParseRoles(*role);
+    if (!mask) return ErrorResponse(400, "bad role");
+    q.role_mask = *mask;
+  }
+  if (const std::optional<std::string> exclude = params.Get("exclude")) {
+    const std::optional<uint32_t> mask = ParseRoles(*exclude);
+    if (!mask) return ErrorResponse(400, "bad exclude");
+    q.exclude_mask = *mask;
+  }
+  if (const std::optional<std::string> file = params.Get("file")) {
+    const std::optional<std::string> path = Repo::NormalizeRequestPath(*file);
+    const std::optional<int32_t> fid =
+        path ? db_.FileIdOf(*path) : std::nullopt;
+    if (!fid) return ErrorResponse(404, "file not in the index");
+    q.file = *fid;
+  }
+  if (const std::optional<std::string> offset = params.Get("offset"))
+    if (!ParseUint(*offset, q.offset)) return ErrorResponse(400, "bad offset");
+  if (const std::optional<std::string> limit = params.Get("limit")) {
+    if (!ParseUint(*limit, q.limit) || q.limit == 0)
+      return ErrorResponse(400, "bad limit");
+    q.limit = std::min(q.limit, kMaxRefLimit);
+  }
+  api::References out;
+  out.set_symbol(id);
+  out.set_offset(q.offset);
+  out.set_limit(q.limit);
+  out.set_total(db_.CountSymbolOccurrences(id, q));
+  FileResolver files(db_, repo_, files_);
+  api::FileReferences* group = nullptr;
+  uint32_t returned = 0;
+  for (const OccRow& o : db_.SymbolOccurrences(id, q)) {
+    ++returned;
+    if (!group || group->file_id() != o.file) {
+      group = out.add_files();
+      group->set_file_id(o.file);
+      if (const FileResolver::Entry* e = files.Get(o.file)) {
+        group->set_path(e->row.path);
+        group->set_kind(e->row.kind);
+      }
+    }
+    api::Reference* ref = group->add_refs();
+    files.Fill(ref->mutable_location(), o.file, o.begin, o.end);
+    ref->set_roles(o.roles);
+    ref->set_role_names(roleNames(o.roles));
+    ref->set_macro(o.macro);
+    if (const FileResolver::Entry* e = files.Get(o.file); e && e->bytes)
+      ref->set_line_text(
+          std::string(e->bytes->LineText(ref->location().line())));
+  }
+  out.set_truncated(q.offset + returned < out.total());
+  return WithEtag(Json(out), db_.etag(), request);
+}
+
+auto ApiHandler::Search(const ApiRequest& request) const -> ApiResponse {
+  const Params params(request.query);
+  const std::optional<std::string> q = params.Get("q");
+  if (!q) return ErrorResponse(400, "missing parameter: q");
+  SearchOptions opts;
+  opts.limit = kDefaultSearchLimit;
+  if (const std::optional<std::string> limit = params.Get("limit")) {
+    uint32_t n = 0;
+    if (!ParseUint(*limit, n) || n == 0) return ErrorResponse(400, "bad limit");
+    opts.limit = std::min<size_t>(n, kMaxSearchLimit);
+  }
+  if (const std::optional<std::string> kind = params.Get("kind")) {
+    cpp_index::SymbolKind value = cpp_index::SYMBOL_KIND_UNSPECIFIED;
+    if (!cpp_index::SymbolKind_Parse(*kind, &value))
+      return ErrorResponse(400, "bad kind");
+    opts.kind = value;
+  }
+  if (const std::optional<std::string> locals = params.Get("locals"))
+    opts.include_locals = *locals == "1" || *locals == "true";
+  const SearchResult result = db_.Search(*q, opts);
+  api::SearchResults out;
+  out.set_query(*q);
+  out.set_truncated(result.truncated);
+  FileResolver files(db_, repo_, files_);
+  for (const SearchHit& hit : result.hits) {
+    api::SearchHit* h = out.add_hits();
+    h->set_score(hit.score);
+    FillSummary(db_, files, hit.symbol, h->mutable_symbol());
+  }
+  return WithEtag(Json(out), db_.etag(), request);
+}
+
+auto ApiHandler::At(const ApiRequest& request) const -> ApiResponse {
+  ApiResponse error;
+  const Params params(request.query);
+  const std::optional<RequestedFile> f = RequestedFileOf(db_, params, &error);
+  if (!f) return error;
+  if (!f->row) return ErrorResponse(404, "file not in the index");
+  uint32_t offset = 0;
+  const std::optional<std::string> raw = params.Get("offset");
+  if (!raw || !ParseUint(*raw, offset)) return ErrorResponse(400, "bad offset");
+  api::OccurrencesAt out;
+  out.set_path(f->row->path);
+  out.set_offset(offset);
+  FileResolver files(db_, repo_, files_);
+  std::map<int32_t, bool> seen;
+  for (const OccRow& o : db_.OccurrencesAt(f->row->id, offset)) {
+    FillSpan(o, out.add_spans());
+    if (seen.emplace(o.symbol, true).second)
+      if (const std::optional<SymbolRow> s = db_.Symbol(o.symbol))
+        FillSummary(db_, files, *s, out.add_symbols());
+  }
+  for (const UnresolvedRow& u : db_.Unresolved(f->row->id))
+    if (u.begin <= offset && offset < u.end) {
+      api::Unresolved* t = out.add_unresolved();
+      t->set_begin(u.begin);
+      t->set_end(u.end);
+      t->set_name(u.name);
+    }
+  return WithEtag(Json(out), db_.etag(), request);
+}
+
+}  // namespace code_browser

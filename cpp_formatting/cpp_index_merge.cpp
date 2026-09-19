@@ -396,6 +396,7 @@ auto roleNames(uint32_t Roles) -> std::string {
       {cpp_index::UNDEFINITION, "UNDEFINITION"},
       {cpp_index::NAME_REFERENCE, "NAME_REFERENCE"},
       {cpp_index::DEPENDENT, "DEPENDENT"},
+      {cpp_index::PASTED, "PASTED"},
   };
   std::string Out;
   for (const auto& [Bit, Name] : kNames) {

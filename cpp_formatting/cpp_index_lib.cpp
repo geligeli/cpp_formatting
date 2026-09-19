@@ -19,7 +19,10 @@
 #include "clang/Index/IndexingAction.h"
 #include "clang/Index/USRGeneration.h"
 #include "clang/Lex/Lexer.h"
+#include "clang/Lex/MacroArgs.h"
 #include "clang/Lex/MacroInfo.h"
+#include "clang/Lex/PPCallbacks.h"
+#include "clang/Lex/Preprocessor.h"
 #include "clang/Tooling/Tooling.h"
 #include "cpp_formatting/cpp_index_merge.h"
 #include "cpp_formatting/lint_lib.h"
@@ -314,6 +317,64 @@ class IndexConsumer : public index::IndexDataConsumer {
   IndexConsumer(const FileSet& Owned, std::string* Out)
       : Owned(Owned), Out(Out) {}
 
+  // Every invocation of a macro that pastes one of its parameters, with the
+  // argument tokens of those parameters: what addPastedArgumentOccurrences()
+  // needs, since the pasted token's own expansion range only reaches the
+  // macro body.  Keyed by the invocation's name token (its SourceLocation,
+  // which a nested invocation has inside an enclosing expansion).
+  struct PastingInvocation {
+    const MacroInfo* MI;
+    std::vector<std::vector<SourceLocation>> ArgTokens;  // per parameter
+  };
+  class PasteRecorder : public PPCallbacks {
+   public:
+    explicit PasteRecorder(IndexConsumer& C) : C(C) {}
+    void MacroExpands(const Token& NameTok, const MacroDefinition& MD,
+                      SourceRange, const MacroArgs* Args) override {
+      const MacroInfo* MI = MD.getMacroInfo();
+      if (!MI || !Args || !MI->isFunctionLike()) return;
+      const std::vector<bool>& Pasted = C.pastedParams(MI);
+      if (llvm::none_of(Pasted, [](bool B) { return B; })) return;
+      PastingInvocation Inv{MI, {}};
+      Inv.ArgTokens.resize(MI->getNumParams());
+      const unsigned N =
+          std::min<unsigned>(MI->getNumParams(), Args->getNumMacroArguments());
+      for (unsigned I = 0; I < N; ++I) {
+        if (!Pasted[I]) continue;
+        for (const Token* T = Args->getUnexpArgument(I);
+             T && T->isNot(tok::eof); ++T)
+          if (T->is(tok::identifier))
+            Inv.ArgTokens[I].push_back(T->getLocation());
+      }
+      C.Invocations[NameTok.getLocation().getRawEncoding()] = std::move(Inv);
+    }
+
+   private:
+    IndexConsumer& C;
+  };
+
+  void setPreprocessor(std::shared_ptr<Preprocessor> PP) override {
+    PP->addPPCallbacks(std::make_unique<PasteRecorder>(*this));
+  }
+
+  // Which parameters of \p MI stand next to a `##` somewhere in its body.
+  const std::vector<bool>& pastedParams(const MacroInfo* MI) {
+    auto It = PastedParams.find(MI);
+    if (It != PastedParams.end()) return It->second;
+    std::vector<bool>& Bits = PastedParams[MI];
+    Bits.assign(MI->getNumParams(), false);
+    const ArrayRef<Token> Toks = MI->tokens();
+    for (size_t I = 0; I < Toks.size(); ++I) {
+      if (!Toks[I].is(tok::identifier)) continue;
+      const int Idx = MI->getParameterNum(Toks[I].getIdentifierInfo());
+      if (Idx < 0) continue;
+      if ((I > 0 && Toks[I - 1].is(tok::hashhash)) ||
+          (I + 1 < Toks.size() && Toks[I + 1].is(tok::hashhash)))
+        Bits[Idx] = true;
+    }
+    return Bits;
+  }
+
   void initialize(ASTContext& Ctx) override {
     this->Ctx = &Ctx;
     SM = &Ctx.getSourceManager();
@@ -365,7 +426,63 @@ class IndexConsumer : public index::IndexDataConsumer {
         Out->set_symbol(Target);
       });
     }
+    addPastedArgumentOccurrences(Loc, Sym);
     return true;
+  }
+
+  /// A name formed by `##` is spelled nowhere -- its token lives in Clang's
+  /// scratch buffer -- so the occurrence above landed on the invocation.
+  /// But the arguments the paste consumed *are* spelled, at the call site,
+  /// and renaming what they name changes the formed name: `ABSL_FLAG(...,
+  /// docker_image, ...)` spells the tail of FLAGS_docker_image.  For each
+  /// such argument, a PASTED occurrence of the formed symbol on the
+  /// argument's own spelling.  A pasted token's expansion range is the pair
+  /// of operands of its `##`; an operand that is a macro argument has a
+  /// spelling of its own, one that is itself pasted is walked in turn, and
+  /// one spelled in the macro body is the invocation's business.
+  void addPastedArgumentOccurrences(SourceLocation Loc, int32_t Sym,
+                                    unsigned Depth = 0) {
+    if (Depth > 16 || Loc.isInvalid() || !Loc.isMacroID()) return;
+    const SourceLocation Spelling = SM->getSpellingLoc(Loc);
+    if (SM->getFileEntryRefForID(SM->getFileID(Spelling))) return;
+    // The two operands of the `##`, as tokens of the macro body: Clang
+    // normalizes both ends of a pasted token's expansion range into the
+    // macro's own expansion, so a parameter operand is the parameter's token
+    // in the definition, not the argument that replaced it.
+    const CharSourceRange Paste = SM->getImmediateExpansionRange(Loc);
+    for (const SourceLocation Operand : {Paste.getBegin(), Paste.getEnd()}) {
+      if (Operand.isInvalid() || !Operand.isMacroID()) continue;
+      const SourceLocation OpSpelling = SM->getSpellingLoc(Operand);
+      if (!SM->getFileEntryRefForID(SM->getFileID(OpSpelling))) {
+        addPastedArgumentOccurrences(Operand, Sym, Depth + 1);  // nested paste
+        continue;
+      }
+      // The invocation this body token belongs to, and which parameter it is.
+      const SourceLocation InvLoc =
+          SM->getImmediateExpansionRange(Operand).getBegin();
+      auto It = Invocations.find(InvLoc.getRawEncoding());
+      if (It == Invocations.end()) continue;
+      const PastingInvocation& Inv = It->second;
+      int Param = -1;
+      for (const Token& T : Inv.MI->tokens())
+        if (T.getLocation() == OpSpelling && T.is(tok::identifier)) {
+          Param = Inv.MI->getParameterNum(T.getIdentifierInfo());
+          break;
+        }
+      if (Param < 0 || static_cast<size_t>(Param) >= Inv.ArgTokens.size())
+        continue;
+      for (const SourceLocation ArgTok : Inv.ArgTokens[Param]) {
+        const std::optional<Range> R = rangeFor(ArgTok);
+        if (!R || !R->Owned) continue;
+        cpp_index::Occurrence* O = Unit.add_occurrences();
+        O->set_file(R->File);
+        O->set_begin(R->Begin);
+        O->set_end(R->End);
+        O->set_symbol(Sym);
+        O->set_roles(cpp_index::PASTED);
+        O->set_macro(cpp_index::MACRO_ARGUMENT);
+      }
+    }
   }
 
   auto handleMacroOccurrence(const IdentifierInfo* Name, const MacroInfo* MI,
@@ -617,6 +734,8 @@ class IndexConsumer : public index::IndexDataConsumer {
   llvm::DenseMap<const MacroInfo*, int32_t> SymbolByMacro;
   std::map<std::string, int32_t> SymbolByUsr;
   std::set<std::tuple<int32_t, int, int32_t>> SymbolRelations;
+  llvm::DenseMap<const MacroInfo*, std::vector<bool>> PastedParams;
+  llvm::DenseMap<unsigned, PastingInvocation> Invocations;
 };
 
 }  // namespace

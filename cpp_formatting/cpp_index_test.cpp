@@ -574,3 +574,35 @@ TEST(CppIndex, DependentTokenAsMacroArgument) {
   EXPECT_TRUE(hasRole(Use, cpp_index::DEPENDENT));
   EXPECT_EQ(Use->macro(), cpp_index::MACRO_ARGUMENT);
 }
+
+TEST(CppIndex, PastedMacroArgumentIsAnOccurrenceOfTheFormedName) {
+  // ABSL_FLAG's shape: the flag's name is only ever pasted, so the variable
+  // FLAGS_docker_image is spelled nowhere.  Its definition lands on the
+  // invocation token; the argument that spelled its tail gets a PASTED
+  // occurrence of the same symbol -- at every invocation that pastes it.
+  const std::string Code = R"(
+#define FLAG(name) int FLAGS_##name = 0;
+#define GET(name) FLAGS_##name
+    FLAG(docker_image)
+    int use() { return GET(docker_image); }
+  )";
+  const IndexUnit U = indexCode(Code);
+  const int32_t F = symbolNamed(U, "FLAGS_docker_image");
+  ASSERT_GE(F, 0);
+  const Occurrence* Def =
+      occurrenceAt(U, F, offsetOf(Code, "FLAG(docker_image)"));
+  ASSERT_NE(Def, nullptr);
+  EXPECT_EQ(Def->macro(), cpp_index::MACRO_BODY);
+  EXPECT_TRUE(hasRole(Def, cpp_index::DEFINITION));
+  const Occurrence* Arg = occurrenceAt(U, F, offsetOf(Code, "docker_image)\n"));
+  ASSERT_NE(Arg, nullptr);
+  EXPECT_EQ(Arg->macro(), cpp_index::MACRO_ARGUMENT);
+  EXPECT_EQ(Arg->roles(), static_cast<uint32_t>(cpp_index::PASTED));
+  EXPECT_EQ(Arg->end(), Arg->begin() + 12);
+  const Occurrence* Use =
+      occurrenceAt(U, F, offsetOf(Code, "docker_image); }"));
+  ASSERT_NE(Use, nullptr);
+  EXPECT_EQ(Use->roles(), static_cast<uint32_t>(cpp_index::PASTED));
+  // definition + reference on the two invocations, PASTED on both arguments
+  EXPECT_EQ(occurrencesOf(U, F).size(), 4u);
+}
