@@ -64,7 +64,7 @@ Two unrelated things are called LLVM: `@llvm` is the **toolchain** (hermetic-llv
 
 - `trailing_return_types{,_lib}` — `int f()` ↔ `auto f() -> int` (`ReturnTypeStyle::Trailing|Leading`; Leading is mostly guards).
 - `const_placement{,_lib}` — `const int` ↔ `int const` (`ConstStyle::East|West`); only a qualifier of the type *specifier* moves.
-- `normalize_variables` + `rename_variables_lib`, `naming_convention`, `rename_state` — renames by scope (`member`, `local`, `global`, `static_member`, `const_member`, `static_global`, `const_global`, `method`, `type`, `namespace`): collect → scan (vetoes) → rewrite, plus cross-TU resolution of template-dependent tokens.
+- `normalize_variables` + `rename_variables_lib`, `naming_convention`, `rename_state` — renames by scope (`member`, `local`, `global`, `method`, `type`, `namespace`, and the fine-grained `static_`/`const_`/`public_`/`protected_`/`private_member`, `static_`/`const_local`, `static_`/`const_global`): collect → scan (vetoes) → rewrite, plus cross-TU resolution of template-dependent tokens.
 - `cpp_format` + `cpp_format_lib` — all passes from a YAML config in **one** parse per TU; also hosts `--emit-edits`, `--owned-files`, `--aggregate`, `--emit-index`, `--merge-index`, `--dump-index`.
 - `tu_driver` — the parallel TU driver all four binaries share (`TUSlot`, `TUSlotClient`, `runTranslationUnits()`).
 - `lint_lib` — `LintReport` (text/SARIF), unified diff, the edit-record model and `runEditAggregation()` (also behind the standalone `aggregate_edits`).
@@ -86,7 +86,7 @@ normalize_variables:        # applied in order
     style: UpperCamelCase
 ```
 
-Scopes: see Layout. Styles: `snake_case`, `_leading`, `trailing_`, `m_prefix`, `camelCase`, `UpperCamelCase`, `UPPER_SNAKE_CASE`, `kConstant`. Two rules that can match the same declaration (`member` + `static_member`) are refused.
+Scopes: see Layout. Styles: `snake_case`, `_leading`, `trailing_`, `m_prefix`, `camelCase`, `UpperCamelCase`, `UPPER_SNAKE_CASE`, `kConstant`. Rules may overlap (`local` + `const_local`, `member` + `public_member`): the most specific one renames the declaration -- constness, then storage, then access, then the broad scope; only the same scope twice is refused.
 
 ## Invariants — do not break these
 
@@ -117,6 +117,8 @@ Each is explained, with the case that found it, in the docs above.
 
 **Build**
 - Fixture-parsing tests get their standard library through `HERMETIC_STD_DATA` / `HERMETIC_STD_ENV` ([tools/hermetic_std/](tools/hermetic_std/)), or they fail on a remote worker with no C++ headers.
+- **Exactly one rule renames a declaration** (`scopeClaims()`): two rules rewriting the same bytes corrupt them (`MaxCount` → `kMaxCountt`). A new scope needs a `scopeSpecificity()` that orders it against every scope it can overlap; `ScopeRelations.SpecificityOrdersEveryOverlap` checks that.
+- **Nothing that loads for a consumer may name a dev dependency at load time** (`@llvm`, `@gazelle`): a `load()`, or a transition's `inputs`/`outputs`. A label in a BUILD file is resolved lazily and is fine. `bazel query @cpp_formatting//...` from a dependent repository is the check.
 - Sanitizers use the toolchain's switches (`--@llvm//config:asan`), never `--copt=-fsanitize=…`. `@llvm_zlib` is an `alias` to `@zlib` (one zlib; an alias because of `layering_check`). After touching zlib or the toolchain, `bazel build --config=minify-x86_64 //cpp_formatting:cpp_format` is the local stand-in for the release jobs.
 - `clang_include_headers`'s `strip_prefix` hardcodes the canonical repo name `+llvm+llvm-project`.
 - The `bazel-*` symlinks in the root are Bazel's — do not edit them.

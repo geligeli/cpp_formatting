@@ -64,7 +64,7 @@ from 7 files); most of what it declines is capture, since re2 names a parameter
 after the member it initialises throughout.
 
 **game_arena** (`game_arena-google_style`) is the dogfooding entry: the repo
-the tool is used on, under its real ruleset -- six rename scopes plus both
+the tool is used on, under its real ruleset -- nine rename scopes plus both
 rewrite passes in one run. It is also the only corpus
 member that already *consumes* cpp_format, so `wire()` strips the repo's own
 `bazel_dep`/`archive_override`/`release()` wiring out of `MODULE.bazel` before
@@ -85,10 +85,12 @@ audit over-declining: an `ABSL_FLAG` name is only ever pasted or stringized, so
 a flag spelled like a member of the struct it is copied into (`docker_image`,
 `repo_dir`, ~20 of them) tripped the audit and the member kept its bare name;
 the audit now skips the macro arguments the preprocessor consumed, and the
-scenario went from 1379 to 1522 edits. `protobuf-member_snake_case` found the
+scenario went from 1379 to 1522 edits (1538 with the type and namespace rules) -- and then to **175**, once the ruleset could state its exceptions (`const_local`, `public_member`, `const_member`, most specific rule wins): most of the old edits were the ruleset mis-formatting a repository that already follows the style, underscores on struct fields and the k taken off function-local constants. `protobuf-member_snake_case` found the
 third fix in the same batch, the dependent-token all-or-nothing rule (16695
 edits, 307 files; `T::_table_` and `T::kInlineCapacity`, see the "Known
 non-obvious behaviours").
+
+**A target workspace does not inherit the machine's Bazel rc files.** A corpus repository compiles with whatever toolchain Bazel finds on the machine, and a home rc that turns on remote execution -- reasonable once *this* repository's toolchain is hermetic -- sent those compiles to workers with no compiler: `baseline` failed with "Remote Execution Failure", or passed, depending on which side of a dynamic-execution race won. Every Bazel run in a target workspace goes through a shim (`$WORK/bin/bazel`, `--nohome_rc --nosystem_rc`): startup options cannot come from the target's own `.bazelrc` (the home rc is read after it), and a shim rather than a flag per call site because `tools/cpp_format.sh` runs Bazel too (it honours `$BAZEL`). The tool's own build, in this repository, still uses the machine's configuration. The price is speed for a target that *is* hermetic: game_arena's baseline builds locally (about six minutes).
 
 **Two-pass scenarios (`RULESET_THEN`).** A scenario may name a second ruleset,
 which runs over the *output* of the first: `swap` commits pass 1 (so `applied`
