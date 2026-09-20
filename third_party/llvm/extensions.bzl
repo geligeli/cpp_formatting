@@ -40,6 +40,7 @@ def _llvm_impl(_module_ctx):
         patches = [
             "//patches:llvm_blake3_no_asm_on_windows.patch",
             "//patches:llvm_enable_zlib_define.patch",
+            "//patches:llvm_rdf_std_specializations.patch",
             "//patches:llvm_zstd_no_asm_on_windows.patch",
         ],
         sha256 = LLVM_SHA256,

@@ -1,0 +1,35 @@
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("//tools/platforms:for_platform.bzl", "for_platform_test")
+
+package(default_visibility = ["//visibility:private"])
+
+cc_binary(
+    name = "static_smoke",
+    srcs = ["static_smoke.cpp"],
+    # The program throws on purpose (unwinding is one of the things a static
+    # link has to get right), and `--config=minify` says -fno-exceptions.  A
+    # target's copts follow the command line's, so this wins, and the program
+    # can be linked with the release flags too -- LTO, --gc-sections, stripped:
+    #   bazel build --config=minify-x86_64 //tools/platforms/smoke:static_smoke
+    copts = ["-fexceptions"],
+)
+
+# The same program linked against static glibc and run.  It can only run where
+# the CPU matches, so each host executes its own and skips the other; building
+# the other one anyway is `bazel build --platforms=//tools/platforms:...`.
+[
+    for_platform_test(
+        name = "static_glibc_%s_test" % cpu,
+        size = "small",
+        binary = ":static_smoke",
+        platform = "//tools/platforms:linux_%s_glibc_static" % cpu,
+        target_compatible_with = [
+            "@platforms//os:linux",
+            "@platforms//cpu:" + cpu,
+        ],
+    )
+    for cpu in [
+        "aarch64",
+        "x86_64",
+    ]
+]

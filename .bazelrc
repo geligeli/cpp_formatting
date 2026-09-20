@@ -1,22 +1,3 @@
-# Bazel caches
-#
-# The devcontainer bind-mounts a pair of host cache directories at
-# /bazel-cache/disk and /bazel-cache/repo (see .devcontainer/devcontainer.json)
-# and points --disk_cache / --repository_cache at them from /etc/bazel.bazelrc
-# inside the image.  Those paths are deliberately *not* set here: this file is
-# also read by native Linux/macOS/Windows builds, where /bazel-cache does not
-# exist and Bazel would fail trying to create it.  Command-line flags (CI
-# passes its own --disk_cache=/--repository_cache=) override the container
-# defaults.
-#
-# To point Bazel at a cache of your own, put the flags in .bazelrc.local
-# (gitignored, imported at the bottom of this file):
-#
-#   build --disk_cache=/path/to/disk
-#   common --repository_cache=/path/to/repo
-
-build --spawn_strategy=local
-
 # //code_browser is C++20 (Boost.Asio coroutines).  The BCR boost.asio module
 # compiles Asio's separately-compiled source with the toolchain's default
 # standard (C++17 here), which leaves out impl/awaitable.ipp -- the coroutine
@@ -108,14 +89,23 @@ build:minify --copt=-Os
 build:minify --cxxopt=-fno-exceptions
 build:minify --cxxopt=-fno-rtti
 build:minify --linkopt=-flto
-build:minify --linkopt=-fno-ident
 build:minify --linkopt=-fno-asynchronous-unwind-tables
 build:minify --linkopt=-Wl,--gc-sections
 build:minify --linkopt=-Wl,--strip-all
-build:minify --action_env=CC=clang
-build:minify --action_env=CXX=clang++
-build:minify --features=fully_static_link
 build:minify --platform_suffix=-minify
+
+# Fully static, against glibc.  The hermetic toolchain links glibc dynamically
+# by default -- against version stubs, with no libc.a to link -- so "static" is
+# a property of the *platform*: //tools/platforms:linux_*_glibc_static selects
+# glibc 2.44's libc.a/libm.a and startup files, built from source by the patch
+# in //third_party/hermetic_llvm, and the toolchain then links -static(-pie)
+# the way it does for musl.  That replaces `--features=fully_static_link` and
+# the system Clang (`--action_env=CC=clang`) this config used to need.  A
+# platform names one CPU, so the release workflow picks the config by runner.
+build:minify-x86_64 --config=minify
+build:minify-x86_64 --platforms=//tools/platforms:linux_x86_64_glibc_static
+build:minify-aarch64 --config=minify
+build:minify-aarch64 --platforms=//tools/platforms:linux_aarch64_glibc_static
 
 # Sanitizers: `bazel test --config=asan //...` (or tsan / ubsan).
 #
@@ -137,46 +127,62 @@ build:sanitizer --copt=-O1
 build:sanitizer --copt=-g1
 build:sanitizer --copt=-fno-omit-frame-pointer
 build:sanitizer --strip=never
+# RTTI on, overriding build:linux's -fno-rtti (a --config given on the command
+# line expands after the platform section, and the last -f[no-]rtti wins).  The
+# normal build is -fno-rtti only to match LLVM's, and here LLVM is built from
+# source in this very configuration, so there is nothing to match.  It is not
+# optional under ASan: without RTTI Clang emits a private weak copy of the
+# typeinfo of every type a TU throws (std::bad_function_call, bad_variant_access,
+# ...), the toolchain's instrumented libc++ defines the same typeinfo strongly
+# inside a COMDAT group of the same signature, and lld rejects the mix
+# ("relocation refers to a symbol in a discarded section: typeinfo for ...").
+build:sanitizer --cxxopt=-frtti
+# Only what the tests need.  `//...` also holds //tools/gazelle, a Go program
+# whose C link step gets the sanitizer runtime but not libunwind
+# ("undefined symbol: _Unwind_Resume"), and sanitizing it would say nothing.
+test:sanitizer --build_tests_only
 
 # AddressSanitizer (+ LeakSanitizer, which it includes on Linux).
 build:asan --config=sanitizer
 build:asan --platform_suffix=asan
-build:asan --copt=-fsanitize=address
-build:asan --linkopt=-fsanitize=address
+# The toolchain's switch, not --copt=-fsanitize=address: it builds compiler-rt's
+# runtime from source (there is no prebuilt one to link) and adds the flags
+# itself -- to everything except its own startup files and runtimes, which a
+# --copt would reach too (lld then rejects the instrumented crtend.o: "a section
+# asan_globals with SHF_LINK_ORDER should not refer a non-regular section").
+# Linux only, like the toolchain registration in MODULE.bazel.
+build:asan --@llvm//config:asan
 
 # ThreadSanitizer: the TU driver's worker pool (--jobs) and the code browser's
 # multi-threaded io_context are what it is for.
 build:tsan --config=sanitizer
 build:tsan --platform_suffix=tsan
-build:tsan --copt=-fsanitize=thread
-build:tsan --linkopt=-fsanitize=thread
+build:tsan --@llvm//config:tsan
+# Compile anywhere, but *run* the tests on this machine.  A TSan binary needs a
+# particular memory layout and, on a kernel with high mmap entropy (Ubuntu
+# 24.04's vm.mmap_rnd_bits=32), gets it by re-executing itself with ASLR off --
+# which a remote-execution worker's container does not allow ("FATAL:
+# ThreadSanitizer: encountered an incompatible memory layout but was unable to
+# disable ASLR").  It fails or not depending on where the kernel happened to
+# map things, i.e. as a flake.
+test:tsan --modify_execution_info=TestRunner=+no-remote-exec
 
-# UndefinedBehaviorSanitizer.  `vptr` is off because it needs RTTI and the whole
-# build is -fno-rtti (Clang refuses the combination outright; GCC drops the
-# check silently).  Without -fno-sanitize-recover a finding is a line on stderr
-# and a passing test.
+# UndefinedBehaviorSanitizer.  Without -fno-sanitize-recover a finding is a line
+# on stderr and a passing test.  Nothing is switched off any more: `vptr` needed
+# RTTI, which build:sanitizer now turns on, and the three null checks were off
+# only because they make *GCC* drop -fdelete-null-pointer-checks, after which
+# abseil's `&function == nullptr` in a constexpr does not compile -- the
+# toolchain is Clang now.
 build:ubsan --config=sanitizer
 build:ubsan --platform_suffix=ubsan
-build:ubsan --copt=-fsanitize=undefined
-build:ubsan --copt=-fno-sanitize=vptr
-# The three null checks are off because of GCC, not because of us: any one of
-# them makes GCC drop -fdelete-null-pointer-checks, after which `&function ==
-# nullptr` is no longer a constant expression -- and abseil's hash containers
-# (so protobuf, so everything that links it) do exactly that in a constexpr:
-# "'(TypeErasedApplyToSlotFn<...> == 0)' is not a constant expression".  All
-# three have to go for abseil to compile; the cost is small, since a null
-# dereference still dies with SIGSEGV and --config=asan reports it with a stack.
-build:ubsan --copt=-fno-sanitize=null
-build:ubsan --copt=-fno-sanitize=nonnull-attribute
-build:ubsan --copt=-fno-sanitize=returns-nonnull-attribute
+build:ubsan --@llvm//config:ubsan
 build:ubsan --copt=-fno-sanitize-recover=all
-build:ubsan --linkopt=-fsanitize=undefined
 build:ubsan --test_env=UBSAN_OPTIONS=print_stacktrace=1
 
-# There is no msan config.  MemorySanitizer is Clang-only and needs an
-# instrumented C++ standard library as well -- against the system libstdc++ it
-# reports correct code (anything that reads what libstdc++.so wrote) -- so it
-# is a libc++ build and a toolchain switch, not a set of flags.
+# There is no msan config yet.  It used to be out of reach -- MemorySanitizer
+# needs an instrumented C++ standard library, which the system libstdc++ is not
+# -- but the hermetic toolchain builds one (--@llvm//config:msan); it has just
+# not been tried here.
 
 # cpp_format lint: run the aspect over the build graph and materialise each
 # target's edit-record JSON (see bazel/cpp_format.bzl).  The failing lint gate

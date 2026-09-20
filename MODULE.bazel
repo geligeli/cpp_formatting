@@ -41,6 +41,50 @@ bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "rules_python", version = "1.9.0")
 bazel_dep(name = "apple_support", version = "1.24.1", repo_name = "build_bazel_apple_support")
 
+# The C/C++ toolchain on Linux: hermetic-llvm, a prebuilt Clang with its
+# runtimes (compiler-rt, libc++, libunwind) and libc built from source, so no
+# compiler, sysroot or standard library comes from the machine -- which is what
+# makes remote execution sound: a worker and a workstation produce the same
+# bytes.  Not to be confused with the Clang *libraries* the tools link, which
+# are still built from source below (`@llvm-project`, 21.1.8); this `@llvm` is
+# only what compiles them.
+#
+# Dev-only, like the registration: a consumer who imports the kit by URL must
+# keep the toolchain they chose.
+#
+# Only the Linux-hosted toolchains are registered, not `@llvm//toolchain:all`.
+# macOS and Windows keep the toolchain Bazel finds on the machine: .bazelrc's
+# `build:windows` block is written for cl.exe, and neither host has been
+# validated against the hermetic one.  (`stage1_*`..`stage3_*` in that package
+# are for bootstrapping the compiler from source and are not used.)
+bazel_dep(name = "llvm", version = "0.8.21", dev_dependency = True)
+
+# hermetic-llvm links glibc dynamically only: against stubs generated from a
+# symbol list, the implementation coming from the machine the binary runs on.
+# The release binaries are fully static, so the patches add what that needs --
+# glibc 2.44's libc.a, libm.a and startup files built from source, selected by
+# a platform constraint (//tools/platforms; `--config=minify-<cpu>`).  See
+# //third_party/hermetic_llvm:BUILD.bazel for what each patch holds.  An
+# override is honoured in the root module only, which is where it is wanted.
+single_version_override(
+    module_name = "llvm",
+    patch_strip = 1,
+    patches = [
+        "//third_party/hermetic_llvm:glibc_static.patch",
+        "//third_party/hermetic_llvm:glibc_static_aarch64.patch",
+        "//third_party/hermetic_llvm:glibc_static_x86_64.patch",
+    ],
+    version = "0.8.21",
+)
+
+register_toolchains(
+    "@llvm//toolchain:linux_x86_64_to_linux_x86_64",
+    "@llvm//toolchain:linux_x86_64_to_linux_aarch64",
+    "@llvm//toolchain:linux_aarch64_to_linux_aarch64",
+    "@llvm//toolchain:linux_aarch64_to_linux_x86_64",
+    dev_dependency = True,
+)
+
 # BUILD file maintenance (`bazel run //tools/gazelle`): Gazelle with the C++
 # extension derives every cc_* target's deps from its #includes.  Dev-only --
 # nothing a consumer of the prebuilt kit builds needs them, and as ordinary
