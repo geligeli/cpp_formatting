@@ -29,7 +29,9 @@
 #   * the launched server serves *the consumer's checkout*: /api/repo names it
 #     as root, /api/file returns its bytes, and a cross-target reference
 #     (geometry.cpp -> a member declared in shapes.h) is in the index;
-#   * a release without the browser asset fails with a message that says so.
+#   * a release without the browser asset fails with a message that says so;
+#   * with no release() tag at all, `bazel mod deps` still works, and the first
+#     target that needs the binary says which line to add.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -55,7 +57,7 @@ server=""
 cleanup() {
   [[ -n "$server" ]] && kill "$server" 2>/dev/null || true
   if [[ "$KEEP" -eq 0 ]]; then
-    for ws in "$WORK"/import "$WORK"/vendor "$WORK"/stale; do
+    for ws in "$WORK"/import "$WORK"/vendor "$WORK"/stale "$WORK"/untagged; do
       [[ -d "$ws" ]] && (cd "$ws" && consumer_bazel clean --expunge >/dev/null 2>&1) || true
     done
     chmod -R u+w "$WORK" 2>/dev/null || true
@@ -128,6 +130,9 @@ make_consumer() {  # <flavor> <version>
   # on purpose (it is how the kit's Bazel 9 breakage was found).
   printf '%s\n' "${BAZELVERSION:-$(cat "$REPO_ROOT/.bazelversion")}" > "$ws/.bazelversion"
   printf 'normalize_variables: []\n' > "$ws/cpp_format.yaml"
+  # version "none": the consumer uses the extension but issues no release() tag.
+  local release="cpp_format.release(version = \"$version\", base_url = \"$BASE_URL\")"
+  [[ "$version" == none ]] && release="# (no cpp_format.release() tag)"
   local kit
   if [[ "$flavor" == vendor ]]; then
     kit="//third_party/cpp_format"
@@ -137,7 +142,7 @@ make_consumer() {  # <flavor> <version>
     cat >> "$ws/MODULE.bazel" <<EOF
 
 cpp_format = use_extension("//third_party/cpp_format:extensions.bzl", "cpp_format")
-cpp_format.release(version = "$version", base_url = "$BASE_URL")
+$release
 use_repo(cpp_format, "code_browser_bin", "cpp_format_bin")
 EOF
   else
@@ -148,7 +153,7 @@ bazel_dep(name = "cpp_formatting", version = "0.1.0", dev_dependency = True)
 local_path_override(module_name = "cpp_formatting", path = "$REPO_ROOT")
 
 cpp_format = use_extension("@cpp_formatting//bazel/integration:extensions.bzl", "cpp_format", dev_dependency = True)
-cpp_format.release(version = "$version", base_url = "$BASE_URL")
+$release
 EOF
   fi
   printf '\nexports_files(["cpp_format.yaml"])\n' >> "$ws/BUILD.bazel"
@@ -242,5 +247,23 @@ grep -q "may predate the prebuilt code browser" "$WORK/stale.log" \
   || { tail -20 "$WORK/stale.log" >&2; fail "[stale] the failure does not explain itself"; }
 (cd "$WORK/stale" && consumer_bazel build //...) >"$WORK/stale.log" 2>&1 \
   || { tail -20 "$WORK/stale.log" >&2; fail "[stale] //... must still build: formatting does not need the browser"; }
+
+# ---------------------------------------------------------------------------
+# 4. No release() tag at all.
+# ---------------------------------------------------------------------------
+# The extension must not fail when merely *evaluated* -- `bazel mod deps` and
+# `bazel mod tidy` evaluate every extension, and cpp_formatting itself uses this
+# one without a tag, since nothing in it needs the prebuilt binary.  What is
+# missing is said when a repository is fetched, i.e. when something needs it.
+note "[untagged] no release(): mod deps works, the first use says what to add"
+make_consumer import none
+rm -rf "$WORK/untagged" && mv "$WORK/import" "$WORK/untagged"
+(cd "$WORK/untagged" && consumer_bazel mod deps) >"$WORK/untagged.log" 2>&1 \
+  || { tail -20 "$WORK/untagged.log" >&2; fail "[untagged] bazel mod deps must not need a release() tag"; }
+if (cd "$WORK/untagged" && consumer_bazel build //mini:index.index) >"$WORK/untagged.log" 2>&1; then
+  fail "[untagged] the index built without a cpp_format binary"
+fi
+grep -q 'add `cpp_format.release(version = ...)`' "$WORK/untagged.log" \
+  || { tail -20 "$WORK/untagged.log" >&2; fail "[untagged] the failure does not say what to add"; }
 
 echo "PASS"

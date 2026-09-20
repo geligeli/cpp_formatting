@@ -111,29 +111,19 @@ use_repo(gazelle_runner, "gazelle_runner")
 llvm = use_extension("//third_party/llvm:extensions.bzl", "llvm")
 use_repo(llvm, "iwyu", "llvm-project", "llvm-raw", "llvm_zlib", "llvm_zstd")
 
-# The prebuilt-binary kit's own extension, used through two proxies.  The
-# `use_extension`/`use_repo` pair is NOT a dev dependency: the kit's .bzl names
-# `@cpp_format_bin//:cpp_format`, and that label resolves through *this*
+# The prebuilt-binary kit's own extension.  This is NOT a dev dependency: the
+# kit's .bzl names `@cpp_format_bin//:cpp_format` and
+# `@code_browser_bin//:code_browser`, and those labels resolve through *this*
 # module's repo mapping even when a consumer imports the kit by URL, so the
-# mapping must survive cpp_formatting being a dependency.  The `release()` pin
-# IS one: as a dependency this module must not contribute a pin at all -- the
-# consumer's is the only one that may win, and a stale one here would download
-# a binary older than the aspect driving it.  Bazel merges both proxies into
-# one usage and drops the dev one when this module is not the root, which is
-# exactly the split wanted (a tag cannot carry `dev_dependency` itself).  The
-# pin therefore only matters when this repo is the root module; it names the
-# latest release that carries every flag the in-tree aspect passes, and is
-# bumped after each aspect change ships.
+# mapping must survive cpp_formatting being a dependency.
+#
+# There is no `release()` pin here, on purpose.  Nothing in this repository
+# uses the prebuilt binary -- its own demo, tests and dogfooding all build from
+# source -- and as a dependency this module must not contribute a pin: the
+# consumer's is the only one that may win, and a stale one here would hand them
+# a binary older than the aspect driving it.  (There used to be one, issued
+# through a second `dev_dependency = True` proxy, because the extension failed
+# when evaluated without a tag and `bazel mod deps` / `bazel mod tidy` evaluate
+# every extension.  The repositories now fail when *fetched* instead.)
 cpp_format = use_extension("//bazel/integration:extensions.bzl", "cpp_format")
 use_repo(cpp_format, "code_browser_bin", "cpp_format_bin")
-
-cpp_format_dev = use_extension(
-    "//bazel/integration:extensions.bzl",
-    "cpp_format",
-    dev_dependency = True,
-)
-cpp_format_dev.release(
-    version = "20260913-a0a8896",
-    # Optional but recommended for reproducible CI — pin per-asset hashes:
-    # sha256 = {"cpp_format-linux-x86_64": "…"},
-)
