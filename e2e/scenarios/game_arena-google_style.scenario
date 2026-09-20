@@ -1,6 +1,15 @@
-# The whole ruleset at once over the repo the tool is dogfooded on: six rename
-# scopes plus both rewrite passes.  1538 edits across 92 files apply with 0
+# The whole ruleset at once over the repo the tool is dogfooded on: nine rename
+# scopes plus both rewrite passes.  175 edits across 40 files apply with 0
 # conflicts, //... rebuilds, and a second pass has nothing left to do.
+#
+# It was 1538 edits across 92 files while the ruleset had only the broad
+# scopes -- and most of those were the ruleset being wrong about a repository
+# that already follows the style: member/trailing_ put an underscore on every
+# struct's public fields, and local/snake_case took the k off function-local
+# constants (static const std::regex kArenaOverride -> arena_override).  The
+# fine-grained scopes (public_member, const_member, const_local) with
+# most-specific-rule-wins are what removed them; no static const or constexpr
+# k-constant is touched now.
 #
 # Its first run broke the rebuild with one rename (35 errors, 8 files, one
 # cause): `method: UpperCamelCase` turned Engine::capabilities() into
