@@ -255,7 +255,7 @@ sh_test(
         "//bazel/testdata:demo.cpp",
         "//bazel/testdata:demo.h",
         "//bazel/testdata:demo_main.cpp",
-        "//bazel/testdata:index.index",
+        "//bazel/testdata:index.pb",
         "//code_browser/tools:http_get",
         "//cpp_formatting:cpp_format",
     ],

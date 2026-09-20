@@ -22,7 +22,7 @@ jobs:
           # names one CPU.
           #
           # `browser` is the second asset of a platform: the code browser, which
-          # the kit's `<name>.browse` target downloads (bazel/integration/).  It
+          # the kit's `cpp_format.sh browse` downloads (bazel/integration/).  It
           # is built with the same flags in the same invocation, so it shares
           # every LLVM and protobuf object with cpp_format.
           - runs-on: ubuntu-latest

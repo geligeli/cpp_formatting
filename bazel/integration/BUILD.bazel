@@ -1,8 +1,8 @@
 # Vendored cpp_format integration kit.  Import it by URL (archive_override) or
-# copy this directory into your repo, then either:
-#   * bazel run @cpp_formatting//bazel/integration:install   # drops cpp_format.sh
-#     into your workspace (default tools/cpp_format.sh), then run that script, or
-#   * load cpp_format.bzl for the cpp_format_targets() gate.
+# copy this directory into your repo, then
+#   bazel run @cpp_formatting//bazel/integration:install
+# drops cpp_format.sh into your workspace (default tools/cpp_format.sh); run that
+# script: check | diff | fix | compile_commands | index | browse.
 # See the README quick start.
 load(":cpp_format.bzl", "cpp_format_install")
 

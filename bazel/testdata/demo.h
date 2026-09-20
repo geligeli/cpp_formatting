@@ -5,9 +5,9 @@
 
 // Fixture for the cpp_format Bazel integration.  Conforms to the repository's
 // own cpp_format.yaml (the aspect reads the root module's; data members are
-// `trailing_`), so `bazel test //bazel/testdata:format.check` passes; drop the
-// trailing underscore from `item_count_` to see the gate fail and
-// `bazel run //bazel/testdata:format.diff` / `:format.fix` react.
+// `trailing_`), so `bazel test //bazel/testdata:format_check_test` passes; drop
+// the trailing underscore from `item_count_` to see the gate fail and
+// `tools/cpp_format.sh diff //bazel/testdata/...` / `... fix` react.
 struct Widget {
   int item_count_;
 };

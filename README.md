@@ -75,12 +75,11 @@ from your root `BUILD.bazel`:
 exports_files(["cpp_format.yaml"])
 ```
 
-**3. Lint / fix the whole repo.** Two entry points; pick per need.
-
-*Whole repo, or any pattern* — the `cpp_format.sh` wrapper. It runs *outside*
-Bazel (so it can drive `bazel build` for the aspect without nesting), so it's
-the one script you keep locally. Drop it in with one command — the aspect label
-is baked in, so it needs no configuration:
+**3. Lint / fix / browse the whole repo** — or any target pattern — with the
+`cpp_format.sh` wrapper. It runs *outside* Bazel (so it can drive `bazel build`
+for the aspect without nesting), so it's the one script you keep locally. Drop
+it in with one command — the labels of the aspect and of the release's binaries
+are baked in, so it needs no configuration and nothing in your BUILD files:
 
 ```sh
 bazel run @cpp_formatting//bazel/integration:install   # -> tools/cpp_format.sh
@@ -92,6 +91,7 @@ tools/cpp_format.sh fix            # apply the fixes in place
 tools/cpp_format.sh fix //app/...  # scope to a package tree
 tools/cpp_format.sh compile_commands   # write compile_commands.json for clangd
 tools/cpp_format.sh index          # write index.pb, the repo's symbol index
+tools/cpp_format.sh browse         # ... and serve the repo in the code browser
 ```
 
 Commit the placed script (it's a normal, editable file). It queries the
@@ -102,49 +102,47 @@ change — deduping, resolving template-dependent member tokens across
 translation units, and flagging genuine conflicts. Tag a target
 `no-cpp-format` to exclude it.
 
-*A pinned CI gate* — `cpp_format_targets` needs **no local script** (pure URL
-import), and gives a `bazel test` gate over a specific, reviewed dep set:
+There is deliberately no BUILD-file macro for any of this. What to format or
+index is a *pattern* — `//...` — and a pattern exists only on the command line:
+a rule's `deps` can name labels, never "everything". The script queries the
+targets under the pattern instead, so the whole repository is the default and
+nothing has to be listed or kept up to date. `tools/cpp_format.sh check` is the
+CI gate.
 
-```starlark
-load("@cpp_formatting//bazel/integration:cpp_format.bzl", "cpp_format_targets")
-
-cpp_format_targets(name = "format", deps = ["//app:main", "//lib:core"])
-```
-
-```sh
-bazel test //:format.check   # test gate    bazel run //:format.fix   # apply
-bazel run //:format.compile_commands      # write compile_commands.json
-```
-
-The same dep set can be **indexed and browsed**: `cpp_index_targets(name =
-"index", deps = [...])` defines `//:index.index`, an ordinary build target whose
-output is the merged symbol index of those targets (see
-[Symbol index](#symbol-index)), and `//:index.browse`:
+**Browse the repository.** One command indexes every `cc_*` target and starts
+the code browser on the result:
 
 ```sh
-bazel run //:index.browse                   # http://127.0.0.1:8080/
-bazel run //:index.browse -- --port=9000    # arguments after -- go to the server
+tools/cpp_format.sh browse                  # http://127.0.0.1:8080/
+tools/cpp_format.sh browse --port=9000      # flags go to the server
+tools/cpp_format.sh browse //app/...        # index one package tree only
+tools/cpp_format.sh browse --check          # index, print the stats, exit
 ```
 
-builds the index, imports it into SQLite and serves *your checkout* with every
-indexed token annotated -- click an identifier for its definition and
-references. The browser is a prebuilt release asset like `cpp_format` itself
-(Linux x86_64/aarch64 and macOS arm64; there is no Windows build yet), fetched
-the first time something needs it: `.browse` and the `.db` it depends on are
-tagged `manual`, so `bazel build //...` never downloads it. `deps` are the
-*roots* -- the aspect follows `deps`, so naming your binaries and tests covers
-the libraries under them. Put the macro in the package of its roots (they are
-usually package-private) and pass `testonly = True` if any of them is a test.
-If you **vendored** the kit, add `"code_browser_bin"` to your `use_repo(...)`.
+It builds the symbol index (see [Symbol index](#symbol-index)) into `index.pb`
+in the workspace root — add `index.pb*` to your `.gitignore` — and serves *your
+checkout* with every indexed token annotated: click an identifier for its
+definition and references. Before the server starts it prints the browser
+binary it resolved and the exact command line it runs, so you can restart the
+server by hand. **The index is a snapshot**, read once at start: after editing
+sources, stop the server and run `browse` again. Only the translation units
+that changed are re-parsed, and if the merged index comes out byte-identical it
+is left alone, so the browser does not re-import it either.
+
+The browser is a prebuilt release asset like `cpp_format` itself (Linux
+x86_64/aarch64 and macOS arm64; there is no Windows build yet), fetched the
+first time you browse — a repository that only formats never downloads it. The
+installed script names it by its canonical label, so your `use_repo(...)` does
+not have to list it. If you **vendored** the kit, the script's default labels
+resolve in your own module: add `"code_browser_bin"` to your `use_repo(...)`.
 
 **A `compile_commands.json` for free.** The aspect already derives every
-target's compile command, so both entry points can also write it out as a
+target's compile command, so the script can also write it out as a
 compilation database for clangd and other editors — no second Bazel
 dependency (Hedron & co.) needed. `cpp_format.sh compile_commands [pattern]`
 writes `compile_commands.json` in the workspace root (set
-`COMPILE_COMMANDS_OUT` to put it elsewhere), and `<name>.compile_commands`
-does the same via `bazel run` (pass a path to override). Neither compiles
-anything or runs `cpp_format`: the entries are written at analysis time, and
+`COMPILE_COMMANDS_OUT` to put it elsewhere). It neither compiles
+anything nor runs `cpp_format`: the entries are written at analysis time, and
 only the generated headers they mention get built. Entries use the execution
 root as `directory`, so relative flags (`-iquote .`, `bazel-out/...`,
 `external/...`) resolve without planting any symlinks in your tree, and the
@@ -152,12 +150,6 @@ absolute workspace path as `file`, which is what an editor opens.
 `no-cpp-format` targets are included here (they are only excluded from
 formatting). The command is the target's, not the file's: per-target `copts`
 are not part of it.
-
-Use one or the other — don't run `cpp_format.sh //...` while `cpp_format_targets`
-are defined over the same targets (the aspect would be applied twice and Bazel
-would report conflicting actions); the wrapper's query already skips the
-`cpp_format_targets` rule targets, so scoping the wrapper away from them is
-enough.
 
 > **Notes.** Only first-party `cc_*` targets are formatted (external deps are
 > skipped). Each header is owned by the single target that lists it in `hdrs`;
@@ -774,7 +766,7 @@ chmod +x ~/.local/bin/cpp_format
 - **CMake:** `cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ...`
 - **Bazel:** if you use the [Bazel integration](#add-cpp_format-to-your-bazel-codebase)
   you don't need one at all — and it writes one for your editor anyway:
-  `tools/cpp_format.sh compile_commands` or `bazel run //:format.compile_commands`
+  `tools/cpp_format.sh compile_commands`
 - **Bazel (Hedron plugin):** `bazel run @hedron_compile_commands//:refresh_all`
 - **Bear:** `bear -- make` (or your build command)
 
@@ -884,7 +876,7 @@ clang-tidy `--export-fixes` + `clang-apply-replacements` model. Splitting a
 target's translation units across actions changes nothing in it: the records
 were always merged across processes.
 
-**Entry points.** `cpp_format.sh <check|diff|fix> [pattern] [flags]` is the ergonomic
+**The entry point.** `cpp_format.sh <check|diff|fix> [pattern] [flags]` is the
 front door: it `bazel query`s the first-party `cc_*` targets under `pattern`
 (default `//...`), builds them with `--aspects=…%cpp_format_aspect
 --output_groups=+cpp_format_edits` to materialize each file's record, reads
@@ -898,33 +890,17 @@ aggregation step — `--report-rename-conflicts` lists every rename the run
 declined. Because the aspect and the wrapper rely on flags of the
 binary (`--owned-files`, `--aggregate --records-from`), the kit and the
 published binary are versioned together (see the release pin in
-`MODULE.bazel`). For a pinned CI gate, `cpp_format_targets(name, deps)`
-instead generates four graph targets:
-
-| Target | Kind | Purpose |
-|---|---|---|
-| `<name>.check` | `bazel test` | Hermetic lint gate — counts edits without reading sources; exits 1 if any. |
-| `<name>.diff` | `bazel run` | Prints the merged, git-apply-able unified diff (review artifact). |
-| `<name>.fix` | `bazel run` | Applies the edits in `$BUILD_WORKSPACE_DIRECTORY` (outside the action graph, since Bazel actions cannot mutate sources). |
-| `<name>.compile_commands` | `bazel run` | Writes a `compile_commands.json` for the deps (transitively) in `$BUILD_WORKSPACE_DIRECTORY`. Also available standalone as the `cpp_format_compile_commands(name, deps)` rule. |
-
-and `cpp_index_targets(name, deps)` generates `<name>.index` -- a
-`bazel build` target whose output is the merged symbol index of the deps (see
-[Symbol index](#symbol-index)); `cpp_format.sh index [pattern]` is its
-query-driven twin. The same macro also generates `<name>.db` (the index
-imported into SQLite, another cached build action) and `<name>.browse` (`bazel
-run` it to build both and serve the workspace in
-[code_browser/](code_browser/)). In this repository both build the browser
-from source; in the prebuilt kit they run the release's `code_browser` asset
-(`@code_browser_bin`, fetched on demand) and are tagged `manual`, so a wildcard
-build neither downloads it nor fails on a host that has none (Windows).
+`MODULE.bazel`). `compile_commands`, `index` and `browse` are the same
+query-and-build with a different output group and a different merge. There is
+no rule that does this inside the build graph: a rule's `deps` cannot be a
+pattern, and a fix cannot be an action (Bazel actions cannot mutate sources).
 
 **Compilation database.** The aspect writes each target's compile command out
 as a `<name>.compile_commands.jsonl` fragment (one JSON object per source
 file, a plain `ctx.actions.write`; output group `cpp_format_compile_commands`,
 which also carries the target's transitive headers so the generated ones get
-built). The `.compile_commands` target and `cpp_format.sh compile_commands`
-merge the fragments into one `compile_commands.json`, filling in the two
+built). `cpp_format.sh compile_commands`
+merges the fragments into one `compile_commands.json`, filling in the two
 things only known at run time: `directory` (the execution root, where every
 relative flag resolves) and `file` (the source's absolute workspace path). A
 file listed by several targets keeps the first entry. Nothing is compiled and
@@ -940,8 +916,9 @@ records and aggregates them (`--aggregate`), so the kit needs only that one
 download. Alternatively, if `cpp_formatting` is already a source dependency you
 build, use [bazel/cpp_format.bzl](bazel/cpp_format.bzl) directly — the same
 aspect, but it drives `//cpp_formatting:cpp_format` from source and stages the
-Clang builtin headers from `@llvm-project` (see
-[bazel/testdata/BUILD.bazel](bazel/testdata/BUILD.bazel) for a worked example).
+Clang builtin headers from `@llvm-project`; point the script at it through its
+environment, as this repository's own [tools/cpp_format.sh](tools/cpp_format.sh)
+does.
 
 ---
 
@@ -1006,21 +983,22 @@ first-party headers, so a header is indexed by every TU that includes it, and
 a header-only dependency by its dependents' TUs. A `no-cpp-index` tag opts a
 target out. Then
 `cpp_format --merge-index` unions the units: files by path, symbols by USR,
-identical occurrences deduplicated. Merging mutates nothing, so
-`cpp_index_targets(name, deps)` makes it an ordinary cached build action --
-`bazel build //:index.index` produces `index.index.pb` -- while
-`cpp_format.sh index` does the same for any target pattern. An index is itself
-a valid merge input, so it can be extended with further units.
+identical occurrences deduplicated. `cpp_format.sh index [pattern]` does both
+for the targets under a pattern -- the whole repository by default. An index is
+itself a valid merge input, so it can be extended with further units.
 
 **Browsing it.** [code_browser/](code_browser/) is an HTTP server that serves
 a checkout with every indexed token annotated: click an identifier to see
 what it is, jump to its definition, list its references. It reads the index
-from SQLite (`index_import`, or `<name>.db` under Bazel), so nothing is loaded
-up front. `bazel run //:index.browse` builds the index, imports it and serves
-the workspace at `http://127.0.0.1:8080/` (`-- --port=N` picks a port); see
-[code_browser/README.md](code_browser/README.md) for the routes. In this
-repository it is built from source; a consumer of the prebuilt kit gets the
-same `bazel run //:index.browse` from a release asset, with nothing to build.
+from SQLite (`code_browser --index=index.pb` imports it into `index.pb.sqlite`
+when that is missing or older), so nothing is loaded up front.
+`tools/cpp_format.sh browse` is the one command: it indexes the repository,
+prints the browser's binary and command line, and serves the workspace at
+`http://127.0.0.1:8080/` (`--port=N` picks a port); run it again to update the
+index. See [code_browser/README.md](code_browser/README.md) for the routes. In
+this repository `tools/cpp_format.sh` builds everything from source; a consumer
+of the prebuilt kit gets the same command from a release asset, with nothing to
+build.
 
 **Extending it.** Any producer may emit `IndexUnit`s -- a proto-aware indexer
 would describe `.proto` files with `Language.PROTO` symbols and let the C++

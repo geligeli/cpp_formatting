@@ -1,5 +1,6 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("//bazel:cpp_format.bzl", "cpp_format_targets", "cpp_index_targets")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//bazel/testdata:aspect_outputs.bzl", "cpp_format_records", "cpp_index_units")
 
 # Fixture for `implementation_deps`.  A target's CcInfo is what it *exports*,
 # and an implementation dep is by definition not exported -- so an aspect that
@@ -20,16 +21,30 @@ cc_library(
     implementation_deps = [":gauge"],
 )
 
-# :format.check is the test: building it runs the emit action for meter.cpp,
-# and passing it means the use of Gauge::level_ there was seen with gauge.h
-# owned (the aspect propagates along implementation_deps as it does along deps).
-cpp_format_targets(
-    name = "format",
+# :format_check_test is the test: building its records runs the emit action for
+# meter.cpp, and passing it means the use of Gauge::level_ there was seen with
+# gauge.h owned (the aspect propagates along implementation_deps as it does
+# along deps).
+cpp_format_records(
+    name = "format_records",
     deps = [":meter"],
 )
 
-# The same for the index aspect; `bazel build //...` builds :index.index.
-cpp_index_targets(
-    name = "index",
+sh_test(
+    name = "format_check_test",
+    srcs = ["//bazel/testdata:aggregate_check_test.sh"],
+    args = [
+        "$(location //cpp_formatting:aggregate_edits)",
+        "$(locations :format_records)",
+    ],
+    data = [
+        ":format_records",
+        "//cpp_formatting:aggregate_edits",
+    ],
+)
+
+# The same for the index aspect; `bazel build //...` builds the unit.
+cpp_index_units(
+    name = "index_units",
     deps = [":meter"],
 )

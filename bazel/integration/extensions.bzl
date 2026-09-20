@@ -12,9 +12,9 @@ building Clang/LLVM from source.  The binary embeds the Clang builtin headers
 and self-extracts them at runtime, so nothing else needs fetching.
 
 A second repository, `@code_browser_bin//:code_browser`, is the code browser of
-the same release -- what `<name>.db` and `<name>.browse` of `cpp_index_targets`
-run.  Repositories are fetched on demand, so it is downloaded only when one of
-those two targets is built; a consumer who only formats never pays for it.
+the same release -- what `cpp_format.sh browse` runs.  Repositories are fetched
+on demand, so it is downloaded the first time someone browses; a consumer who
+only formats never pays for it.
 """
 
 # (os, arch) -> release asset filename.  `rctx.os.arch` reports the JVM arch
@@ -99,9 +99,9 @@ def _browser_repo_impl(rctx):
     asset = _BROWSER_ASSETS.get(key)
     if not asset:
         fail(("cpp_format: there is no prebuilt code_browser for host %r, so " +
-              "<name>.db and <name>.browse of cpp_index_targets are not " +
-              "available here (<name>.index is); build " +
-              "//code_browser:code_browser from source instead") % (key,))
+              "`cpp_format.sh browse` is not available here (`cpp_format.sh " +
+              "index` is); build //code_browser:code_browser from source " +
+              "instead") % (key,))
     out = "bin/code_browser"
     url = "{base}/{version}/{asset}".format(
         base = rctx.attr.base_url.rstrip("/"),

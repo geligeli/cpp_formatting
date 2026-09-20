@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Reads the merged index that //bazel/testdata:index.index built and checks the
-# cross-target reference: demo_main.cpp (a cc_binary) uses Widget::item_count_,
-# which //bazel/testdata:demo declares in demo.h.  Both were indexed by
-# separate per-file actions and merged by the index target's own action.
+# Reads the merged index //bazel/testdata:index.pb and checks the cross-target
+# reference: demo_main.cpp (a cc_binary) uses Widget::item_count_, which
+# //bazel/testdata:demo declares in demo.h.  Both were indexed by separate
+# per-file actions of the index aspect and merged with `--merge-index`, as
+# `cpp_format.sh index` merges them.
 #
 # Arguments (Bazel $(location ...) expansions):
-#   $1  the merged index (index.index.pb)
+#   $1  the merged index (index.pb)
 #   $2  cpp_format binary
 #   $3  demo.h
 #   $4  demo_main.cpp

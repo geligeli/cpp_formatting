@@ -11,35 +11,33 @@ One action per source file -- like CppCompile, so Bazel parallelises, caches
 and remotely executes at file granularity -- writes a structured edit-record
 JSON file (offset-level edits plus a template-dependent-token resolution
 sidecar).  The `aggregate_edits` tool merges the per-file records into one
-repository change, resolving dependent tokens across files and targets.  Four
-rules drive it:
+repository change, resolving dependent tokens across files and targets.
 
-  * `<name>.check` — a test that fails when any edit would be applied (lint gate),
-  * `<name>.diff`  — `bazel run` prints the merged unified diff (review),
-  * `<name>.fix`   — `bazel run` applies the edits in $BUILD_WORKSPACE_DIRECTORY,
-  * `<name>.compile_commands` — `bazel run` writes a compile_commands.json there.
-
-Because Bazel actions cannot mutate workspace sources, `.fix` runs outside the
-action graph via `bazel run`, consuming the same records the aspect produced.
+Nothing here applies the aspect for you, because what to apply it to is a
+target *pattern* (`//...`), and a pattern is a command-line notion: a rule's
+`deps` can only name labels.  `bazel/integration/cpp_format.sh` is the driver --
+it queries the cc_* targets under a pattern, builds the aspect's output group
+over them and merges the result outside Bazel, which is also the only place a
+fix can happen (an action cannot mutate workspace sources): `check`, `diff`,
+`fix`, `compile_commands`, `index` and `browse`.  `--config=lint` and
+`--config=index` in .bazelrc build the per-file outputs alone.
 
 The compile command the aspect derives for a target is also what an editor
 wants, so the aspect writes it out as a `<name>.compile_commands.jsonl`
 fragment per target (a plain `ctx.actions.write`, no tool run, nothing
-compiled), and `.compile_commands` / `cpp_format.sh compile_commands` merge the
-fragments into one file -- no second Bazel dependency needed for a
-compilation database.
+compiled), and `cpp_format.sh compile_commands` merges the fragments into one
+file -- no second Bazel dependency needed for a compilation database.
 
 A second aspect, `cpp_index_aspect`, builds the symbol index the same way: one
 `cpp_format --emit-index` action per translation unit writes its
 `cpp_index.IndexUnit` (see cpp_formatting/index.proto) -- the TU's own file
-plus every owned header it includes -- and
-`cpp_index_targets(name, deps)` defines `<name>.index`, whose action merges the
-transitive units into one `Index` with `cpp_format --merge-index`.  Unlike
-`.fix`, merging mutates nothing, so it is an ordinary cached build action and
-`bazel build` produces the index file.  `cpp_format.sh index` does the same
-for a target pattern and writes `index.pb` into the workspace.  The same macro
-defines `<name>.db` (the index imported into SQLite) and `<name>.browse`, which
-`bazel run` to build the index and serve the workspace in //code_browser.
+plus every owned header it includes.  `cpp_format.sh index` merges the units of
+a target pattern into one `Index` with `cpp_format --merge-index` and writes
+`index.pb` into the workspace; `cpp_format.sh browse` then serves the workspace
+in //code_browser over it.
+
+The providers are public so that a rule of your own can consume the aspects'
+outputs; bazel/testdata/aspect_outputs.bzl does, for this repository's tests.
 """
 
 load("@rules_cc//cc:action_names.bzl", "CPP_COMPILE_ACTION_NAME")
@@ -199,9 +197,9 @@ def _compile_flags(ctx, cc_toolchain, cc_ctx):
 # The compile command the aspect derives is exactly what a compilation database
 # wants, so every first-party target with sources also gets a
 # `<name>.compile_commands.jsonl` fragment: one JSON object per source file,
-# written by `ctx.actions.write` (no tool runs, nothing is compiled).  The
-# `.compile_commands` run target and `cpp_format.sh compile_commands` merge the
-# fragments into a `compile_commands.json`.  Two things are only known at run
+# written by `ctx.actions.write` (no tool runs, nothing is compiled).
+# `cpp_format.sh compile_commands` merges the fragments into a
+# `compile_commands.json`.  Two things are only known at run
 # time and are left as placeholders for the merger to fill in:
 #
 #   * `directory` is the execution root, which is where every relative flag
@@ -411,212 +409,6 @@ cpp_format_aspect = aspect(
 )
 
 # ---------------------------------------------------------------------------
-# Aggregation rules (check / diff / fix)
-# ---------------------------------------------------------------------------
-
-# Bash runfiles library bootstrap (Bazel v3 snippet) so `rlocation` resolves the
-# aggregate_edits binary and the per-file record files at run/test time.
-_RUNFILES_PREAMBLE = """#!/usr/bin/env bash
-# --- begin runfiles.bash initialization v3 ---
-set -uo pipefail; set +e; f=bazel_tools/tools/bash/runfiles/runfiles.bash
-source "${RUNFILES_DIR:-/dev/null}/$f" 2>/dev/null || \\
-  source "$(grep -sm1 "^$f " "${RUNFILES_MANIFEST_FILE:-/dev/null}" | cut -f2- -d' ')" 2>/dev/null || \\
-  source "$0.runfiles/$f" 2>/dev/null || \\
-  source "$(grep -sm1 "^$f " "$0.runfiles_manifest" | cut -f2- -d' ')" 2>/dev/null || \\
-  source "$(grep -sm1 "^$f " "$0.exe.runfiles_manifest" | cut -f2- -d' ')" 2>/dev/null || \\
-  { echo>&2 "ERROR: cannot find $f"; exit 1; }; f=; set -e
-# --- end runfiles.bash initialization v3 ---
-records=()
-"""
-
-# A repository's worth of per-file records does not fit on a command line, so
-# the generated scripts hand the aggregator a list file.
-_RECORD_LIST_SNIPPET = """list="$(mktemp "${TEST_TMPDIR:-${TMPDIR:-/tmp}}/cpp_format_records.XXXXXX")"
-printf '%s\\n' "${records[@]}" > "$list"
-"""
-
-def _rlocation_path(f):
-    # runfiles key for `rlocation`: external-repo files carry a "../" prefix in
-    # short_path; main-repo files are addressed under the root module name.
-    if f.short_path.startswith("../"):
-        return f.short_path[3:]
-    return "_main/" + f.short_path
-
-def _records_of(ctx):
-    return depset(transitive = [
-        d[CppFormatEditsInfo].records
-        for d in ctx.attr.deps
-        if CppFormatEditsInfo in d
-    ]).to_list()
-
-def _aggregator_impl(ctx):
-    recs = _records_of(ctx)
-    agg = ctx.executable._aggregate
-    rec_lines = "".join([
-        'records+=("$(rlocation "_main/' + f.short_path + '")")\n'
-        for f in recs
-    ])
-    script = ctx.actions.declare_file(ctx.label.name + ".sh")
-    ctx.actions.write(
-        output = script,
-        is_executable = True,
-        content = (
-            _RUNFILES_PREAMBLE + rec_lines +
-            'AGG="$(rlocation "_main/' + agg.short_path + '")"\n' +
-            _RECORD_LIST_SNIPPET +
-            "rc=0\n" +
-            '"$AGG" ' + ctx.attr.mode_flags +
-            ' --root="${BUILD_WORKSPACE_DIRECTORY:-$PWD}" --records-from="$list" "$@" || rc=$?\n' +
-            'rm -f "$list"\n' +
-            "exit $rc\n"
-        ),
-    )
-    runfiles = ctx.runfiles(files = recs + [agg])
-    runfiles = runfiles.merge(ctx.attr._aggregate[DefaultInfo].default_runfiles)
-    runfiles = runfiles.merge(ctx.attr._bash_runfiles[DefaultInfo].default_runfiles)
-    return [DefaultInfo(executable = script, runfiles = runfiles)]
-
-_AGG_ATTRS = {
-    "deps": attr.label_list(
-        aspects = [cpp_format_aspect],
-        providers = [CcInfo],
-        doc = "cc_* targets to format (transitively).",
-    ),
-    "mode_flags": attr.string(default = ""),
-    "_aggregate": attr.label(
-        default = Label("//cpp_formatting:aggregate_edits"),
-        executable = True,
-        cfg = "target",
-    ),
-    "_bash_runfiles": attr.label(default = Label("@bazel_tools//tools/bash/runfiles")),
-}
-
-_cpp_format_run = rule(
-    implementation = _aggregator_impl,
-    executable = True,
-    attrs = _AGG_ATTRS,
-)
-
-_cpp_format_test = rule(
-    implementation = _aggregator_impl,
-    test = True,
-    attrs = _AGG_ATTRS,
-)
-
-# ---------------------------------------------------------------------------
-# compile_commands.json
-# ---------------------------------------------------------------------------
-
-# Merges the aspect's per-target `.compile_commands.jsonl` fragments into one
-# `compile_commands.json`, filling in the two run-time placeholders (see
-# `_compile_commands_fragment`).  cpp_format.sh carries the same two functions
-# and runs the merge outside Bazel over the fragments at their deterministic
-# bazel-bin paths.  Args: <exec root> <workspace> <output> <fragment>...
-# A file listed by several targets keeps the first entry seen.
-_MERGE_COMPILE_COMMANDS_SNIPPET = """
-json_escape() { local s="$1" bs='\\'; s="${s//"$bs"/"$bs$bs"}"; s="${s//\\"/$bs\\"}"; printf '%s' "$s"; }
-merge_compile_commands() {
-  local exec_root="$1" workspace="$2" out="$3"; shift 3
-  local dir_json ws_json frag line key first=1
-  dir_json="$(json_escape "$exec_root")"
-  ws_json="$(json_escape "$workspace")"
-  declare -A seen=()
-  {
-    printf '[\\n'
-    for frag in "$@"; do
-      while IFS= read -r line; do
-        [[ -n "$line" ]] || continue
-        key="${line#*\\"file\\":\\"}"; key="${key%%\\"*}"
-        [[ -z "${seen[$key]:-}" ]] || continue
-        seen[$key]=1
-        line="${line//\\"__EXEC_ROOT__\\"/"\\"$dir_json\\""}"
-        line="${line//\\"__WORKSPACE__\\//"\\"$ws_json/"}"
-        [[ $first -eq 1 ]] || printf ',\\n'
-        first=0
-        printf '  %s' "$line"
-      done < "$frag"
-    done
-    printf '\\n]\\n'
-  } > "$out.tmp"
-  mv -f "$out.tmp" "$out"
-}
-"""
-
-def _compile_commands_of(ctx):
-    return depset(transitive = [
-        d[CppFormatEditsInfo].compile_commands
-        for d in ctx.attr.deps
-        if CppFormatEditsInfo in d
-    ]).to_list()
-
-def _compile_commands_impl(ctx):
-    frags = _compile_commands_of(ctx)
-    frag_lines = "".join([
-        'frags+=("$(rlocation "' + _rlocation_path(f) + '")")\n'
-        for f in frags
-    ])
-    script = ctx.actions.declare_file(ctx.label.name + ".sh")
-    ctx.actions.write(
-        output = script,
-        is_executable = True,
-        content = (
-            _RUNFILES_PREAMBLE + "frags=()\n" + frag_lines +
-            _MERGE_COMPILE_COMMANDS_SNIPPET +
-            # Under `bazel run` the runfiles tree sits inside bazel-bin, which
-            # is inside the execution root -- the directory every relative
-            # flag in the entries resolves against.
-            'ws="${BUILD_WORKSPACE_DIRECTORY:?run this with \'bazel run\'}"\n' +
-            'rf="${RUNFILES_DIR:-$PWD}"\n' +
-            'exec_root="${rf%/bazel-out/*}"\n' +
-            'out="${1:-' + ctx.attr.out + '}"\n' +
-            '[[ "$out" = /* ]] || out="${BUILD_WORKING_DIRECTORY:-$ws}/$out"\n' +
-            'merge_compile_commands "$exec_root" "$ws" "$out" "${frags[@]}"\n' +
-            'echo "cpp_format: wrote $out (${#frags[@]} targets)"\n'
-        ),
-    )
-
-    # The transitive headers ride along as default outputs (not runfiles, which
-    # would symlink every one of them): `bazel run` builds them, so the
-    # generated headers the entries name exist once the file is written.
-    headers = [d[CcInfo].compilation_context.headers for d in ctx.attr.deps if CcInfo in d]
-    runfiles = ctx.runfiles(files = frags)
-    runfiles = runfiles.merge(ctx.attr._bash_runfiles[DefaultInfo].default_runfiles)
-    return [DefaultInfo(
-        executable = script,
-        files = depset(direct = [script], transitive = headers),
-        runfiles = runfiles,
-    )]
-
-cpp_format_compile_commands = rule(
-    doc = "bazel run this to write a compile_commands.json for `deps` (transitively) " +
-          "into $BUILD_WORKSPACE_DIRECTORY (default compile_commands.json; override " +
-          "with a positional arg).  Nothing is compiled and cpp_format is not run: the " +
-          "entries are the compile commands the cpp_format aspect derives for each target.",
-    implementation = _compile_commands_impl,
-    executable = True,
-    attrs = {
-        "deps": attr.label_list(
-            aspects = [cpp_format_aspect],
-            providers = [CcInfo],
-            doc = "cc_* targets to cover (transitively).",
-        ),
-        "out": attr.string(
-            default = "compile_commands.json",
-            doc = "Default workspace-relative output path.",
-        ),
-        "_bash_runfiles": attr.label(default = Label("@bazel_tools//tools/bash/runfiles")),
-    },
-)
-
-def cpp_format_targets(name, deps, **kwargs):
-    """Defines <name>.check (test), <name>.diff, <name>.fix and
-    <name>.compile_commands (bazel run)."""
-    _cpp_format_test(name = name + ".check", deps = deps, mode_flags = "--check", **kwargs)
-    _cpp_format_run(name = name + ".diff", deps = deps, mode_flags = "", **kwargs)
-    _cpp_format_run(name = name + ".fix", deps = deps, mode_flags = "--apply", **kwargs)
-    cpp_format_compile_commands(name = name + ".compile_commands", deps = deps, **kwargs)
-
-# ---------------------------------------------------------------------------
 # Symbol index
 # ---------------------------------------------------------------------------
 
@@ -748,149 +540,3 @@ cpp_index_aspect = aspect(
         ),
     },
 )
-
-def _index_impl(ctx):
-    units = depset(transitive = [
-        d[CppIndexInfo].units
-        for d in ctx.attr.deps
-        if CppIndexInfo in d
-    ])
-    out = ctx.actions.declare_file(ctx.label.name + ".pb")
-
-    # The fixed flags and the unit list are separate Args objects: the list
-    # goes through a param file (a repository's worth of units does not fit on
-    # a command line), and `use_param_file` would sweep `--merge-index` into
-    # that file too, where the binary's sub-command dispatch cannot see it.
-    fixed = ctx.actions.args()
-    fixed.add("--merge-index")
-    fixed.add("--output", out)
-    listed = ctx.actions.args()
-    listed.add_all(units)
-    listed.use_param_file("--records-from=%s", use_always = True)
-    listed.set_param_file_format("multiline")
-    ctx.actions.run(
-        executable = ctx.executable._cpp_format,
-        arguments = [fixed, listed],
-        inputs = units,
-        outputs = [out],
-        mnemonic = "CppIndexMerge",
-        progress_message = "cpp_format: merging index " + ctx.label.name,
-    )
-    return [DefaultInfo(files = depset([out]))]
-
-_cpp_index = rule(
-    doc = "Builds <name>.pb, the merged cpp_index.Index of `deps` (transitively). " +
-          "An ordinary build action: `bazel build` it, and read it with " +
-          "`cpp_format --dump-index`.",
-    implementation = _index_impl,
-    attrs = {
-        "deps": attr.label_list(
-            aspects = [cpp_index_aspect],
-            providers = [CcInfo],
-            doc = "cc_* targets to index (transitively).",
-        ),
-        "_cpp_format": attr.label(
-            default = Label("//cpp_formatting:cpp_format"),
-            executable = True,
-            cfg = "exec",
-        ),
-    },
-)
-
-def _index_sqlite_impl(ctx):
-    index = ctx.file.index
-    out = ctx.actions.declare_file(ctx.label.name + ".sqlite")
-    args = ctx.actions.args()
-    args.add(index)
-    args.add("--out", out)
-    ctx.actions.run(
-        executable = ctx.executable._index_import,
-        arguments = [args],
-        inputs = [index],
-        outputs = [out],
-        mnemonic = "CppIndexImport",
-        progress_message = "cpp_format: importing index " + ctx.label.name,
-    )
-    return [DefaultInfo(files = depset([out]))]
-
-_cpp_index_sqlite = rule(
-    doc = "Imports a merged index (<name>.index.pb) into the SQLite database " +
-          "//code_browser serves, as an ordinary cached build action.",
-    implementation = _index_sqlite_impl,
-    attrs = {
-        "index": attr.label(
-            allow_single_file = [".pb"],
-            mandatory = True,
-            doc = "The <name>.index target (its .pb output).",
-        ),
-        "_index_import": attr.label(
-            default = Label("//code_browser:index_import"),
-            executable = True,
-            cfg = "exec",
-        ),
-    },
-)
-
-def _browse_impl(ctx):
-    db = ctx.file.db
-    browser = ctx.executable._code_browser
-    script = ctx.actions.declare_file(ctx.label.name + ".sh")
-    ctx.actions.write(
-        output = script,
-        is_executable = True,
-        content = (
-            _RUNFILES_PREAMBLE +
-            'db="$(rlocation "' + _rlocation_path(db) + '")"\n' +
-            'browser="$(rlocation "' + _rlocation_path(browser) + '")"\n' +
-            # The checkout is the workspace `bazel run` was invoked in; the
-            # index names files relative to the execution root, which the
-            # runfiles tree sits inside (bazel-bin is under it) -- the same
-            # derivation .compile_commands makes.  Passing it explicitly keeps
-            # a --symlink_prefix that hides the bazel-out link from mattering.
-            'ws="${BUILD_WORKSPACE_DIRECTORY:?run this with \'bazel run\'}"\n' +
-            'rf="${RUNFILES_DIR:-$PWD}"\n' +
-            'exec_root="${rf%/bazel-out/*}"\n' +
-            'exec "$browser" --db="$db" --root="$ws" --exec-root="$exec_root" "$@"\n'
-        ),
-    )
-    runfiles = ctx.runfiles(files = [db, browser])
-    runfiles = runfiles.merge(ctx.attr._code_browser[DefaultInfo].default_runfiles)
-    runfiles = runfiles.merge(ctx.attr._bash_runfiles[DefaultInfo].default_runfiles)
-    return [DefaultInfo(executable = script, runfiles = runfiles)]
-
-_cpp_browse = rule(
-    doc = "`bazel run` this to serve the workspace in the code browser over the " +
-          "index database `db`: it builds the index (every unit, the merge, the " +
-          "import) and starts //code_browser:code_browser on it.  Arguments after " +
-          "`--` go to the server (--port, --address, --check, ...).",
-    implementation = _browse_impl,
-    executable = True,
-    attrs = {
-        "db": attr.label(
-            allow_single_file = [".sqlite"],
-            mandatory = True,
-            doc = "The <name>.db target (its .sqlite output).",
-        ),
-        "_code_browser": attr.label(
-            default = Label("//code_browser:code_browser"),
-            executable = True,
-            cfg = "target",
-        ),
-        "_bash_runfiles": attr.label(default = Label("@bazel_tools//tools/bash/runfiles")),
-    },
-)
-
-def cpp_index_targets(name, deps, **kwargs):
-    """Defines three targets over `deps` and everything they depend on:
-
-      * `<name>.index`  -- a build target whose output is the merged index
-        (<name>.index.pb),
-      * `<name>.db`     -- the same index imported into SQLite (<name>.db.sqlite),
-        the form the code browser reads,
-      * `<name>.browse` -- `bazel run` it to build both and serve the workspace
-        at http://127.0.0.1:8080/ with every indexed token annotated
-        (`-- --port=N` to pick a port, `-- --check` to only print the stats).
-    """
-    _cpp_index(name = name + ".index", deps = deps, **kwargs)
-    _cpp_index_sqlite(name = name + ".db", index = ":" + name + ".index", **kwargs)
-    _cpp_browse(name = name + ".browse", db = ":" + name + ".db", **kwargs)

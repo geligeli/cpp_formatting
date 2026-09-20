@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The prebuilt kit's `bazel run //:<name>.browse`, in a consumer workspace.
+# The prebuilt kit's `cpp_format.sh browse`, in a consumer workspace.
 #
 #   e2e/kit_browse_test.sh [--tool=PATH] [--browser=PATH] [--work-dir=DIR] [--keep]
 #
@@ -15,23 +15,29 @@
 # Both ways of consuming the kit are exercised over a copy of
 # e2e/testdata/mini_repo:
 #   import   bazel_dep + local_path_override (what `archive_override` of a tag
-#            is for a consumer); the kit's labels resolve through
-#            cpp_formatting's own repo mapping
-#   vendor   bazel/integration/ copied to //third_party/cpp_format; the consumer
-#            names both repositories in its own use_repo()
+#            is for a consumer), the script placed by `bazel run
+#            @cpp_formatting//bazel/integration:install`.  The consumer's
+#            use_repo() lists *only* cpp_format_bin, as the README's quick start
+#            has it: `@code_browser_bin` is not visible from its command line,
+#            and `browse` works through the canonical label `install` baked in.
+#   vendor   bazel/integration/ copied to //third_party/cpp_format and the
+#            script run from there; the consumer names both repositories in its
+#            own use_repo(), which is where the script's default labels resolve
 #
 # Asserted for each:
-#   * `bazel build //...` succeeds and does NOT fetch the browser -- <name>.db
-#     and <name>.browse are `manual`, so a consumer who only formats never
-#     downloads it;
-#   * `bazel run //mini:index.browse -- --check` builds index, database and
-#     launcher, and the browser opens the database;
+#   * `bazel build //...` succeeds and does NOT fetch the browser -- a consumer
+#     who only formats never downloads it;
+#   * `cpp_format.sh browse --check` indexes the whole repository (no target
+#     named anywhere), fetches the browser, prints its binary, its command line
+#     and how to update the index, and the browser opens the database;
+#   * a second run re-imports nothing: the merged index did not change, so
+#     index.pb is left alone and its database stays current;
 #   * the launched server serves *the consumer's checkout*: /api/repo names it
 #     as root, /api/file returns its bytes, and a cross-target reference
 #     (geometry.cpp -> a member declared in shapes.h) is in the index;
 #   * a release without the browser asset fails with a message that says so;
 #   * with no release() tag at all, `bazel mod deps` still works, and the first
-#     target that needs the binary says which line to add.
+#     thing that needs the binary says which line to add.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -42,7 +48,7 @@ for arg in "$@"; do
     --browser=*) BROWSER="${arg#*=}" ;;
     --work-dir=*) WORK="${arg#*=}" ;;
     --keep) KEEP=1 ;;
-    -h|--help) sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -77,9 +83,14 @@ children_of() {
 # The consumer's Bazel must not inherit this machine's rc files: a home rc that
 # turns on remote execution would send the index actions to a worker that has
 # neither the consumer's (non-hermetic) toolchain nor its system headers.
+# cpp_format.sh runs "$BAZEL" as one word, so the startup flags also live in a
+# wrapper it is pointed at.
 consumer_bazel() {
   bazel --nohome_rc --nosystem_rc --output_user_root="$WORK/bazel_root" "$@"
 }
+printf '#!/usr/bin/env bash\nexec bazel --nohome_rc --nosystem_rc --output_user_root="%s" "$@"\n' \
+  "$WORK/bazel_root" > "$WORK/bazel"
+chmod +x "$WORK/bazel"
 
 # ---------------------------------------------------------------------------
 # 1. The two binaries, from this checkout unless given.
@@ -133,9 +144,7 @@ make_consumer() {  # <flavor> <version>
   # version "none": the consumer uses the extension but issues no release() tag.
   local release="cpp_format.release(version = \"$version\", base_url = \"$BASE_URL\")"
   [[ "$version" == none ]] && release="# (no cpp_format.release() tag)"
-  local kit
   if [[ "$flavor" == vendor ]]; then
-    kit="//third_party/cpp_format"
     mkdir -p "$ws/third_party/cpp_format"
     cp "$REPO_ROOT/bazel/integration"/{cpp_format.bzl,extensions.bzl,BUILD.bazel,cpp_format.sh} \
        "$ws/third_party/cpp_format/"
@@ -146,7 +155,6 @@ $release
 use_repo(cpp_format, "code_browser_bin", "cpp_format_bin")
 EOF
   else
-    kit="@cpp_formatting//bazel/integration"
     cat >> "$ws/MODULE.bazel" <<EOF
 
 bazel_dep(name = "cpp_formatting", version = "0.1.0", dev_dependency = True)
@@ -155,26 +163,27 @@ local_path_override(module_name = "cpp_formatting", path = "$REPO_ROOT")
 cpp_format = use_extension("@cpp_formatting//bazel/integration:extensions.bzl", "cpp_format", dev_dependency = True)
 $release
 EOF
+    # Only the formatter's repository, as the README's quick start has it.
+    [[ "$version" == none ]] || printf 'use_repo(cpp_format, "cpp_format_bin")\n' >> "$ws/MODULE.bazel"
   fi
   printf '\nexports_files(["cpp_format.yaml"])\n' >> "$ws/BUILD.bazel"
 
-  # Next to its roots, as a consumer would write it: a repository's binaries
-  # and tests are normally package-private, and tests are testonly.
-  cat >> "$ws/mini/BUILD.bazel" <<EOF
+}
 
-load("$kit:cpp_format.bzl", "cpp_index_targets")
-
-# The roots are enough: the aspect follows deps, so naming the binary and the
-# test covers :geometry and :shapes under them.
-cpp_index_targets(
-    name = "index",
-    testonly = True,
-    deps = [
-        ":demo",
-        ":shapes_test",
-    ],
-)
-EOF
+# The script as each flavor has it: copied in with the vendored kit, or placed
+# by the kit's install target, which bakes the aspect's and the two binaries'
+# canonical labels into it.  Prints the script's path.
+consumer_script() {  # <workspace dir name> <flavor>
+  local ws="$WORK/$1" flavor="$2"
+  if [[ "$flavor" == vendor ]]; then
+    echo "$ws/third_party/cpp_format/cpp_format.sh"
+    return
+  fi
+  if [[ ! -x "$ws/tools/cpp_format.sh" ]]; then
+    (cd "$ws" && consumer_bazel run @cpp_formatting//bazel/integration:install) >"$WORK/$1.install.log" 2>&1 \
+      || { tail -30 "$WORK/$1.install.log" >&2; fail "[$1] bazel run ...:install failed"; }
+  fi
+  echo "$ws/tools/cpp_format.sh"
 }
 
 check_consumer() {  # <flavor>
@@ -185,20 +194,44 @@ check_consumer() {  # <flavor>
   local ext_root
   ext_root="$(cd "$ws" && consumer_bazel info output_base 2>/dev/null)/external"
   if compgen -G "$ext_root/*code_browser_bin/bin/code_browser" >/dev/null; then
-    fail "[$flavor] //... fetched the code browser; .db/.browse must be manual"
+    fail "[$flavor] //... fetched the code browser; only browse may"
   fi
-  [[ -f "$ws/bazel-bin/mini/index.index.pb" ]] || fail "[$flavor] //... did not build index.index.pb"
 
-  note "[$flavor] bazel run //mini:index.browse -- --check"
-  (cd "$ws" && consumer_bazel run //mini:index.browse -- --check) >"$log" 2>&1 \
-    || { tail -30 "$log" >&2; fail "[$flavor] bazel run //mini:index.browse -- --check failed"; }
-  grep -Eq "index\.db\.sqlite: [1-9][0-9]* files, [1-9][0-9]* symbols" "$log" \
+  local script
+  script="$(consumer_script "$flavor" "$flavor")"
+  if [[ "$flavor" == import ]]; then
+    grep -q '^BROWSER_LABEL=.*:-@@[^/]*code_browser_bin//:code_browser}"' "$script" \
+      || { grep -n '^BROWSER_LABEL=' "$script" >&2; fail "[$flavor] install did not bake a canonical browser label"; }
+  fi
+
+  note "[$flavor] cpp_format.sh browse --check"
+  (cd "$ws" && BAZEL="$WORK/bazel" "$script" browse --check) >"$log" 2>&1 \
+    || { tail -30 "$log" >&2; fail "[$flavor] cpp_format.sh browse --check failed"; }
+  grep -Eq "index\.pb\.sqlite: [1-9][0-9]* files, [1-9][0-9]* symbols" "$log" \
     || { tail -20 "$log" >&2; fail "[$flavor] --check did not print the database stats"; }
+  grep -q "cpp_format: wrote $ws/index.pb" "$log" || fail "[$flavor] the index was not written"
+  grep -q "code_browser: importing" "$log" || fail "[$flavor] the first run did not import the index"
+  # What the user is told before the server starts: which binary, the exact
+  # command line (so it can be restarted by hand), and how to update the index.
+  grep -q "cpp_format: code browser binary: /.*code_browser" "$log" \
+    || { tail -20 "$log" >&2; fail "[$flavor] the browser binary was not printed"; }
+  grep -q -- "--index=$ws/index.pb --root=$ws --exec-root=/.* --check" "$log" \
+    || { tail -20 "$log" >&2; fail "[$flavor] the command line was not printed"; }
+  { grep -q "To update it" "$log" && grep -q "cpp_format.sh index" "$log"; } \
+    || { tail -20 "$log" >&2; fail "[$flavor] no instructions for updating the index"; }
 
-  note "[$flavor] bazel run //mini:index.browse serves the checkout"
+  note "[$flavor] a second run leaves an unchanged index alone"
+  (cd "$ws" && BAZEL="$WORK/bazel" "$script" browse --check) >"$log" 2>&1 \
+    || { tail -30 "$log" >&2; fail "[$flavor] the second browse --check failed"; }
+  grep -q "index.pb is up to date" "$log" || { tail -20 "$log" >&2; fail "[$flavor] the index was rewritten"; }
+  if grep -q "code_browser: importing" "$log"; then
+    fail "[$flavor] an unchanged index was re-imported"
+  fi
+
+  note "[$flavor] cpp_format.sh browse serves the checkout"
   local port="$WORK/$flavor.port"
   rm -f "$port"
-  (cd "$ws" && consumer_bazel run //mini:index.browse -- --port=0 --port-file="$port" \
+  (cd "$ws" && BAZEL="$WORK/bazel" "$script" browse --port=0 --port-file="$port" \
       --log-requests=false) >"$log" 2>&1 &
   server=$!
   for _ in $(seq 1 600); do [[ -s "$port" ]] && break; sleep 0.1; done
@@ -218,11 +251,15 @@ check_consumer() {  # <flavor>
   grep -q '"spans"\|"roles"\|"symbol' "$WORK/$flavor.ann.json" \
     || { head -c 400 "$WORK/$flavor.ann.json" >&2; fail "[$flavor] geometry.cpp has no annotations"; }
 
-  # `$server` is the subshell; its child is the Bazel client, which execs the
-  # launcher, which execs the browser -- so the child *is* the browser by now,
-  # and SIGINT is its clean shutdown (exit 0).
-  local child
-  for child in $(children_of "$server"); do kill -INT "$child" 2>/dev/null || true; done
+  # SIGINT is the browser's clean shutdown (exit 0).  The script execs the
+  # browser once the index is built, so by now the browser is either `$server`
+  # itself -- bash execs the last command of a subshell when it can -- or that
+  # subshell's one child.
+  local child signalled=0
+  for child in $(children_of "$server"); do
+    kill -INT "$child" 2>/dev/null && signalled=1
+  done
+  [[ "$signalled" -eq 1 ]] || kill -INT "$server" 2>/dev/null || true
   local rc=0
   wait "$server" || rc=$?
   server=""
@@ -240,8 +277,9 @@ done
 note "[stale] a release without the asset fails with an explanation"
 make_consumer import "$VERSION-nobrowser"
 mv "$WORK/import" "$WORK/stale"
-if (cd "$WORK/stale" && consumer_bazel run //mini:index.browse -- --check) >"$WORK/stale.log" 2>&1; then
-  fail "[stale] .browse succeeded without a browser asset"
+stale_script="$(consumer_script stale import)"
+if (cd "$WORK/stale" && BAZEL="$WORK/bazel" "$stale_script" browse --check) >"$WORK/stale.log" 2>&1; then
+  fail "[stale] browse succeeded without a browser asset"
 fi
 grep -q "may predate the prebuilt code browser" "$WORK/stale.log" \
   || { tail -20 "$WORK/stale.log" >&2; fail "[stale] the failure does not explain itself"; }
@@ -260,7 +298,8 @@ make_consumer import none
 rm -rf "$WORK/untagged" && mv "$WORK/import" "$WORK/untagged"
 (cd "$WORK/untagged" && consumer_bazel mod deps) >"$WORK/untagged.log" 2>&1 \
   || { tail -20 "$WORK/untagged.log" >&2; fail "[untagged] bazel mod deps must not need a release() tag"; }
-if (cd "$WORK/untagged" && consumer_bazel build //mini:index.index) >"$WORK/untagged.log" 2>&1; then
+untagged_script="$(consumer_script untagged import)"
+if (cd "$WORK/untagged" && BAZEL="$WORK/bazel" "$untagged_script" index) >"$WORK/untagged.log" 2>&1; then
   fail "[untagged] the index built without a cpp_format binary"
 fi
 grep -q 'add `cpp_format.release(version = ...)`' "$WORK/untagged.log" \

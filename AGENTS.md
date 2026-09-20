@@ -41,6 +41,7 @@ bazel run //cpp_formatting:cpp_format -- --config=cpp_format.yaml --in-place fil
 - **`normalize_variables --debug-trace`** prints per TU the rename map and every reference site (`main=`, `macro=`, `WILL_RENAME`, `VETOES_RENAME`) — the first thing to reach for when a use was missed or a rename declined. `--report-rename-conflicts` lists every declined rename with its reason.
 - **Configs:** `--config=minify-x86_64` / `minify-aarch64` (release binary: LTO, stripped, static glibc), `--config=asan|tsan|ubsan` (instruments LLVM too — first build is long), `--config=lint` / `--config=index` (run the aspects). All builds are `-fno-rtti` except the sanitizer configs.
 - **Remote-execution check:** `bazel test //... --spawn_strategy=remote --test_tag_filters=-local`.
+- **Browse this repo:** `tools/cpp_format.sh browse` indexes `//...` and serves the checkout in the code browser (`--check` stops after the index's stats); it prints the browser's binary and command line first. Run it again to update the index. `tools/cpp_format.sh` is [bazel/integration/cpp_format.sh](bazel/integration/cpp_format.sh) pointed at the from-source labels, so `check`/`diff`/`fix`/`compile_commands`/`index` work here too.
 - **e2e** is not a Bazel target: `e2e/run_e2e.sh --list`, `e2e/run_e2e.sh mini_repo-all` (~10 s), `e2e/run_e2e.sh re2-…` is the cheap corpus gate (minutes); abseil/googletest/protobuf are slow. A scenario that passes unexpectedly fails as XPASS.
 
 ### Style and BUILD hygiene
@@ -71,7 +72,7 @@ Two unrelated things are called LLVM: `@llvm` is the **toolchain** (hermetic-llv
 - `cpp_index_lib` (per TU, on `clang::index`), `cpp_index_merge` (Clang-free), `index.proto` — the symbol index.
 - `embedded_clang_resource`, `embed_file` — Clang's builtin headers are embedded in every binary and self-extracted to the cache dir.
 
-Elsewhere: [bazel/cpp_format.bzl](bazel/cpp_format.bzl) (from-source aspects and rules, demo in `bazel/testdata/`), [bazel/integration/](bazel/integration/) (the prebuilt-binary kit consumers import by URL), [code_browser/](code_browser/) (HTTP server over the index in SQLite; C++20, Boost.Beast), [e2e/](e2e/), [tools/](tools/) (`gazelle`, `iwyu`, `hermetic_std`, `platforms`), [patches/](patches/) (applied to LLVM at fetch time).
+Elsewhere: [bazel/cpp_format.bzl](bazel/cpp_format.bzl) (the from-source aspects; fixtures and the test-only `aspect_outputs.bzl` in `bazel/testdata/`), [bazel/integration/](bazel/integration/) (the prebuilt-binary kit consumers import by URL), [code_browser/](code_browser/) (HTTP server over the index in SQLite; C++20, Boost.Beast), [e2e/](e2e/), [tools/](tools/) (`cpp_format.sh`, `gazelle`, `iwyu`, `hermetic_std`, `platforms`), [patches/](patches/) (applied to LLVM at fetch time).
 
 ## YAML config (`cpp_format --config=<file>`)
 
@@ -110,10 +111,12 @@ Each is explained, with the case that found it, in the docs above.
 **Bazel integration**
 - One action per **translation unit**; a header is never a TU — it is reached through `--owned-files` and rewritten by the TUs that include it. Emit mode widens "rewritable" to any owned file; a direct run must not (`PendingRewrites` is last-writer-wins on whole files).
 - Records, not diffs. A target always writes its manifest, even empty (Bazel never deletes stale outputs). Record lists go through `--records-from` (command-line limits).
-- **The aspect exists twice** — [bazel/cpp_format.bzl](bazel/cpp_format.bzl) and [bazel/integration/cpp_format.bzl](bazel/integration/cpp_format.bzl) — and `merge_compile_commands` is kept verbatim in both plus `cpp_format.sh`. Change them together. Both build the compile context with `_compilation_context()` (merges `implementation_deps`) and pass the target's `copts`.
+- **`cpp_format.sh` is the only driver of the aspects** — there are no `cpp_format_targets`/`cpp_index_targets` macros, and none should come back: a rule's `deps` cannot be a pattern (`//...`), so they could never cover "the whole repo". What tests need from inside Bazel is the test-only [bazel/testdata/aspect_outputs.bzl](bazel/testdata/aspect_outputs.bzl). The script is *sourced* by `compile_commands_test` for `merge_compile_commands`: functions first, then the `BASH_SOURCE` guard, then everything that calls Bazel.
+- **The aspects exist twice** — [bazel/cpp_format.bzl](bazel/cpp_format.bzl) and [bazel/integration/cpp_format.bzl](bazel/integration/cpp_format.bzl). Change them together. Both build the compile context with `_compilation_context()` (merges `implementation_deps`) and pass the target's `copts`.
 - **Aspect and binary are versioned together:** an aspect change that needs a new flag ships with a bump of `cpp_format.release(version=…)` in [MODULE.bazel](MODULE.bazel).
 - This module is **imported by URL** by kit consumers: `llvm` (toolchain), `gazelle`, `gazelle_cc` and the `release()` pin are `dev_dependency`; the kit never names `@llvm-project`; the `gazelle` targets live in `//tools/gazelle`, not the root package; the kit's `_config` defaults to `@@//:cpp_format.yaml` (the *root* module's); the `use_extension`/`use_repo` for `@cpp_format_bin` must stay non-dev.
-- Scripts that call `bazel` (`cpp_format.sh`, `e2e/run_e2e.sh`) are plain scripts, never `bazel run` targets — nesting deadlocks on the workspace lock.
+- **`install` bakes canonical labels** (aspect, `cpp_format`, `code_browser`) into the placed script. The script names them on the *consumer's* command line, where an apparent `@code_browser_bin` is only visible if their `use_repo()` lists it — and the quick start's lists `cpp_format_bin` alone. `e2e/kit_browse_test.sh` runs that configuration.
+- Scripts that call `bazel` (`cpp_format.sh`, `tools/cpp_format.sh`, `e2e/run_e2e.sh`, `e2e/kit_browse_test.sh`) are plain scripts, never `bazel run` targets — nesting deadlocks on the workspace lock.
 
 **Build**
 - Fixture-parsing tests get their standard library through `HERMETIC_STD_DATA` / `HERMETIC_STD_ENV` ([tools/hermetic_std/](tools/hermetic_std/)), or they fail on a remote worker with no C++ headers.

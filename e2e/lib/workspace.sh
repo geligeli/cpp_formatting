@@ -250,10 +250,10 @@ wire() {
     if [[ -n "$TOOL_SHA256" ]]; then
       printf '    sha256 = {"%s": "%s"},\n' "$TOOL_ASSET" "$TOOL_SHA256"
     fi
-    # Both repositories of the extension: a vendored kit resolves its labels
-    # through the *consumer's* repo mapping, and `<name>.browse` names
-    # @code_browser_bin.  Declaring it costs nothing -- it is fetched only when
-    # a target in it is built.
+    # Both repositories of the extension: a vendored kit's cpp_format.sh names
+    # them on the consumer's command line, so they resolve through the
+    # *consumer's* repo mapping, and `browse` names @code_browser_bin.
+    # Declaring it costs nothing -- it is fetched only when something builds it.
     printf ')\nuse_repo(cpp_format, "code_browser_bin", "cpp_format_bin")\n'
   } >> "$src/MODULE.bazel"
 

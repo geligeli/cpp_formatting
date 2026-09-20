@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End to end over the demo index (//bazel/testdata:index.index): import it,
+# End to end over the demo index (//bazel/testdata:index.pb): import it,
 # serve a copy of the demo sources, and hit every endpoint with http_get.
 # Runs from the runfiles tree; the checkout is a *copy* of the demo files,
 # since runfiles are symlinks out of the tree and the server refuses those.
@@ -12,7 +12,7 @@ browser="$here/code_browser/code_browser"
 import="$here/code_browser/index_import"
 get="$here/code_browser/tools/http_get"
 cpp_format="$here/cpp_formatting/cpp_format"
-index="$here/bazel/testdata/index.index.pb"
+index="$here/bazel/testdata/index.pb"
 [[ -x "$browser" && -x "$import" && -x "$get" && -f "$index" ]] \
   || fail "missing runfiles: $browser $import $get $index"
 

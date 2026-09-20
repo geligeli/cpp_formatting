@@ -195,14 +195,14 @@ build:ubsan --test_env=UBSAN_OPTIONS=print_stacktrace=1
 
 # cpp_format lint: run the aspect over the build graph and materialise each
 # target's edit-record JSON (see bazel/cpp_format.bzl).  The failing lint gate
-# is `bazel test //path:<name>.check`; this config just builds the records
+# is `tools/cpp_format.sh check [pattern]`; this config just builds the records
 # (e.g. `bazel build --config=lint //bazel/testdata:demo`) for inspection/CI.
 build:lint --aspects=//bazel:cpp_format.bzl%cpp_format_aspect
 build:lint --output_groups=+cpp_format_edits
 
 # Symbol index: the same, for the per-file index units (e.g. `bazel build
-# --config=index //bazel/testdata/...`).  The merged index of a target set is
-# the `<name>.index` target of cpp_index_targets, or `cpp_format.sh index`.
+# --config=index //bazel/testdata/...`).  The merged index of a target pattern
+# is `tools/cpp_format.sh index`; `tools/cpp_format.sh browse` serves it.
 build:index --aspects=//bazel:cpp_format.bzl%cpp_index_aspect
 build:index --output_groups=+cpp_index
 

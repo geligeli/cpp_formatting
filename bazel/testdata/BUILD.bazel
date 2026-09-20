@@ -2,13 +2,17 @@ load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
-# Uses the in-repo, built-from-source rules (not the prebuilt-binary kit under
-# bazel/integration/), so this demo — and the `//bazel/testdata:format.check`
-# gate that CI runs — always exercises the tool exactly as it is in this tree.
-# The kit tracks a pinned published binary, which necessarily lags in-tree
-# aspect changes (e.g. --owned-files, --aggregate --records-from); re-point at
-# the kit once a release that carries the current flag set is published.
-load("//bazel:cpp_format.bzl", "cpp_format_targets", "cpp_index_targets")
+# Exercises the in-repo, built-from-source aspects (not the prebuilt-binary kit
+# under bazel/integration/), so this demo -- and the :format_check_test gate
+# that CI runs -- always exercises the tool exactly as it is in this tree.  The
+# aspects' driver is bazel/integration/cpp_format.sh, which cannot run inside a
+# Bazel test; aspect_outputs.bzl puts their outputs in front of one instead.
+load(
+    ":aspect_outputs.bzl",
+    "cpp_compile_commands_fragments",
+    "cpp_format_records",
+    "cpp_index_units",
+)
 
 # A small first-party cc_library used to exercise the cpp_format Bazel
 # integration end to end: a member the `member -> snake_case` rule renames
@@ -43,30 +47,54 @@ cc_binary(
     deps = [":demo"],
 )
 
-# Generates :format.check (test / lint gate), :format.diff, :format.fix and
-# :format.compile_commands (bazel run) over the demo targets.
-cpp_format_targets(
-    name = "format",
+_DEMO = [
+    ":budget",
+    ":demo",
+    ":demo_main",
+]
+
+# The lint gate over the demo targets: every per-file edit record the aspect
+# emits for them, merged by `aggregate_edits --check`, which exits 1 if any
+# edit would be made.  The fixture conforms to //:cpp_format.yaml, so it passes;
+# `cpp_format.sh check //bazel/testdata/...` is the same gate from outside.
+cpp_format_records(
+    name = "format_records",
+    deps = _DEMO,
+)
+
+sh_test(
+    name = "format_check_test",
+    srcs = ["aggregate_check_test.sh"],
+    args = [
+        "$(location //cpp_formatting:aggregate_edits)",
+        "$(locations :format_records)",
+    ],
+    data = [
+        ":format_records",
+        "//cpp_formatting:aggregate_edits",
+    ],
+)
+
+# index.pb: the merged symbol index of the demo targets -- every symbol's
+# declarations, definitions and references across them, as byte ranges.  One
+# unit per translation unit from the index aspect, merged as `cpp_format.sh
+# index` merges them.
+cpp_index_units(
+    name = "index_units",
     deps = [
-        ":budget",
         ":demo",
         ":demo_main",
     ],
 )
 
-# Generates :index.index, a build target whose output (index.index.pb) is the
-# merged symbol index of the demo targets: every symbol's declarations,
-# definitions and references across both, as byte ranges; :index.db, the same
-# index imported into SQLite; and :index.browse, which `bazel run` to serve
-# this workspace in the code browser over it.
-cpp_index_targets(
+genrule(
     name = "index",
+    srcs = [":index_units"],
+    outs = ["index.pb"],
+    cmd = "$(execpath //cpp_formatting:cpp_format) --merge-index --output=$@ $(SRCS)",
+    tools = ["//cpp_formatting:cpp_format"],
     # //code_browser:smoke_test serves this index over a copy of the sources.
     visibility = ["//code_browser:__pkg__"],
-    deps = [
-        ":demo",
-        ":demo_main",
-    ],
 )
 
 exports_files(
@@ -79,6 +107,11 @@ exports_files(
     visibility = ["//code_browser:__pkg__"],
 )
 
+exports_files(
+    ["aggregate_check_test.sh"],
+    visibility = [":__subpackages__"],
+)
+
 # Reads the merged index back with `cpp_format --dump-index` and asserts the
 # cross-target reference: demo_main.cpp's use of Widget::item_count_ resolves
 # to the same symbol as its definition in demo.h, both under exec-root-relative
@@ -87,7 +120,7 @@ sh_test(
     name = "index_test",
     srcs = ["index_test.sh"],
     args = [
-        "$(location :index.index)",
+        "$(location :index.pb)",
         "$(location //cpp_formatting:cpp_format)",
         "$(location demo.h)",
         "$(location demo_main.cpp)",
@@ -95,50 +128,34 @@ sh_test(
     data = [
         "demo.h",
         "demo_main.cpp",
-        ":index.index",
+        ":index.pb",
         "//cpp_formatting:cpp_format",
     ],
 )
 
-# Runs :index.browse the way `bazel run` would (BUILD_WORKSPACE_DIRECTORY set
-# to a copy of the demo sources) and checks that the server it starts serves
-# that checkout over the index the build imported.
-sh_test(
-    name = "browse_test",
-    srcs = ["browse_test.sh"],
-    args = [
-        "$(location :index.browse)",
-        "$(location //code_browser/tools:http_get)",
-        "$(location budget.h)",
-        "$(location demo.cpp)",
-        "$(location demo.h)",
-        "$(location demo_main.cpp)",
-    ],
-    data = [
-        "budget.h",
-        "demo.cpp",
-        "demo.h",
-        "demo_main.cpp",
-        ":index.browse",
-        "//code_browser/tools:http_get",
-    ],
+# Merges the demo targets' compile_commands fragments with cpp_format.sh's own
+# merge_compile_commands (the script is sourced for it) and has cpp_format
+# consume the resulting compile_commands.json as its compilation database.
+cpp_compile_commands_fragments(
+    name = "compile_commands_fragments",
+    deps = _DEMO,
 )
 
-# Runs :format.compile_commands the way `bazel run` would and has cpp_format
-# consume the resulting compile_commands.json as its compilation database.
 sh_test(
     name = "compile_commands_test",
     srcs = ["compile_commands_test.sh"],
     args = [
-        "$(location :format.compile_commands)",
+        "$(location //bazel/integration:cpp_format.sh)",
         "$(location //cpp_formatting:cpp_format)",
         "$(location //:cpp_format.yaml)",
         "$(location demo_main.cpp)",
+        "$(locations :compile_commands_fragments)",
     ],
     data = [
         "demo_main.cpp",
-        ":format.compile_commands",
+        ":compile_commands_fragments",
         "//:cpp_format.yaml",
+        "//bazel/integration:cpp_format.sh",
         "//cpp_formatting:cpp_format",
     ],
     # The database's `directory` is the *execution root* and its `-c`/`-isystem`

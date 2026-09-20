@@ -834,8 +834,8 @@ auto runEditAggregation(const std::vector<std::string>& InputPaths,
     if (Total == 0 && Ok) return 0;
     llvm::errs() << Total << " formatting edit(s) would be applied across "
                  << Merged.size()
-                 << " file(s); run the `.fix` target to apply, or `.diff` to "
-                    "preview.\n";
+                 << " file(s); run `cpp_format.sh fix` to apply, or "
+                    "`cpp_format.sh diff` to preview.\n";
     return 1;
   }
 

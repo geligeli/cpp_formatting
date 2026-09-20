@@ -6,8 +6,8 @@
 //   code_browser --index=index.pb --import-to=index.sqlite   # import and exit
 //
 // The last form is what index_import does.  It is here as well so that one
-// binary is all a consumer of the prebuilt Bazel kit has to download: the
-// kit's <name>.db build action and its <name>.browse launcher both run this.
+// binary is all a consumer of the prebuilt Bazel kit has to download, and
+// anything that wants the database without the server can have it from this.
 //
 // The pages are embedded; --assets-dir=code_browser/web serves them from
 // disk instead while they are being developed.

@@ -1,5 +1,8 @@
 bazel-*
 compile_commands.json
+# `cpp_format.sh index` / `browse` (tools/cpp_format.sh), and the browser's import.
+/index.pb
+/index.pb.sqlite*
 **/.nfs*
 .bazelrc.local
 .claude/settings.local.json
