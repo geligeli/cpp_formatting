@@ -110,9 +110,10 @@ static cl::opt<std::string> ConstPlacementOpt(
 
 static cl::opt<std::string> NormScopeOpt(
     "normalize-variables-scope",
-    cl::desc("Scope for normalization: member, local, global, static_member, "
-             "type, namespace, "
-             "const_member, static_global, const_global, or method"),
+    cl::desc("Scope for normalization: member, local, global, method, type, "
+             "namespace, or a fine-grained one ({static,const,public,"
+             "protected,private}_member, {static,const}_local, "
+             "{static,const}_global)"),
     cl::init(""), cl::cat(CppFormatCategory));
 
 static cl::opt<std::string> NormStyleOpt(
@@ -575,34 +576,14 @@ auto main(int argc, const char** argv) -> int {
       return 1;
     }
 
-    VariableScope scope{};
-    if (rule.scope == "member") {
-      scope = VariableScope::Member;
-    } else if (rule.scope == "local") {
-      scope = VariableScope::Local;
-    } else if (rule.scope == "global") {
-      scope = VariableScope::Global;
-    } else if (rule.scope == "static_member") {
-      scope = VariableScope::StaticMember;
-    } else if (rule.scope == "const_member") {
-      scope = VariableScope::ConstMember;
-    } else if (rule.scope == "static_global") {
-      scope = VariableScope::StaticGlobal;
-    } else if (rule.scope == "const_global") {
-      scope = VariableScope::ConstGlobal;
-    } else if (rule.scope == "method") {
-      scope = VariableScope::Method;
-    } else if (rule.scope == "type") {
-      scope = VariableScope::Type;
-    } else if (rule.scope == "namespace") {
-      scope = VariableScope::Namespace;
-    } else {
+    const std::optional<VariableScope> parsedScope =
+        parseVariableScope(rule.scope);
+    if (!parsedScope) {
       llvm::errs() << "Unknown scope '" << rule.scope
-                   << "'. Valid scopes: member, local, global, "
-                      "static_member, const_member, static_global, "
-                      "const_global, method, type, namespace\n";
+                   << "'. Valid scopes: " << variableScopeNames() << "\n";
       return 1;
     }
+    const VariableScope scope = *parsedScope;
 
     Parsed.push_back({scope, style, rule.scope + "/" + rule.style});
     Rules.push_back(
@@ -614,9 +595,12 @@ auto main(int argc, const char** argv) -> int {
          "normalize_variables/" + rule.scope + "/" + rule.style});
   }
 
-  // Reject the one rule combination that cannot be applied soundly: two rules
-  // that can match the same declaration rewrite the same bytes twice.  Two
-  // rules that can merely produce the same *name* in one scope are fine --
+  // Rules may overlap: a declaration several of them match is renamed by the
+  // most specific one (scopeSpecificity() -- `local` plus `const_local` is how
+  // a ruleset states a convention and its exception).  What cannot be applied
+  // is the same scope twice: neither rule is more specific, both would rewrite
+  // the same bytes, and the second rewrite lands on text the first replaced.
+  // Two rules that can merely produce the same *name* in one scope are fine --
   // the collision resolution in runRenameRulesOnAST sees every rule's
   // candidates together, and the first rule in the list keeps a contested
   // name (the other is reported as a skip).
@@ -624,16 +608,15 @@ auto main(int argc, const char** argv) -> int {
     for (size_t J = I + 1; J < Parsed.size(); ++J) {
       const ParsedRule& A = Parsed[I];
       const ParsedRule& B = Parsed[J];
-      if (scopesCanMatchSameDecl(A.Scope, B.Scope)) {
+      if (A.Scope == B.Scope) {
         llvm::errs()
             << "Rules " << (I + 1) << " (" << A.Spelling << ") and " << (J + 1)
             << " (" << B.Spelling
-            << ") can match the same declaration, which would then be renamed "
-               "twice -- the second rewrite lands on bytes the first already "
-               "replaced and corrupts them. The broad scopes already cover the "
-               "fine-grained ones: 'member' includes static and const data "
-               "members, 'global' includes static and const globals. Keep one "
-               "rule per declaration.\n";
+            << ") name the same scope, so every declaration in it "
+               "would be renamed twice. Keep one rule per scope; a "
+               "fine-grained scope next to its broad one (const_local "
+               "with local, private_member with member) is fine -- the "
+               "more specific rule wins.\n";
         return 1;
       }
     }
