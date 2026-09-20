@@ -14,7 +14,7 @@ cc_binary(
         "//code_browser:__pkg__",
     ],
     deps = [
-        "@boost.asio//:boost.asio",
-        "@boost.beast//:boost.beast",
+        "@boost.asio",
+        "@boost.beast",
     ],
 )
