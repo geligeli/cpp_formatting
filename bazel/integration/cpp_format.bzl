@@ -774,10 +774,118 @@ _cpp_index = rule(
     },
 )
 
+def _index_sqlite_impl(ctx):
+    index = ctx.file.index
+    browser = ctx.file._code_browser
+    out = ctx.actions.declare_file(ctx.label.name + ".sqlite")
+    args = ctx.actions.args()
+    args.add(index, format = "--index=%s")
+    args.add(out, format = "--import-to=%s")
+    ctx.actions.run(
+        executable = browser,
+        tools = [browser],
+        arguments = [args],
+        inputs = [index],
+        outputs = [out],
+        mnemonic = "CppIndexImport",
+        progress_message = "cpp_format: importing index " + ctx.label.name,
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+_cpp_index_sqlite = rule(
+    doc = "Imports a merged index (<name>.index.pb) into the SQLite database " +
+          "the code browser serves, as an ordinary cached build action.",
+    implementation = _index_sqlite_impl,
+    attrs = {
+        "index": attr.label(
+            allow_single_file = [".pb"],
+            mandatory = True,
+            doc = "The <name>.index target (its .pb output).",
+        ),
+        # The from-source integration runs //code_browser:index_import here.
+        # The kit ships one browser binary and no importer, so the browser does
+        # it (`--import-to`): one download serves both this and <name>.browse.
+        "_code_browser": attr.label(
+            default = Label("@code_browser_bin//:code_browser"),
+            allow_single_file = True,
+        ),
+    },
+)
+
+def _browse_impl(ctx):
+    db = ctx.file.db
+    browser = ctx.file._code_browser
+    script = ctx.actions.declare_file(ctx.label.name + ".sh")
+    ctx.actions.write(
+        output = script,
+        is_executable = True,
+        content = (
+            _RUNFILES_PREAMBLE +
+            'db="$(rlocation "' + _rlocation_path(db) + '")"\n' +
+            'browser="$(rlocation "' + _rlocation_path(browser) + '")"\n' +
+            # The checkout is the workspace `bazel run` was invoked in; the
+            # index names files relative to the execution root, which the
+            # runfiles tree sits inside (bazel-bin is under it) -- the same
+            # derivation .compile_commands makes.  Passing it explicitly keeps
+            # a --symlink_prefix that hides the bazel-out link from mattering.
+            'ws="${BUILD_WORKSPACE_DIRECTORY:?run this with \'bazel run\'}"\n' +
+            'rf="${RUNFILES_DIR:-$PWD}"\n' +
+            'exec_root="${rf%/bazel-out/*}"\n' +
+            'exec "$browser" --db="$db" --root="$ws" --exec-root="$exec_root" "$@"\n'
+        ),
+    )
+    runfiles = ctx.runfiles(files = [db, browser])
+    runfiles = runfiles.merge(ctx.attr._bash_runfiles[DefaultInfo].default_runfiles)
+    return [DefaultInfo(executable = script, runfiles = runfiles)]
+
+_cpp_browse = rule(
+    doc = "`bazel run` this to serve the workspace in the code browser over the " +
+          "index database `db`: it builds the index (every unit, the merge, the " +
+          "import) and starts the prebuilt code browser on it.  Arguments after " +
+          "`--` go to the server (--port, --address, --check, ...).",
+    implementation = _browse_impl,
+    executable = True,
+    attrs = {
+        "db": attr.label(
+            allow_single_file = [".sqlite"],
+            mandatory = True,
+            doc = "The <name>.db target (its .sqlite output).",
+        ),
+        "_code_browser": attr.label(
+            default = Label("@code_browser_bin//:code_browser"),
+            allow_single_file = True,
+        ),
+        "_bash_runfiles": attr.label(default = Label("@bazel_tools//tools/bash/runfiles")),
+    },
+)
+
 def cpp_index_targets(name, deps, **kwargs):
-    """Defines <name>.index, a build target whose output is the merged index
-    (<name>.index.pb) of `deps` and everything they depend on."""
+    """Defines three targets over `deps` and everything they depend on:
+
+      * `<name>.index`  -- a build target whose output is the merged index
+        (<name>.index.pb),
+      * `<name>.db`     -- the same index imported into SQLite (<name>.db.sqlite),
+        the form the code browser reads,
+      * `<name>.browse` -- `bazel run` it to build both and serve the workspace
+        at http://127.0.0.1:8080/ with every indexed token annotated
+        (`-- --port=N` to pick a port, `-- --check` to only print the stats).
+
+    `deps` are the roots: the aspect follows `deps`/`implementation_deps`, so
+    naming a repository's binaries and tests covers the libraries under them.
+
+    `.db` and `.browse` are tagged `manual`.  They need the prebuilt code
+    browser, a separate download that exists for Linux and macOS only, and a
+    wildcard (`bazel build //...`) must neither fetch it for a consumer who only
+    formats nor fail where there is none.  `bazel run //pkg:<name>.browse` names
+    the target, which a `manual` tag does not affect.
+    """
     _cpp_index(name = name + ".index", deps = deps, **kwargs)
+
+    tags = kwargs.pop("tags", [])
+    if "manual" not in tags:
+        tags = tags + ["manual"]
+    _cpp_index_sqlite(name = name + ".db", index = ":" + name + ".index", tags = tags, **kwargs)
+    _cpp_browse(name = name + ".browse", db = ":" + name + ".db", tags = tags, **kwargs)
 
 # ---------------------------------------------------------------------------
 # `bazel run //…:install` — drop cpp_format.sh into the consumer's workspace

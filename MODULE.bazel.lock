@@ -445,6 +445,19 @@
         }
       }
     },
+    "//tools/gazelle:extension.bzl%gazelle_runner": {
+      "general": {
+        "bzlTransitiveDigest": "FizC212rtr/SnZ1WyiwUdg04PB+fjn4pzLSKTxT0cYA=",
+        "usagesDigest": "e9W8x0iPkX49F4zXoHZIQG8UIUoP1uuGDVIZA91hW7M=",
+        "recordedInputs": [],
+        "generatedRepoSpecs": {
+          "gazelle_runner": {
+            "repoRuleId": "@@//tools/gazelle:extension.bzl%_gazelle_runner_repo",
+            "attributes": {}
+          }
+        }
+      }
+    },
     "@@pybind11_bazel+//:internal_configure.bzl%internal_configure_extension": {
       "general": {
         "bzlTransitiveDigest": "7zBsfo5dyMqKT23rXrvWqJMx0AugwL6NyirkmvzKcqU=",

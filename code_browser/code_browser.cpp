@@ -3,6 +3,12 @@
 //   code_browser --db=index.sqlite --root=/path/to/checkout
 //   code_browser --index=index.pb --root=. --port=8080     # imports on demand
 //
+//   code_browser --index=index.pb --import-to=index.sqlite   # import and exit
+//
+// The last form is what index_import does.  It is here as well so that one
+// binary is all a consumer of the prebuilt Bazel kit has to download: the
+// kit's <name>.db build action and its <name>.browse launcher both run this.
+//
 // The pages are embedded; --assets-dir=code_browser/web serves them from
 // disk instead while they are being developed.
 #include <chrono>
@@ -41,6 +47,10 @@ cl::opt<std::string> IndexPath(
     "index",
     cl::desc("An index .pb; imported into <index>.sqlite when that is "
              "missing or older"),
+    cl::cat(Category));
+cl::opt<std::string> ImportTo(
+    "import-to",
+    cl::desc("Import --index into this database (replacing it) and exit"),
     cl::cat(Category));
 cl::opt<std::string> Root("root", cl::desc("The checkout (default: cwd)"),
                           cl::init("."), cl::cat(Category));
@@ -81,6 +91,35 @@ auto Mtime(const fs::path& p) -> std::optional<fs::file_time_type> {
   return t;
 }
 
+// Imports the index at `index_path` into a fresh database at `db_path`.
+auto ImportIndexFile(const std::string& index_path, const std::string& db_path,
+                     std::string* error) -> bool {
+  llvm::errs() << "code_browser: importing " << index_path << " into "
+               << db_path << "\n";
+  cpp_index::IndexUnit unit;
+  if (!readUnit(index_path, unit)) {
+    *error = "cannot read " + index_path;
+    return false;
+  }
+  const cpp_index::Index index = buildIndex(unit);
+  std::error_code ec;
+  fs::remove(db_path, ec);
+  code_browser::ImportOptions opts;
+  opts.source_path = index_path;
+  code_browser::FillSourceInfo(opts);
+  code_browser::ImportStats stats;
+  if (std::string e =
+          code_browser::ImportIndexToFile(index, db_path, opts, &stats);
+      !e.empty()) {
+    *error = e;
+    return false;
+  }
+  llvm::errs() << "code_browser: imported " << stats.files << " files, "
+               << stats.symbols << " symbols, " << stats.occurrences
+               << " occurrences in " << stats.elapsed_ms << " ms\n";
+  return true;
+}
+
 // The database to open: --db as given, or --index imported when needed.
 auto ResolveDatabase(std::string* error) -> std::string {
   if (!DbPath.empty()) return DbPath;
@@ -96,29 +135,7 @@ auto ResolveDatabase(std::string* error) -> std::string {
   }
   const auto db_mtime = Mtime(db);
   if (db_mtime && *db_mtime >= *index_mtime) return db;
-  llvm::errs() << "code_browser: importing " << IndexPath << " into " << db
-               << "\n";
-  cpp_index::IndexUnit unit;
-  if (!readUnit(IndexPath.getValue(), unit)) {
-    *error = "cannot read " + IndexPath;
-    return "";
-  }
-  const cpp_index::Index index = buildIndex(unit);
-  std::error_code ec;
-  fs::remove(db, ec);
-  code_browser::ImportOptions opts;
-  opts.source_path = IndexPath.getValue();
-  code_browser::FillSourceInfo(opts);
-  code_browser::ImportStats stats;
-  if (std::string e = code_browser::ImportIndexToFile(index, db, opts, &stats);
-      !e.empty()) {
-    *error = e;
-    return "";
-  }
-  llvm::errs() << "code_browser: imported " << stats.files << " files, "
-               << stats.symbols << " symbols, " << stats.occurrences
-               << " occurrences in " << stats.elapsed_ms << " ms\n";
-  return db;
+  return ImportIndexFile(IndexPath.getValue(), db, error) ? db : "";
 }
 
 }  // namespace
@@ -129,6 +146,17 @@ int main(int argc, char** argv) {
       argc, argv, "Serves a checkout with its symbol index as a web page\n");
 
   std::string error;
+  if (!ImportTo.empty()) {
+    if (IndexPath.empty()) {
+      llvm::errs() << "code_browser: --import-to needs --index\n";
+      return 2;
+    }
+    if (!ImportIndexFile(IndexPath.getValue(), ImportTo.getValue(), &error)) {
+      llvm::errs() << "code_browser: " << error << "\n";
+      return 2;
+    }
+    return 0;
+  }
   const std::string db_path = ResolveDatabase(&error);
   if (db_path.empty()) {
     llvm::errs() << "code_browser: " << error << "\n";

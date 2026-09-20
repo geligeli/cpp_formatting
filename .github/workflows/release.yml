@@ -20,19 +20,30 @@ jobs:
           # as long as one of them.  `config` is the .bazelrc config: a fully
           # static link is a property of the target *platform*, and a platform
           # names one CPU.
+          #
+          # `browser` is the second asset of a platform: the code browser, which
+          # the kit's `<name>.browse` target downloads (bazel/integration/).  It
+          # is built with the same flags in the same invocation, so it shares
+          # every LLVM and protobuf object with cpp_format.
           - runs-on: ubuntu-latest
             asset: cpp_format-linux-x86_64
+            browser: code_browser-linux-x86_64
             config: minify-x86_64
           - runs-on: ubuntu-latest
             asset: cpp_format-linux-aarch64
+            browser: code_browser-linux-aarch64
             config: minify-aarch64
           # macOS and Windows are built natively with the machine's own
           # toolchain.  The hermetic one can target them too, but that is not
           # validated here, and .bazelrc picks the MSVC flag set by *host* OS.
+          # There is no Windows browser: the code has never been compiled with
+          # MSVC (its copts and .bazelrc's Boost flag are spelled for Clang/GCC).
           - runs-on: macos-latest
             asset: cpp_format-darwin-aarch64
+            browser: code_browser-darwin-aarch64
           - runs-on: windows-latest
             asset: cpp_format-windows-x86_64.exe
+            browser: ''
     runs-on: ${{ matrix.runs-on }}
 
     steps:
@@ -62,8 +73,9 @@ jobs:
         uses: devcontainers/ci@v0.3
         with:
           runCmd: |
-            bazel build --disk_cache=/workspace/.disk_cache --repository_cache=/workspace/.bazel_cache --config=${{ matrix.config }} //cpp_formatting:cpp_format
+            bazel build --disk_cache=/workspace/.disk_cache --repository_cache=/workspace/.bazel_cache --config=${{ matrix.config }} //cpp_formatting:cpp_format //code_browser:code_browser
             cp -L bazel-bin/cpp_formatting/cpp_format ${{ matrix.asset }}
+            cp -L bazel-bin/code_browser/code_browser ${{ matrix.browser }}
 
       - name: Setup Bazel
         if: runner.os != 'Linux'
@@ -83,26 +95,51 @@ jobs:
           BIN=$(bazel cquery -c opt //cpp_formatting:cpp_format --output=files)
           cp "$BIN" "${{ matrix.asset }}"
 
+      # The macOS browser is the one binary here that has only ever been
+      # cross-compiled (from Linux, with the hermetic toolchain -- it links),
+      # never built by Apple's Clang.  It is an optional extra, so it must not be
+      # able to take the cpp_format release down: a failure leaves this
+      # platform without the asset, and the kit then says there is none.
+      - name: Build code browser
+        if: runner.os == 'macOS' && matrix.browser != ''
+        continue-on-error: true
+        shell: bash
+        run: |
+          bazel build --disk_cache=.disk_cache --repository_cache=.bazel_cache -c opt //code_browser:code_browser
+          BIN=$(bazel cquery -c opt //code_browser:code_browser --output=files)
+          cp "$BIN" "${{ matrix.browser }}"
+
       # A cross build is one flag away from the native one, so make sure each
       # asset is for the CPU its name says and has no dynamic loader.
-      - name: Check the binary matches its name
+      - name: Check the binaries match their names
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          desc="$(file -b "${{ matrix.asset }}")"
-          echo "$desc"
-          case "${{ matrix.asset }}" in
-            *-x86_64)  grep -q "x86-64" <<<"$desc" ;;
-            *-aarch64) grep -q "ARM aarch64" <<<"$desc" ;;
-            *) echo "unexpected asset name" >&2; exit 1 ;;
-          esac
-          grep -Eq "statically linked|static-pie linked" <<<"$desc"
+          for asset in "${{ matrix.asset }}" "${{ matrix.browser }}"; do
+            desc="$(file -b "$asset")"
+            echo "$asset: $desc"
+            case "$asset" in
+              *-x86_64)  grep -q "x86-64" <<<"$desc" ;;
+              *-aarch64) grep -q "ARM aarch64" <<<"$desc" ;;
+              *) echo "unexpected asset name" >&2; exit 1 ;;
+            esac
+            grep -Eq "statically linked|static-pie linked" <<<"$desc"
+          done
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
           path: ${{ matrix.asset }}
+
+      - name: Upload code browser
+        if: matrix.browser != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.browser }}
+          path: ${{ matrix.browser }}
+          # macOS only: its build step is allowed to fail (see above).
+          if-no-files-found: ${{ runner.os == 'Linux' && 'error' || 'warn' }}
 
   publish:
     needs: build
@@ -123,7 +160,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="$(date -u +%Y%m%d)-$(git rev-parse --short HEAD)"
-          gh release create "$TAG" cpp_format-linux-x86_64 cpp_format-linux-aarch64 \
-            cpp_format-darwin-aarch64 cpp_format-windows-x86_64.exe \
+          # Required: cpp_format everywhere, and the browser where it is built
+          # in the same invocation.  Optional: whatever other browser made it.
+          assets=(cpp_format-linux-x86_64 cpp_format-linux-aarch64
+                  cpp_format-darwin-aarch64 cpp_format-windows-x86_64.exe
+                  code_browser-linux-x86_64 code_browser-linux-aarch64)
+          for f in "${assets[@]}"; do
+            [[ -f "$f" ]] || { echo "missing release asset: $f" >&2; exit 1; }
+          done
+          for f in code_browser-darwin-aarch64; do
+            if [[ -f "$f" ]]; then assets+=("$f"); else echo "::warning::no $f in this release"; fi
+          done
+          gh release create "$TAG" "${assets[@]}" \
             --title "$TAG" \
             --notes "Built from commit $(git rev-parse HEAD)"

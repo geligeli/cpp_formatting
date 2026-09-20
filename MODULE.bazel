@@ -125,7 +125,7 @@ use_repo(llvm, "iwyu", "llvm-project", "llvm-raw", "llvm_zlib", "llvm_zstd")
 # latest release that carries every flag the in-tree aspect passes, and is
 # bumped after each aspect change ships.
 cpp_format = use_extension("//bazel/integration:extensions.bzl", "cpp_format")
-use_repo(cpp_format, "cpp_format_bin")
+use_repo(cpp_format, "code_browser_bin", "cpp_format_bin")
 
 cpp_format_dev = use_extension(
     "//bazel/integration:extensions.bzl",

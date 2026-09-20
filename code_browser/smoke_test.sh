@@ -27,6 +27,21 @@ grep -q "4 files, 15 symbols" "$work/import.out" || { cat "$work/import.out"; fa
 [[ $("$import" "$index" --out="$work/index.sqlite" 2>&1 || true) == *"already exists"* ]] \
   || fail "a second import must refuse to overwrite"
 
+# 1b. The browser's own import mode -- what the prebuilt Bazel kit runs, which
+#     ships this one binary and no index_import.  Unlike index_import it
+#     replaces an existing database (a Bazel action may be re-run over a stale
+#     output), and what it writes must open to the same stats.
+"$browser" --index="$index" --import-to="$work/kit.sqlite" 2> "$work/kit.err" \
+  || { cat "$work/kit.err"; fail "--import-to failed"; }
+"$browser" --index="$index" --import-to="$work/kit.sqlite" 2>> "$work/kit.err" \
+  || { cat "$work/kit.err"; fail "--import-to must replace an existing database"; }
+"$browser" --db="$work/kit.sqlite" --check 2> "$work/kit.check" || fail "--check on the kit's database"
+"$browser" --db="$work/index.sqlite" --check 2> "$work/import.check" || fail "--check on index_import's"
+stats() { sed -n 's/.*: \([0-9]* files, [0-9]* symbols, [0-9]* occurrences\).*/\1/p' "$1" | head -1; }
+[[ -n "$(stats "$work/kit.check")" && "$(stats "$work/kit.check")" == "$(stats "$work/import.check")" ]] \
+  || { cat "$work/kit.check" "$work/import.check"; fail "--import-to and index_import disagree"; }
+if "$browser" --import-to="$work/none.sqlite" 2>/dev/null; then fail "--import-to without --index must fail"; fi
+
 # 2. Serve.
 "$browser" --db="$work/index.sqlite" --root="$work/repo" --port=0 \
   --port-file="$work/port" --log-requests=false > "$work/server.log" 2>&1 &

@@ -92,6 +92,13 @@ jobs:
             # aspect phase, rather than the tool build, is the bottleneck.
             e2e/run_e2e.sh --tool='${{ github.event.inputs.tool || 'source' }}' \
                            "${{ matrix.scenario }}"
+            # The kit's `bazel run //pkg:<name>.browse` in a consumer workspace
+            # (both import flavours, binaries from this checkout).  Once, next
+            # to the cheapest scenario: it is its own script, not a scenario,
+            # because it asserts a running server rather than a rewritten tree.
+            if [ "${{ matrix.scenario }}" = mini_repo-all ]; then
+              e2e/kit_browse_test.sh --work-dir=/workspace/.e2e/kit_browse
+            fi
 
       - name: Upload artifacts
         if: always()

@@ -10,6 +10,11 @@ asset published at
 so you get the Bazel lint/fix integration (see `cpp_format.bzl`) **without**
 building Clang/LLVM from source.  The binary embeds the Clang builtin headers
 and self-extracts them at runtime, so nothing else needs fetching.
+
+A second repository, `@code_browser_bin//:code_browser`, is the code browser of
+the same release -- what `<name>.db` and `<name>.browse` of `cpp_index_targets`
+run.  Repositories are fetched on demand, so it is downloaded only when one of
+those two targets is built; a consumer who only formats never pays for it.
 """
 
 # (os, arch) -> release asset filename.  `rctx.os.arch` reports the JVM arch
@@ -25,6 +30,19 @@ _ASSETS = {
     ("mac", "x86_64"): "cpp_format-darwin-aarch64",  # runs under Rosetta
     ("windows", "x86_64"): "cpp_format-windows-x86_64.exe",
     ("windows", "amd64"): "cpp_format-windows-x86_64.exe",
+}
+
+# The code browser, published next to cpp_format from the same commit.  There is
+# no Windows build of it yet: the release workflow builds it where the code has
+# been compiled and run, and that is not there.
+_BROWSER_ASSETS = {
+    ("linux", "x86_64"): "code_browser-linux-x86_64",
+    ("linux", "amd64"): "code_browser-linux-x86_64",
+    ("linux", "aarch64"): "code_browser-linux-aarch64",
+    ("linux", "arm64"): "code_browser-linux-aarch64",
+    ("mac", "aarch64"): "code_browser-darwin-aarch64",
+    ("mac", "arm64"): "code_browser-darwin-aarch64",
+    ("mac", "x86_64"): "code_browser-darwin-aarch64",  # runs under Rosetta
 }
 
 def _host_key(rctx):
@@ -63,6 +81,53 @@ def _binary_repo_impl(rctx):
         'filegroup(name = "cpp_format", srcs = ["%s"], ' % out +
         'visibility = ["//visibility:public"])\n',
     )
+
+def _browser_repo_impl(rctx):
+    key = _host_key(rctx)
+    asset = _BROWSER_ASSETS.get(key)
+    if not asset:
+        fail(("cpp_format: there is no prebuilt code_browser for host %r, so " +
+              "<name>.db and <name>.browse of cpp_index_targets are not " +
+              "available here (<name>.index is); build " +
+              "//code_browser:code_browser from source instead") % (key,))
+    out = "bin/code_browser"
+    url = "{base}/{version}/{asset}".format(
+        base = rctx.attr.base_url.rstrip("/"),
+        version = rctx.attr.version,
+        asset = asset,
+    )
+    sha = rctx.attr.sha256.get(asset, "")
+    result = rctx.download(
+        url = url,
+        output = out,
+        executable = True,
+        sha256 = sha,
+        allow_fail = True,
+    )
+    if not result.success:
+        # Releases before the browser was published have no such asset, and a
+        # bare 404 would not say so.
+        fail(("cpp_format: could not download %s.  Release %r may predate " +
+              "the prebuilt code browser; pin a newer one in " +
+              "cpp_format.release(version = ...)") % (url, rctx.attr.version))
+    rctx.file(
+        "BUILD.bazel",
+        'filegroup(name = "code_browser", srcs = ["%s"], ' % out +
+        'visibility = ["//visibility:public"])\n',
+    )
+
+_browser_repo = repository_rule(
+    implementation = _browser_repo_impl,
+    attrs = {
+        "version": attr.string(mandatory = True),
+        "base_url": attr.string(
+            default = "https://github.com/geligeli/cpp_formatting/releases/download",
+        ),
+        "sha256": attr.string_dict(
+            doc = "Optional map of asset filename -> sha256 for pinning.",
+        ),
+    },
+)
 
 _binary_repo = repository_rule(
     implementation = _binary_repo_impl,
@@ -116,6 +181,16 @@ def _ext_impl(mctx):
         fail("cpp_format: add `cpp_format.release(version = ...)` to MODULE.bazel")
     _binary_repo(
         name = "cpp_format_bin",
+        version = rel.version,
+        base_url = rel.base_url,
+        sha256 = rel.sha256,
+    )
+
+    # Same release, same pins (`sha256` is keyed by asset file name, so one
+    # dict serves both).  Declaring the repository costs nothing: it is only
+    # fetched when something builds a target in it.
+    _browser_repo(
+        name = "code_browser_bin",
         version = rel.version,
         base_url = rel.base_url,
         sha256 = rel.sha256,
