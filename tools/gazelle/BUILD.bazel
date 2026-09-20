@@ -11,18 +11,18 @@
 # the `# gazelle:` directives in the root BUILD.bazel.
 #
 # The targets live here rather than in the root package because gazelle and
-# gazelle_cc are dev dependencies: a root BUILD file that loads from them would
-# not even load when this module is somebody's dependency.
-load("@gazelle//:def.bzl", "gazelle", "gazelle_binary")
-
-gazelle_binary(
-    name = "gazelle_cc",
-    languages = ["@gazelle_cc//language/cc"],
+# gazelle_cc are dev dependencies -- and for the same reason they are only
+# *aliases* here: a BUILD file that loads from @gazelle does not load when this
+# module is somebody's dependency, which broke `bazel query @cpp_formatting//...`
+# for them.  The rules themselves are in @gazelle_runner; see extension.bzl.
+alias(
+    name = "gazelle",
+    actual = "@gazelle_runner//:gazelle",
 )
 
-gazelle(
-    name = "gazelle",
-    gazelle = ":gazelle_cc",
+alias(
+    name = "gazelle_cc",
+    actual = "@gazelle_runner//:gazelle_cc",
 )
 
 # Header -> label index for @llvm-project, which is not a BCR module and so is

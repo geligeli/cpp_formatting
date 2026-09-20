@@ -1,3 +1,4 @@
+load("@bazel_skylib//lib:selects.bzl", "selects")
 load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("//tools/platforms:for_platform.bzl", "for_platform_test")
 
@@ -14,6 +15,22 @@ cc_binary(
     copts = ["-fexceptions"],
 )
 
+# A sanitizer runtime cannot be linked into a static executable (ASan and TSan
+# refuse outright), so under `--config=asan` and friends the test is skipped as
+# incompatible.  What is under test here is the link, not the program.  The
+# labels are the toolchain's own config settings; in a BUILD file they are
+# resolved only when the target is analysed, so a repository that depends on
+# this one -- and cannot see `@llvm`, a dev dependency -- still loads the
+# package.
+selects.config_setting_group(
+    name = "sanitized",
+    match_any = [
+        "@llvm//config:asan_enabled",
+        "@llvm//config:tsan_enabled",
+        "@llvm//config:ubsan_enabled",
+    ],
+)
+
 # The same program linked against static glibc and run.  It can only run where
 # the CPU matches, so each host executes its own and skips the other; building
 # the other one anyway is `bazel build --platforms=//tools/platforms:...`.
@@ -26,7 +43,10 @@ cc_binary(
         target_compatible_with = [
             "@platforms//os:linux",
             "@platforms//cpu:" + cpu,
-        ],
+        ] + select({
+            ":sanitized": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
     )
     for cpu in [
         "aarch64",

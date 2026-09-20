@@ -98,6 +98,12 @@ register_toolchains(
 bazel_dep(name = "gazelle", version = "0.50.0", dev_dependency = True)
 bazel_dep(name = "gazelle_cc", version = "0.6.0", dev_dependency = True)
 
+# The Gazelle rules are instantiated in a generated repository and aliased from
+# //tools/gazelle, so that package loads for a consumer too (see
+# //tools/gazelle:extension.bzl).
+gazelle_runner = use_extension("//tools/gazelle:extension.bzl", "gazelle_runner", dev_dependency = True)
+use_repo(gazelle_runner, "gazelle_runner")
+
 # Clang/LLVM is built from source via LLVM's own Bazel overlay.  The Bazel
 # Central Registry only ships llvm-project up to 17.0.4, so newer Clang
 # releases (21.1.8 here) are pulled in through a local module extension that
