@@ -138,7 +138,7 @@ phase_materialize() { materialize "$SRC" "$LOGDIR"; }
 phase_wire() {
   wire "$SRC" "$E2E_DIR/rulesets/$RULESET.yaml" "$DISK_CACHE" || return 1
   if ! run_logged "$LOGDIR/wire-resolve.log" \
-         env -C "$SRC" bazel query "@cpp_format_bin//:cpp_format"; then
+         env -C "$SRC" "$TARGET_BAZEL" query "@cpp_format_bin//:cpp_format"; then
     log_tail "$LOGDIR/wire-resolve.log"
     fail "@cpp_format_bin//:cpp_format does not resolve after wiring"
     return 1
@@ -151,7 +151,7 @@ phase_wire() {
 # misreport as "the ruleset produced no edits".  Run the same query visibly.
 phase_enumerate() {
   local q="kind('cc_(library|binary|test) rule', $TARGET_PATTERN) except attr(tags, 'no-cpp-format', $TARGET_PATTERN)"
-  if ! run_logged "$LOGDIR/enumerate.log" env -C "$SRC" bazel query "$q"; then
+  if ! run_logged "$LOGDIR/enumerate.log" env -C "$SRC" "$TARGET_BAZEL" query "$q"; then
     log_tail "$LOGDIR/enumerate.log"
     fail "target enumeration query failed"
     return 1
@@ -165,7 +165,7 @@ _target_build() {
   local log="$1" verb="$2"; shift 2
   local flags=(); mapfile -t flags < <(target_build_flags)
   run_logged_timeout "$PHASE_TIMEOUT" "$log" \
-    env -C "$SRC" bazel "$verb" "${flags[@]}" "$@" "$TARGET_PATTERN"
+    env -C "$SRC" "$TARGET_BAZEL" "$verb" "${flags[@]}" "$@" "$TARGET_PATTERN"
 }
 
 phase_baseline() {
@@ -417,7 +417,7 @@ run_scenario() {
 
   # Leave the workspace behind for triage unless it passed and --keep was not given.
   if [[ -z "$FAILED_PHASE" && -z "$KEEP" ]]; then
-    env -C "$SRC" bazel shutdown >/dev/null 2>&1 || true
+    env -C "$SRC" "$TARGET_BAZEL" shutdown >/dev/null 2>&1 || true
   fi
 
   _write_summary "$scen"
@@ -484,6 +484,23 @@ _evaluate() {
 # ---------------------------------------------------------------------------
 
 mkdir -p "$WORK" "$OUT"
+
+# Every Bazel that runs in a *target* workspace goes through this shim, which
+# keeps the machine's rc files out of it.  A target repository compiles with
+# whatever toolchain Bazel finds on the machine, and a home rc that turns on
+# remote execution (as one does once this repository's own toolchain is
+# hermetic) sends those compiles to workers that have no compiler: "Remote
+# Execution Failure" at `baseline`, or not, depending on which side of a dynamic
+# execution race won.  Startup options cannot come from the target's own
+# .bazelrc -- the home rc is read after it -- so they go on the command line,
+# and a shim rather than a flag at every call site because tools/cpp_format.sh
+# runs Bazel too (it honours \$BAZEL).  The build of the tool itself, in this
+# repository, still uses plain `bazel` and whatever the machine configures.
+TARGET_BAZEL="$WORK/bin/bazel"
+mkdir -p "$WORK/bin"
+printf '#!/usr/bin/env bash\nexec %q --nohome_rc --nosystem_rc "$@"\n' "$(command -v bazel)" > "$TARGET_BAZEL"
+chmod +x "$TARGET_BAZEL"
+export TARGET_BAZEL BAZEL="$TARGET_BAZEL"
 rc=0
 declare -a RESULTS=()
 for s in "${SCENARIOS[@]}"; do
