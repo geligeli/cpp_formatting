@@ -1,7 +1,7 @@
 # Target platforms for the release binaries.
 #
 # glibc, linked statically: libc.a and libm.a are built from the glibc 2.44
-# sources by the hermetic toolchain (the patch in //third_party/hermetic_llvm),
+# sources by the hermetic toolchain (the `glibc-static` fork MODULE.bazel names),
 # and the link is a static-pie with no dynamic linker -- it runs on any x86_64 /
 # aarch64 Linux kernel, whatever libc the machine has, or none.  The glibc
 # version is part of the platform because the program is compiled against the

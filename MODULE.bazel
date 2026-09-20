@@ -61,20 +61,25 @@ bazel_dep(name = "llvm", version = "0.8.21", dev_dependency = True)
 
 # hermetic-llvm links glibc dynamically only: against stubs generated from a
 # symbol list, the implementation coming from the machine the binary runs on.
-# The release binaries are fully static, so the patches add what that needs --
-# glibc 2.44's libc.a, libm.a and startup files built from source, selected by
-# a platform constraint (//tools/platforms; `--config=minify-<cpu>`).  See
-# //third_party/hermetic_llvm:BUILD.bazel for what each patch holds.  An
-# override is honoured in the root module only, which is where it is wanted.
-single_version_override(
+# The release binaries are fully static, so the toolchain is taken from a fork
+# that adds what that needs -- glibc 2.44's libc.a, libm.a and startup files
+# built from source, selected by a platform constraint (//tools/platforms;
+# `--config=minify-<cpu>`):
+#
+#   https://github.com/geligeli/hermetic-llvm, branch `glibc-static`
+#
+# The tag is upstream's release plus that branch, so a toolchain bump is: rebase
+# the branch onto the new upstream tag, tag it, and change the three lines
+# below (`bazel_dep`'s version above is what the fork's MODULE.bazel says and
+# is otherwise unused -- an override replaces the registry lookup).  A tarball
+# pinned by hash rather than `git_override`: it needs no git on the machine and
+# lands in the repository cache.  An override is honoured in the root module
+# only, which is where it is wanted.
+archive_override(
     module_name = "llvm",
-    patch_strip = 1,
-    patches = [
-        "//third_party/hermetic_llvm:glibc_static.patch",
-        "//third_party/hermetic_llvm:glibc_static_aarch64.patch",
-        "//third_party/hermetic_llvm:glibc_static_x86_64.patch",
-    ],
-    version = "0.8.21",
+    integrity = "sha256-pGjxdNeDa82AVvZhxMBu9g73r0rYiJWgiZ/gT3zg49o=",
+    strip_prefix = "hermetic-llvm-0.8.21-glibc-static.1",
+    urls = ["https://github.com/geligeli/hermetic-llvm/archive/refs/tags/v0.8.21-glibc-static.1.tar.gz"],
 )
 
 register_toolchains(

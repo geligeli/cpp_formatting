@@ -97,8 +97,8 @@ build:minify --platform_suffix=-minify
 # Fully static, against glibc.  The hermetic toolchain links glibc dynamically
 # by default -- against version stubs, with no libc.a to link -- so "static" is
 # a property of the *platform*: //tools/platforms:linux_*_glibc_static selects
-# glibc 2.44's libc.a/libm.a and startup files, built from source by the patch
-# in //third_party/hermetic_llvm, and the toolchain then links -static(-pie)
+# glibc 2.44's libc.a/libm.a and startup files, built from source by the fork
+# of the toolchain MODULE.bazel names, and the toolchain then links -static(-pie)
 # the way it does for musl.  That replaces `--features=fully_static_link` and
 # the system Clang (`--action_env=CC=clang`) this config used to need.  A
 # platform names one CPU, so the release workflow picks the config by runner.

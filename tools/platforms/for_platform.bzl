@@ -3,8 +3,8 @@
 `bazel test //...` builds for the default platform, where glibc is linked
 dynamically; the static link only happens under
 `--platforms=//tools/platforms:linux_<cpu>_glibc_static`.  The transition makes
-one target build that way regardless, so the hermetic-llvm patch that provides
-static glibc (//third_party/hermetic_llvm) has a test in the ordinary suite.
+one target build that way regardless, so the static glibc of the toolchain fork
+(see MODULE.bazel) has a test in the ordinary suite.
 """
 
 # A sanitizer runtime cannot be linked into a static executable (ASan and TSan
