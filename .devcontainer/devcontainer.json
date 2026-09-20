@@ -17,33 +17,5 @@
     },
     "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
     "workspaceFolder": "/workspace",
-    "remoteUser": "ubuntu",
-
-    // Bazel caches.  The two bind mounts default to directories in the
-    // workspace (created by initializeCommand -- a bind mount's source has to
-    // exist before the container is created, so a machine-specific default
-    // path is what keeps the container from starting elsewhere, CI included).
-    // Point BAZEL_DISK_CACHE / BAZEL_REPO_CACHE at a shared cache on the host
-    // to use that instead; /etc/bazel.bazelrc in the image points
-    // --disk_cache / --repository_cache at the mounts either way.  The named
-    // volume keeps Bazel's output base (and its ~320 MB install base) across
-    // container rebuilds, so a rebuild does not re-analyse from scratch.
-    "initializeCommand": [
-        "${localWorkspaceFolder}/.devcontainer/init-bazel-caches.sh",
-        "${localWorkspaceFolder}"
-    ],
-    "mounts": [
-        "source=${localWorkspaceFolder}/.disk_cache,target=/bazel-cache/disk,type=bind",
-        "source=${localWorkspaceFolder}/.bazel_cache,target=/bazel-cache/repo,type=bind",
-        "source=cpp-formatting-bazel-output,target=/home/ubuntu/.cache/bazel,type=volume"
-    ],
-
-    // A named volume can come back root-owned, and so can a bind source that
-    // something other than initializeCommand created; claim the mount points
-    // (never recursively -- the disk cache is large and may live on NFS) so the
-    // container user can write them.
-    // /home/ubuntu/.cache is in the list because mounting the volume *inside* it
-    // recreates the parent as root, which otherwise breaks every other tool that
-    // wants a ~/.cache subdirectory of its own (pre-commit, pip, ...).
-    "postCreateCommand": "for d in /bazel-cache/disk /bazel-cache/repo /home/ubuntu/.cache /home/ubuntu/.cache/bazel; do [ -w \"$d\" ] || sudo chown \"$(id -u):$(id -g)\" \"$d\"; done"
+    "remoteUser": "ubuntu"
 }

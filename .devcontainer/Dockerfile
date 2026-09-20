@@ -68,20 +68,26 @@ ARG DEBIAN_FRONTEND=noninteractive
 # One apt layer, no recommends, lists/debs kept in BuildKit caches rather than
 # in the image.  `xxd` is gone: the `xxd -i` genrule it served was replaced by
 # //cpp_formatting:embed_file.
+#
+# No compiler is installed for *this* repository: its C/C++ toolchain is the
+# hermetic one Bazel downloads (`@llvm`, see MODULE.bazel), so `clang` and `lld`
+# -- which the release config needed while it said `--action_env=CC=clang` --
+# are gone.  `g++` stays for the e2e suite only: e2e/run_e2e.sh builds *other*
+# repositories (googletest, abseil, re2, ...) in a second workspace, and those
+# register no toolchain, so Bazel auto-detects the machine's.  `clang-format`
+# and `clangd` are tools for the pre-commit hook and the editor, not compilers.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     rm -f /etc/apt/apt.conf.d/docker-clean \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
-        clang \
         clang-format \
         clangd \
         curl \
         g++ \
         git \
         less \
-        lld \
         locales \
         openssh-client \
         python3-pip \
@@ -102,25 +108,5 @@ COPY --from=tools /out/ /
 
 RUN echo '[ -f /usr/local/share/bazel-complete.bash ] && source /usr/local/share/bazel-complete.bash' \
     >> /etc/bash.bashrc
-
-# Bazel caches.  /bazel-cache/{disk,repo} are bind-mounted from the host by
-# .devcontainer/devcontainer.json; creating them here (owned by the container
-# user) means an unmounted container still works, the caches are just
-# container-local then.  ~/.cache/bazel holds the output base and the install
-# base, backed by a named volume so it survives container rebuilds -- Docker
-# seeds a fresh named volume from the image, ownership included.
-RUN install -d -o ubuntu -g ubuntu \
-        /bazel-cache/disk \
-        /bazel-cache/repo \
-        /home/ubuntu/.cache/bazel
-
-# The system rc, not the checked-in %workspace%/.bazelrc: these paths exist
-# only inside this container, and native Linux/macOS/Windows builds of the repo
-# must not see them.  Command-line flags (CI passes its own --disk_cache=) win
-# over anything here.
-COPY <<'EOF' /etc/bazel.bazelrc
-build --disk_cache=/bazel-cache/disk
-common --repository_cache=/bazel-cache/repo
-EOF
 
 USER ubuntu
