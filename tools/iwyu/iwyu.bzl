@@ -90,7 +90,21 @@ def _compilation_context(target, ctx):
 # External repositories whose headers the code base includes with quotes.
 _QUOTED_INCLUDE_REPOS = ["llvm-project", "protobuf"]
 
+# The hermetic toolchain (the `llvm` module) has repositories of its own, and
+# one of them is *also* called llvm-project: it holds the libc++ and libc++abi
+# every target compiles against, at external/llvm++llvm+llvm-project/libcxx/...
+# That one must stay behind -isystem.  Demoted to -I, the standard library is
+# spelled "string" instead of <string>, and IWYU no longer recognises it as the
+# C++ library at all -- its libc++ mappings key on the <> spelling -- so it
+# recommends the implementation headers ("__fwd/string.h", "__utility/move.h";
+# 106 files flagged).  A canonical repository name starts with its module's.
+_TOOLCHAIN_MODULE_PREFIX = "llvm+"
+
 def _is_quoted_include_dir(path):
+    components = path.split("/")
+    for c in components:
+        if c.startswith(_TOOLCHAIN_MODULE_PREFIX):
+            return False
     for repo in _QUOTED_INCLUDE_REPOS:
         if ("external/" + repo) in path or ("+" + repo + "/") in path:
             return True
@@ -225,7 +239,11 @@ iwyu_aspect = aspect(
             default = Label("@llvm-project//clang:builtin_headers_gen"),
         ),
         "_mappings": attr.label_list(
-            default = [Label("//tools/iwyu:mappings.imp")],
+            default = [
+                Label("//tools/iwyu:mappings.imp"),
+                # libc++'s private headers, generated from its module map.
+                Label("//tools/iwyu:libcxx.imp"),
+            ],
             allow_files = [".imp"],
         ),
     },

@@ -11,6 +11,15 @@
   # libstdc++ 15 is newer than the mappings IWYU 0.25 ships: it finds these in
   # whichever header happens to forward-declare them first (<iterator> for
   # pair, <format> for vector, <variant> for tuple).
+  # libc++ (the hermetic toolchain's): std::chrono::milliseconds is a
+  # duration<long long, std::milli>, and IWYU asks for <ratio> wherever one is
+  # spelled.  libc++'s private headers are handled wholesale by libcxx.imp.
+  # libc++ implementation aliases that std::move / std::make_pair are written
+  # in terms of; IWYU charges the *caller* with them.
+  { symbol: ["std::__libcpp_remove_reference_t", private, "<utility>", public] },
+  { symbol: ["std::__unwrap_ref_decay_t", private, "<utility>", public] },
+  { symbol: ["std::ratio", private, "<chrono>", public] },
+  { symbol: ["std::ratio", private, "<ratio>", public] },
   { symbol: ["std::pair", private, "<utility>", public] },
   { symbol: ["std::vector", private, "<vector>", public] },
   { symbol: ["std::tuple", private, "<tuple>", public] },
