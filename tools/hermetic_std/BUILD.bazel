@@ -1,0 +1,50 @@
+# The C++ standard library, C library and kernel headers of the hermetic
+# toolchain, as directories a test can hand to the Clang it links.
+#
+# The tools' tests parse C++ *fixtures* -- in memory, or from testdata -- and a
+# fixture that says `#include <coroutine>` is resolved by the Clang driver inside
+# the test process, which looks where a Clang on that machine would: /usr/include
+# and whatever libstdc++ is installed.  That made the tests depend on the host:
+# they pass on a workstation and fail on a remote-execution worker whose image
+# has no C++ headers ("'coroutine' file not found", 8 cases of
+# rename_variables_test).  Tests take these directories as `data` and name them
+# in CPLUS_INCLUDE_PATH (see :defs.bzl), which the driver searches before its
+# own defaults, so every machine resolves a fixture's includes to the same files.
+#
+# Dev-only: `@llvm` is a dev dependency, so nothing a consumer loads may name it
+# -- that is why this is a package of its own and not part of //cpp_formatting.
+
+load(":header_directory.bzl", "header_directory")
+
+package(default_visibility = ["//visibility:public"])
+
+# Clang's builtin headers (<stddef.h>, <stdarg.h>, the intrinsics): libc++'s
+# <stddef.h> is a wrapper that #include_next's the compiler's.  The shipped
+# binaries embed these and extract them at run time (ensureClangResourceDir()),
+# but the in-memory test helpers run the driver with no -resource-dir, and used
+# to find GCC's copy on the host.  These are the ones of the Clang the tools
+# *link* (21.1.8), not of the toolchain's -- a builtin header belongs to the
+# compiler doing the parsing.
+header_directory(
+    name = "clang_builtin_headers",
+    srcs = ["@llvm-project//clang:builtin_headers_gen"],
+    strip_through = "/staging/include/",
+)
+
+# In search order, as the toolchain itself passes them; the builtin headers sit
+# where a resource directory would, after the C++ library and before the C one.
+HEADER_DIRECTORIES = [
+    "@llvm//runtimes/libcxx:libcxx_headers_include_search_directory",
+    "@llvm//runtimes/libcxx:libcxxabi_headers_include_search_directory",
+    ":clang_builtin_headers",
+    "@llvm//runtimes/glibc:kernel_headers_include_search_directory",
+    "@llvm//runtimes/glibc:glibc_headers_include_search_directory",
+]
+
+[
+    alias(
+        name = "dir%d" % i,
+        actual = directory,
+    )
+    for i, directory in enumerate(HEADER_DIRECTORIES)
+]

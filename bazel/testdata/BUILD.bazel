@@ -141,4 +141,10 @@ sh_test(
         "//:cpp_format.yaml",
         "//cpp_formatting:cpp_format",
     ],
+    # The database's `directory` is the *execution root* and its `-c`/`-isystem`
+    # paths are relative to it, which is what an editor gets.  A sandbox (or a
+    # remote worker) stages only this test's declared inputs under a directory
+    # of the same shape, so the entry's source and the toolchain's headers are
+    # not there; run in the real one.
+    tags = ["local"],
 )

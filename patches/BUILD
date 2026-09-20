@@ -2,6 +2,7 @@ exports_files(
     [
         "llvm_blake3_no_asm_on_windows.patch",
         "llvm_enable_zlib_define.patch",
+        "llvm_rdf_std_specializations.patch",
         "llvm_smallvector_cstdint.patch",
         "llvm_zstd_no_asm_on_windows.patch",
     ],

@@ -5,6 +5,7 @@ load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//tools/hermetic_std:defs.bzl", "HERMETIC_STD_DATA", "HERMETIC_STD_ENV")
 
 # Stated so that Gazelle leaves visibility alone: gazelle_cc makes every
 # library it touches public in a package that declares no default.
@@ -135,6 +136,10 @@ cc_test(
     copts = [
         "-DGTEST_HAS_RTTI=0",
     ],
+    data = HERMETIC_STD_DATA,
+    # The fixtures' #include <...> must resolve to the same headers on every
+    # machine, a remote worker included; see //tools/hermetic_std.
+    env = HERMETIC_STD_ENV,
     deps = [
         ":trailing_return_types_lib",
         "@googletest//:gtest_main",
@@ -161,7 +166,10 @@ sh_test(
         "testdata/input2.cpp",
         "testdata/input3.cpp",
         "//cpp_formatting:trailing_return_types",
-    ],
+    ] + HERMETIC_STD_DATA,
+    # The fixtures' #include <...> must resolve to the same headers on every
+    # machine, a remote worker included; see //tools/hermetic_std.
+    env = HERMETIC_STD_ENV,
 )
 
 # The east-const / west-const rewrite: moves a type specifier's cv-qualifiers
@@ -192,6 +200,10 @@ cc_test(
     copts = [
         "-DGTEST_HAS_RTTI=0",
     ],
+    data = HERMETIC_STD_DATA,
+    # The fixtures' #include <...> must resolve to the same headers on every
+    # machine, a remote worker included; see //tools/hermetic_std.
+    env = HERMETIC_STD_ENV,
     deps = [
         ":const_placement_lib",
         "@googletest//:gtest_main",
@@ -472,6 +484,10 @@ cc_test(
     copts = [
         "-DGTEST_HAS_RTTI=0",
     ],
+    data = HERMETIC_STD_DATA,
+    # The fixtures' #include <...> must resolve to the same headers on every
+    # machine, a remote worker included; see //tools/hermetic_std.
+    env = HERMETIC_STD_ENV,
     deps = [
         ":cpp_index_lib",
         ":cpp_index_merge",
@@ -534,6 +550,10 @@ cc_test(
     copts = [
         "-DGTEST_HAS_RTTI=0",
     ],
+    data = HERMETIC_STD_DATA,
+    # The fixtures' #include <...> must resolve to the same headers on every
+    # machine, a remote worker included; see //tools/hermetic_std.
+    env = HERMETIC_STD_ENV,
     deps = [
         ":naming_convention",
         ":rename_variables_lib",

@@ -193,8 +193,8 @@ cc_library(
     hdrs = ["http_server.h"],
     copts = CODE_BROWSER_COPTS,
     implementation_deps = [
-        "@boost.asio//:boost.asio",
-        "@boost.beast//:boost.beast",
+        "@boost.asio",
+        "@boost.beast",
     ],
     deps = [
         ":api",
@@ -237,8 +237,8 @@ cc_test(
         ":static_assets",
         "//cpp_formatting:cpp_index_merge",
         "//cpp_formatting:index_cc_proto",
-        "@boost.asio//:boost.asio",
-        "@boost.beast//:boost.beast",
+        "@boost.asio",
+        "@boost.beast",
         "@googletest//:gtest_main",
     ],
 )

@@ -1,0 +1,25 @@
+# Target platforms for the release binaries.
+#
+# glibc, linked statically: libc.a and libm.a are built from the glibc 2.44
+# sources by the hermetic toolchain (the `glibc-static` fork MODULE.bazel names),
+# and the link is a static-pie with no dynamic linker -- it runs on any x86_64 /
+# aarch64 Linux kernel, whatever libc the machine has, or none.  The glibc
+# version is part of the platform because the program is compiled against the
+# public headers of the libc.a it is linked with.
+#
+# Dev-only, like the toolchain itself: `@llvm` is a dev dependency, so nothing
+# a consumer of the prebuilt kit loads may name this package.
+
+package(default_visibility = ["//visibility:public"])
+
+platform(
+    name = "linux_x86_64_glibc_static",
+    constraint_values = ["@llvm//constraints/glibc_linkage:static"],
+    parents = ["@llvm//platforms:linux_x86_64_gnu.2.44"],
+)
+
+platform(
+    name = "linux_aarch64_glibc_static",
+    constraint_values = ["@llvm//constraints/glibc_linkage:static"],
+    parents = ["@llvm//platforms:linux_aarch64_gnu.2.44"],
+)

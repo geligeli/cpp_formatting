@@ -13,10 +13,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Both Linux binaries are built on the same kind of runner: the
+          # hermetic toolchain cross-compiles, so the aarch64 one needs no ARM
+          # machine.  They stay two jobs rather than one loop because each is a
+          # from-source LLVM build with LTO, and in parallel the release takes
+          # as long as one of them.  `config` is the .bazelrc config: a fully
+          # static link is a property of the target *platform*, and a platform
+          # names one CPU.
           - runs-on: ubuntu-latest
             asset: cpp_format-linux-x86_64
-          - runs-on: ubuntu-24.04-arm
+            config: minify-x86_64
+          - runs-on: ubuntu-latest
             asset: cpp_format-linux-aarch64
+            config: minify-aarch64
+          # macOS and Windows are built natively with the machine's own
+          # toolchain.  The hermetic one can target them too, but that is not
+          # validated here, and .bazelrc picks the MSVC flag set by *host* OS.
           - runs-on: macos-latest
             asset: cpp_format-darwin-aarch64
           - runs-on: windows-latest
@@ -39,16 +51,18 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .disk_cache
-          key: bazel-disk-cache-release-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
+          # By asset, not by runner: the two Linux jobs run on the same OS and
+          # architecture but fill the cache with objects for different targets.
+          key: bazel-disk-cache-release-${{ matrix.asset }}-${{ github.run_id }}
           restore-keys: |
-            bazel-disk-cache-release-${{ runner.os }}-${{ runner.arch }}-
+            bazel-disk-cache-release-${{ matrix.asset }}-
 
       - name: Build binary in devcontainer
         if: runner.os == 'Linux'
         uses: devcontainers/ci@v0.3
         with:
           runCmd: |
-            bazel build --disk_cache=/workspace/.disk_cache --repository_cache=/workspace/.bazel_cache --config=minify //cpp_formatting:cpp_format
+            bazel build --disk_cache=/workspace/.disk_cache --repository_cache=/workspace/.bazel_cache --config=${{ matrix.config }} //cpp_formatting:cpp_format
             cp -L bazel-bin/cpp_formatting/cpp_format ${{ matrix.asset }}
 
       - name: Setup Bazel
@@ -59,14 +73,30 @@ jobs:
         if: runner.os != 'Linux'
         shell: bash
         run: |
-          # The minify config uses GNU-ld flags and full static linking, which
-          # only work on Linux; use a plain optimized build here.
+          # The minify configs use ELF linker flags and the hermetic toolchain's
+          # static-glibc platform, both Linux-only; use a plain optimized build
+          # with the machine's own toolchain here.
           # MSYS_NO_PATHCONV: stop git-bash from rewriting //target patterns
           # into POSIX paths on Windows.
           export MSYS_NO_PATHCONV=1
           bazel build --disk_cache=.disk_cache --repository_cache=.bazel_cache -c opt //cpp_formatting:cpp_format
           BIN=$(bazel cquery -c opt //cpp_formatting:cpp_format --output=files)
           cp "$BIN" "${{ matrix.asset }}"
+
+      # A cross build is one flag away from the native one, so make sure each
+      # asset is for the CPU its name says and has no dynamic loader.
+      - name: Check the binary matches its name
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          desc="$(file -b "${{ matrix.asset }}")"
+          echo "$desc"
+          case "${{ matrix.asset }}" in
+            *-x86_64)  grep -q "x86-64" <<<"$desc" ;;
+            *-aarch64) grep -q "ARM aarch64" <<<"$desc" ;;
+            *) echo "unexpected asset name" >&2; exit 1 ;;
+          esac
+          grep -Eq "statically linked|static-pie linked" <<<"$desc"
 
       - name: Upload binary
         uses: actions/upload-artifact@v4

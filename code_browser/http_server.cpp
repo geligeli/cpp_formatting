@@ -11,6 +11,7 @@
 #include <boost/asio/post.hpp>
 #include <boost/asio/signal_set.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/strand.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
@@ -106,9 +107,10 @@ struct HttpServer::Impl {
         api(api),
         assets(assets),
         ioc(static_cast<int>(ThreadCount(options))),
-        acceptor(ioc),
-        signals(ioc),
-        drain_timer(ioc) {}
+        control(net::make_strand(ioc)),
+        acceptor(control),
+        signals(control),
+        drain_timer(control) {}
 
   static auto ThreadCount(const ServerOptions& o) -> unsigned {
     if (o.threads != 0) return o.threads;
@@ -196,19 +198,27 @@ struct HttpServer::Impl {
     stream.socket().shutdown(tcp::socket::shutdown_send, ignored);
   }
 
+  // Runs on `control`.  Every accepted socket gets a strand of its own, and its
+  // session runs on it: a beast::tcp_stream with a timeout has a timer whose
+  // handler closes the socket, and with the context run by several threads that
+  // handler raced the session's own use of the socket (ThreadSanitizer again,
+  // in the idle-timeout test) -- Beast requires a strand here.  Sessions are
+  // still concurrent with each other; each is only serialized with itself.
   auto Accept() -> net::awaitable<void> {
     for (;;) {
-      auto [ec, socket] = co_await acceptor.async_accept(kAsTuple);
+      auto [ec, socket] = co_await acceptor.async_accept(
+          net::any_io_executor(net::make_strand(ioc)), kAsTuple);
       if (ec) {
         if (stopping.load() || !acceptor.is_open()) co_return;
         continue;  // a transient accept failure; keep serving
       }
-      net::co_spawn(ioc, Session(std::move(socket)), net::detached);
+      const net::any_io_executor session_strand = socket.get_executor();
+      net::co_spawn(session_strand, Session(std::move(socket)), net::detached);
     }
   }
 
-  // Runs on an io thread.  Closes the door, then waits for the sessions to
-  // finish before stopping the context.
+  // Runs on `control`.  Closes the door, then waits for the sessions to finish
+  // before stopping the context.
   void InitiateStop() {
     if (stopping.exchange(true)) return;
     beast::error_code ec;
@@ -241,6 +251,13 @@ struct HttpServer::Impl {
   const ApiHandler& api;
   const StaticAssets& assets;
   net::io_context ioc;
+  // The control plane -- the accept loop, the close in InitiateStop(), the
+  // signal handler and the drain timer -- runs on this one strand.  The context
+  // is run by several threads and an Asio I/O object may not be used from two
+  // at once: without the strand, Stop()'s acceptor.close() on one thread raced
+  // the accept loop's async_accept() on another (ThreadSanitizer, in
+  // HttpServerTest.ServesApiAndStatic).  Sessions stay on the context itself.
+  net::strand<net::io_context::executor_type> control;
   tcp::acceptor acceptor;
   net::signal_set signals;
   net::steady_timer drain_timer;
@@ -280,7 +297,7 @@ auto HttpServer::Start(std::string* error) -> bool {
     s.acceptor.close(ignored);
     return false;
   }
-  net::co_spawn(s.ioc, s.Accept(), net::detached);
+  net::co_spawn(s.control, s.Accept(), net::detached);
   const unsigned n = Impl::ThreadCount(s.options);
   for (unsigned i = 0; i < n; ++i)
     s.threads.emplace_back([&s] { s.ioc.run(); });
@@ -306,7 +323,7 @@ void HttpServer::InstallSignalHandlers() {
 void HttpServer::Stop() {
   Impl& s = *impl_;
   if (!s.started.load()) return;
-  net::post(s.ioc, [&s] { s.InitiateStop(); });
+  net::post(s.control, [&s] { s.InitiateStop(); });
   if (!s.OnIoThread()) Join();
 }
 
