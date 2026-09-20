@@ -116,11 +116,26 @@ bazel test //:format.check   # test gate    bazel run //:format.fix   # apply
 bazel run //:format.compile_commands      # write compile_commands.json
 ```
 
-The same dep set can be **indexed**: `cpp_index_targets(name = "index", deps =
-[...])` defines `//:index.index`, an ordinary build target whose output is the
-merged symbol index of those targets (see [Symbol index](#symbol-index)), and
--- in this repository, which builds the browser from source -- `//:index.browse`,
-which `bazel run` to serve the workspace with every indexed token annotated.
+The same dep set can be **indexed and browsed**: `cpp_index_targets(name =
+"index", deps = [...])` defines `//:index.index`, an ordinary build target whose
+output is the merged symbol index of those targets (see
+[Symbol index](#symbol-index)), and `//:index.browse`:
+
+```sh
+bazel run //:index.browse                   # http://127.0.0.1:8080/
+bazel run //:index.browse -- --port=9000    # arguments after -- go to the server
+```
+
+builds the index, imports it into SQLite and serves *your checkout* with every
+indexed token annotated -- click an identifier for its definition and
+references. The browser is a prebuilt release asset like `cpp_format` itself
+(Linux x86_64/aarch64 and macOS arm64; there is no Windows build yet), fetched
+the first time something needs it: `.browse` and the `.db` it depends on are
+tagged `manual`, so `bazel build //...` never downloads it. `deps` are the
+*roots* -- the aspect follows `deps`, so naming your binaries and tests covers
+the libraries under them. Put the macro in the package of its roots (they are
+usually package-private) and pass `testonly = True` if any of them is a test.
+If you **vendored** the kit, add `"code_browser_bin"` to your `use_repo(...)`.
 
 **A `compile_commands.json` for free.** The aspect already derives every
 target's compile command, so both entry points can also write it out as a
@@ -872,11 +887,13 @@ instead generates four graph targets:
 and `cpp_index_targets(name, deps)` generates `<name>.index` -- a
 `bazel build` target whose output is the merged symbol index of the deps (see
 [Symbol index](#symbol-index)); `cpp_format.sh index [pattern]` is its
-query-driven twin. In this repository the same macro also generates
-`<name>.db` (the index imported into SQLite, another cached build action) and
-`<name>.browse` (`bazel run` it to build both and serve the workspace in
-[code_browser/](code_browser/)); the prebuilt kit's copy defines only
-`.index`, since the browser is built from source.
+query-driven twin. The same macro also generates `<name>.db` (the index
+imported into SQLite, another cached build action) and `<name>.browse` (`bazel
+run` it to build both and serve the workspace in
+[code_browser/](code_browser/)). In this repository both build the browser
+from source; in the prebuilt kit they run the release's `code_browser` asset
+(`@code_browser_bin`, fetched on demand) and are tagged `manual`, so a wildcard
+build neither downloads it nor fails on a host that has none (Windows).
 
 **Compilation database.** The aspect writes each target's compile command out
 as a `<name>.compile_commands.jsonl` fragment (one JSON object per source
@@ -977,8 +994,9 @@ what it is, jump to its definition, list its references. It reads the index
 from SQLite (`index_import`, or `<name>.db` under Bazel), so nothing is loaded
 up front. `bazel run //:index.browse` builds the index, imports it and serves
 the workspace at `http://127.0.0.1:8080/` (`-- --port=N` picks a port); see
-[code_browser/README.md](code_browser/README.md) for the routes. It is built
-from source alongside Clang and is not part of the prebuilt kit.
+[code_browser/README.md](code_browser/README.md) for the routes. In this
+repository it is built from source; a consumer of the prebuilt kit gets the
+same `bazel run //:index.browse` from a release asset, with nothing to build.
 
 **Extending it.** Any producer may emit `IndexUnit`s -- a proto-aware indexer
 would describe `.proto` files with `Language.PROTO` symbols and let the C++

@@ -87,6 +87,15 @@ build:minify --copt=-fdata-sections
 build:minify --copt=-flto
 build:minify --copt=-Os
 build:minify --cxxopt=-fno-exceptions
+# ... except where exceptions are the error model: Boost.Asio reports every
+# failure by throwing, so //code_browser (the other release binary) and the
+# Boost sources it compiles get them back.  A --per_file_copt lands after every
+# --cxxopt on the command line, and the last -f[no-]exceptions wins.  Everything
+# else -- LLVM, protobuf, abseil -- stays without, so those objects are shared
+# between the two binaries in one release build.  Nothing throws *through*
+# them: the frames between Asio's throw and http_server's catch are all Boost's
+# and code_browser's own.
+build:minify --per_file_copt=external/boost\..*,code_browser/.*@-fexceptions
 build:minify --cxxopt=-fno-rtti
 build:minify --linkopt=-flto
 build:minify --linkopt=-fno-asynchronous-unwind-tables
