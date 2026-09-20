@@ -17,9 +17,10 @@
 # T::kInlineCapacity) that bound both to a renamed member and to one the tool
 # could not rename -- a build-generated class outside the file set, and a
 # member declined by a parameter capture -- where the token was left alone
-# and the renamed target broke.  Those are fixed (see AGENTS.md, "A dependent
-# token that binds to something this rule does not rename"), which is what
-# let protoc build and the generated tests surface.
+# and the renamed target broke.  Those are fixed (see
+# docs/non-obvious-behaviours.md, "A dependent token that binds to something
+# this rule does not rename"), which is what let protoc build and the
+# generated tests surface.
 #
 # NB: sourced by bash -- no backticks or dollar signs in values.
 REPO=protobuf

@@ -100,7 +100,7 @@ bool scopesCanMatchSameDecl(VariableScope a, VariableScope b);
 // and member functions share a class; the three global scopes share a
 // namespace; locals share neither.  Rules whose scopes share a context must
 // use styles that cannot produce the same name -- see namingStylesCanCollide()
-// and the note on collides() in AGENTS.md.
+// and the note on collides() in docs/non-obvious-behaviours.md.
 bool scopesShareADeclContext(VariableScope a, VariableScope b);
 
 // ---------------------------------------------------------------------------

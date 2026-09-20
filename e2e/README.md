@@ -158,7 +158,8 @@ is on). The usual causes, in rough order of likelihood:
 
 1. **A macro-expanded reference the veto did not see.** A member referenced from
    a macro body is not renamed at all — the reference has no rewritable spelling,
-   so the whole rename is vetoed (AGENTS.md, "names spelled through macros").
+   so the whole rename is vetoed ([docs/design.md](../docs/design.md), "names
+   spelled through macros").
    That only holds for expansions in a TU the tool actually parses, so a macro
    expanded solely in a `no-cpp-format` target, under an `#if` branch this build
    does not take, or outside the formatted pattern is still invisible.
@@ -170,7 +171,7 @@ is on). The usual causes, in rough order of likelihood:
    only; a target reachable through another attribute contributes no owned
    headers, so uses of its declarations are not rewritten.
 4. **Template-dependent tokens outside the passed source set** — documented in
-   AGENTS.md under "template-dependent member tokens".
+   [docs/design.md](../docs/design.md) under "template-dependent tokens".
 5. **A capture the scan pass does not model.** Three are modelled: a local of
    the new name capturing a member use, a derived class declaring the new name
    hiding the member from accesses through it, and the new name already used

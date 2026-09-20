@@ -1,6 +1,7 @@
 # The code browser: an HTTP server (Boost.Beast/Asio) that serves a git
 # checkout with every indexed token annotated from the symbol index, which it
-# reads from SQLite.  See README.md and the "code_browser" section of AGENTS.md.
+# reads from SQLite.  See README.md and the "code_browser" section of
+# docs/source-map.md.
 load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
 load("@protobuf//bazel:proto_library.bzl", "proto_library")
 load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
