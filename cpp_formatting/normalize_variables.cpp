@@ -1,4 +1,5 @@
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -33,9 +34,9 @@ static cl::opt<std::string> StyleOpt(
 
 static cl::opt<std::string> ScopeOpt(
     "scope",
-    cl::desc("Scope to rename: member, local, global, "
-             "static_member, const_member, static_global, const_global, "
-             "method, type, namespace"),
+    cl::desc("Scope to rename: member, local, global, method, type, namespace, "
+             "or a fine-grained one ({static,const,public,protected,private}"
+             "_member, {static,const}_local, {static,const}_global)"),
     cl::init("member"), cl::cat(NormalizeVarsCategory));
 
 static cl::opt<bool> InPlace("in-place",
@@ -124,34 +125,13 @@ auto main(int argc, const char** argv) -> int {
     return 1;
   }
 
-  VariableScope scope{};
-  if (ScopeOpt == "member") {
-    scope = VariableScope::Member;
-  } else if (ScopeOpt == "local") {
-    scope = VariableScope::Local;
-  } else if (ScopeOpt == "global") {
-    scope = VariableScope::Global;
-  } else if (ScopeOpt == "static_member") {
-    scope = VariableScope::StaticMember;
-  } else if (ScopeOpt == "const_member") {
-    scope = VariableScope::ConstMember;
-  } else if (ScopeOpt == "static_global") {
-    scope = VariableScope::StaticGlobal;
-  } else if (ScopeOpt == "const_global") {
-    scope = VariableScope::ConstGlobal;
-  } else if (ScopeOpt == "method") {
-    scope = VariableScope::Method;
-  } else if (ScopeOpt == "type") {
-    scope = VariableScope::Type;
-  } else if (ScopeOpt == "namespace") {
-    scope = VariableScope::Namespace;
-  } else {
+  const std::optional<VariableScope> parsedScope = parseVariableScope(ScopeOpt);
+  if (!parsedScope) {
     llvm::errs() << "Unknown scope '" << ScopeOpt
-                 << "'. Valid scopes: member, local, global, "
-                    "static_member, const_member, static_global, const_global, "
-                    "method, type, namespace\n";
+                 << "'. Valid scopes: " << variableScopeNames() << "\n";
     return 1;
   }
+  const VariableScope scope = *parsedScope;
 
   const bool Lint = LintOpt || FormatOpt != "text";
   const bool Emit = !EmitEditsOpt.empty();
@@ -189,48 +169,8 @@ auto main(int argc, const char** argv) -> int {
 
   const std::string ResourceDir = ensureClangResourceDir();
 
-  std::unique_ptr<RenameActionFactory> factory;
-  switch (scope) {
-    case VariableScope::Member:
-      factory =
-          RenameAllMemberVariables(std::move(cb), mode, std::move(collectFrom));
-      break;
-    case VariableScope::Local:
-      factory =
-          RenameAllLocalVariables(std::move(cb), mode, std::move(collectFrom));
-      break;
-    case VariableScope::Global:
-      factory =
-          RenameAllGlobalVariables(std::move(cb), mode, std::move(collectFrom));
-      break;
-    case VariableScope::StaticMember:
-      factory = RenameAllStaticMemberVariables(std::move(cb), mode,
-                                               std::move(collectFrom));
-      break;
-    case VariableScope::ConstMember:
-      factory = RenameAllConstMemberVariables(std::move(cb), mode,
-                                              std::move(collectFrom));
-      break;
-    case VariableScope::StaticGlobal:
-      factory = RenameAllStaticGlobalVariables(std::move(cb), mode,
-                                               std::move(collectFrom));
-      break;
-    case VariableScope::ConstGlobal:
-      factory = RenameAllConstGlobalVariables(std::move(cb), mode,
-                                              std::move(collectFrom));
-      break;
-    case VariableScope::Method:
-      factory =
-          RenameAllMemberFunctions(std::move(cb), mode, std::move(collectFrom));
-      break;
-    case VariableScope::Type:
-      factory = RenameAllTypes(std::move(cb), mode, std::move(collectFrom));
-      break;
-    case VariableScope::Namespace:
-      factory =
-          RenameAllNamespaces(std::move(cb), mode, std::move(collectFrom));
-      break;
-  }
+  std::unique_ptr<RenameActionFactory> factory =
+      RenameAllInScope(std::move(cb), scope, mode, std::move(collectFrom));
   LintReport Report;
   if (Lint)
     factory->setLintReport(&Report, "normalize_variables/" +

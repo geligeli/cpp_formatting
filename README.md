@@ -404,11 +404,34 @@ bazel run //cpp_formatting:normalize_variables -- \
 | `global` | file- and namespace-scope variables (non-member, non-local) |
 | `static_member` | static data members only |
 | `const_member` | static data members that are `const` or `constexpr` |
+| `public_member`, `protected_member`, `private_member` | data members (static or not) by access. A field of an anonymous struct or union takes the access of that anonymous member. This is how "class members get a trailing underscore, struct members do not" is written: `member: trailing_` plus `public_member: snake_case` |
+| `static_local` | locals with static storage duration (`static`, block-scope `thread_local`); never parameters |
+| `const_local` | locals whose value is fixed for the whole program: `constexpr` ones, and `static` ones of const type. A plain `const auto x = f(y);` is a new value on every call and stays an ordinary `local` |
 | `static_global` | file- and namespace-scope variables declared `static` |
 | `const_global` | file- and namespace-scope variables that are `const` or `constexpr` |
 | `method` | member functions, static and non-static (never constructors, destructors, conversion functions, or overloaded operators; a virtual function is renamed together with its whole override hierarchy — if any override is declared outside the listed files, the rename is skipped) |
 | `type` | classes, structs, unions, enums (nested ones too), class templates, typedefs and aliases; STL protocol names such as `value_type` and `iterator` are never renamed |
 | `namespace` | named namespaces and namespace aliases; the closing `}  // namespace x` comment is rewritten with the declaration |
+
+**Overlapping scopes — the most specific rule wins.** The fine-grained scopes
+are subsets of the broad ones, so a ruleset can state a convention and its
+exceptions, in any order:
+
+```yaml
+normalize_variables:
+  - scope: local          # snake_case ...
+    style: snake_case
+  - scope: const_local    # ... except `static const` / `constexpr`: kArenaOverride stays
+    style: kConstant
+```
+
+A declaration several rules match is renamed by exactly one of them: within a
+family the order is **constness, then storage, then access, then the broad
+scope** (`const_member` > `static_member` > `public_`/`protected_`/`private_member`
+> `member`; `const_local` > `static_local` > `local`; `const_global` >
+`static_global` > `global`). Constness first because that is the distinction
+naming conventions make -- `kMaxSize` is `kMaxSize` whether it is private or
+not. Naming the *same* scope twice is refused.
 
 **Cross-file renaming:** list all files that share declarations — order does not matter. The tool parses every non-header first and every header after them (each group in parallel), so each `.cpp` is parsed against the original on-disk header content and the header sees what the `.cpp` files instantiated; edits are buffered per TU and committed atomically once every TU has been processed.
 
@@ -516,9 +539,10 @@ const_placement: east
 return_types: trailing
 
 # Rename variables — multiple rules are applied in order.
-# Supported scopes: member, local, global, type, namespace,
-#                   static_member, const_member,
-#                   static_global, const_global, method
+# Supported scopes: member, local, global, method, type, namespace, and the
+#   fine-grained {static,const,public,protected,private}_member,
+#   {static,const}_local, {static,const}_global.  When several rules match a
+#   declaration the most specific one renames it (see "Overlapping scopes").
 normalize_variables:
   - scope: member   # non-static and static data members
     style: snake_case
@@ -566,7 +590,7 @@ bazel run //cpp_formatting:cpp_format -- \
 | `--trailing-return-types` | Enable the trailing-return-type pass (same as `--return-types=trailing`) |
 | `--return-types=<style>` | Return type style: `trailing` or `leading`. Cannot be combined with `--trailing-return-types`. |
 | `--const-placement=<style>` | Where cv-qualifiers go: `east` (`int const x`) or `west` (`const int x`) |
-| `--normalize-variables-scope=<scope>` | One of `member`, `local`, `global`, `static_member`, `const_member`, `static_global`, `const_global`, `method`, `type`, `namespace` |
+| `--normalize-variables-scope=<scope>` | Any scope of the table under `normalize_variables` above: `member`, `local`, `global`, `method`, `type`, `namespace`, or a fine-grained one (`const_local`, `private_member`, …) |
 | `--normalize-variables-style=<style>` | Target naming style |
 | `--in-place` / `-i` | Overwrite files on disk (default: dry-run) |
 | `--lint` | Analyze only — report violations, modify nothing, exit 1 if any are found |

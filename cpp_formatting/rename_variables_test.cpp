@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -2136,4 +2137,278 @@ TEST(RenameNamespaces, NestedDefinitionAndTheOnesLeftAlone) {
       "namespace { int g(); }\n"
       "inline namespace v1 { int k(); }\n"
       "int use() { return a::bad_name::f() + v1::k() + TheirLib::f(); }\n");
+}
+
+// ---------------------------------------------------------------------------
+// Fine-grained local and access scopes, and which rule claims a declaration
+// ---------------------------------------------------------------------------
+
+static auto rewriteScope(const char* code, VariableScope scope,
+                         NamingStyle style) -> std::string {
+  return rewriteVariableNames(code, toStyle(style), scope);
+}
+
+using Rules = std::vector<std::pair<VariableScope, VariableRenameCallback>>;
+
+TEST(RenameFineGrainedLocals, ConstLocalIsAValueFixedForTheProgram) {
+  // `static const` and `constexpr` locals are constants; a plain `const` local
+  // is initialized afresh on every call, a parameter is not a local variable
+  // at all, and a mutable static is static but not const.
+  const char* code =
+      "int Scale(const int input_value) {\n"
+      "  static const int max_scale = 8;\n"
+      "  constexpr int base_offset = 2;\n"
+      "  static int call_count = 0;\n"
+      "  const int this_call = input_value + base_offset;\n"
+      "  ++call_count;\n"
+      "  return this_call < max_scale ? this_call : max_scale;\n"
+      "}\n";
+  EXPECT_EQ(
+      rewriteScope(code, VariableScope::ConstLocal, NamingStyle::KConstant),
+      "int Scale(const int input_value) {\n"
+      "  static const int kMaxScale = 8;\n"
+      "  constexpr int kBaseOffset = 2;\n"
+      "  static int call_count = 0;\n"
+      "  const int this_call = input_value + kBaseOffset;\n"
+      "  ++call_count;\n"
+      "  return this_call < kMaxScale ? this_call : kMaxScale;\n"
+      "}\n");
+}
+
+TEST(RenameFineGrainedLocals, StaticLocalIsStorageNotConstness) {
+  const char* code =
+      "int Next() {\n"
+      "  static int callCount = 0;\n"
+      "  static const int stepSize = 2;\n"
+      "  thread_local int perThread = 0;\n"
+      "  int plainLocal = stepSize;\n"
+      "  perThread += plainLocal;\n"
+      "  return callCount += perThread;\n"
+      "}\n";
+  EXPECT_EQ(
+      rewriteScope(code, VariableScope::StaticLocal, NamingStyle::SnakeCase),
+      "int Next() {\n"
+      "  static int call_count = 0;\n"
+      "  static const int step_size = 2;\n"
+      "  thread_local int per_thread = 0;\n"
+      "  int plainLocal = step_size;\n"
+      "  per_thread += plainLocal;\n"
+      "  return call_count += per_thread;\n"
+      "}\n");
+}
+
+TEST(RenameFineGrainedLocals, TheMostSpecificRuleClaimsTheDeclaration) {
+  // The case the scopes exist for: locals are snake_case, except constants.
+  // `kArenaOverride` under `local` alone lost its k: `arena_override`.
+  const char* code =
+      "int Strip(int TextLength) {\n"
+      "  static const int kArenaOverride = 3;\n"
+      "  int Remaining = TextLength - kArenaOverride;\n"
+      "  return Remaining;\n"
+      "}\n";
+  const char* expected =
+      "int Strip(int text_length) {\n"
+      "  static const int kArenaOverride = 3;\n"
+      "  int remaining = text_length - kArenaOverride;\n"
+      "  return remaining;\n"
+      "}\n";
+  EXPECT_EQ(
+      rewriteWithRules(
+          code,
+          Rules{{VariableScope::Local, toStyle(NamingStyle::SnakeCase)},
+                {VariableScope::ConstLocal, toStyle(NamingStyle::KConstant)}}),
+      expected);
+  // The order of the rules does not decide it.
+  EXPECT_EQ(
+      rewriteWithRules(
+          code,
+          Rules{{VariableScope::ConstLocal, toStyle(NamingStyle::KConstant)},
+                {VariableScope::Local, toStyle(NamingStyle::SnakeCase)}}),
+      expected);
+  // Without the specific rule the broad one takes everything, as before.
+  EXPECT_EQ(rewriteWithRules(code, Rules{{VariableScope::Local,
+                                          toStyle(NamingStyle::SnakeCase)}}),
+            "int Strip(int text_length) {\n"
+            "  static const int arena_override = 3;\n"
+            "  int remaining = text_length - arena_override;\n"
+            "  return remaining;\n"
+            "}\n");
+}
+
+TEST(RenameFineGrainedLocals, ConstBeatsStaticForAStaticConst) {
+  // A `static const` local is in both fine-grained scopes; constness wins, and
+  // the mutable static is left to static_local.
+  const char* code =
+      "int f() {\n"
+      "  static const int limitValue = 4;\n"
+      "  static int hitCount = 0;\n"
+      "  return ++hitCount < limitValue;\n"
+      "}\n";
+  EXPECT_EQ(
+      rewriteWithRules(
+          code,
+          Rules{{VariableScope::StaticLocal, toStyle(NamingStyle::SnakeCase)},
+                {VariableScope::ConstLocal, toStyle(NamingStyle::KConstant)}}),
+      "int f() {\n"
+      "  static const int kLimitValue = 4;\n"
+      "  static int hit_count = 0;\n"
+      "  return ++hit_count < kLimitValue;\n"
+      "}\n");
+}
+
+TEST(RenameMemberAccess, EachAccessScopeTakesItsOwnMembers) {
+  const char* code =
+      "class Widget {\n"
+      " public:\n"
+      "  int publicField;\n"
+      "  static int publicStatic;\n"
+      " protected:\n"
+      "  int protectedField;\n"
+      " private:\n"
+      "  int privateField;\n"
+      "  int Sum() { return publicField + protectedField + privateField; }\n"
+      "};\n";
+  EXPECT_EQ(
+      rewriteScope(code, VariableScope::PrivateMember,
+                   NamingStyle::TrailingUnderscore),
+      "class Widget {\n"
+      " public:\n"
+      "  int publicField;\n"
+      "  static int publicStatic;\n"
+      " protected:\n"
+      "  int protectedField;\n"
+      " private:\n"
+      "  int private_field_;\n"
+      "  int Sum() { return publicField + protectedField + private_field_; }\n"
+      "};\n");
+  EXPECT_EQ(
+      rewriteScope(code, VariableScope::PublicMember, NamingStyle::SnakeCase),
+      "class Widget {\n"
+      " public:\n"
+      "  int public_field;\n"
+      "  static int public_static;\n"
+      " protected:\n"
+      "  int protectedField;\n"
+      " private:\n"
+      "  int privateField;\n"
+      "  int Sum() { return public_field + protectedField + privateField; }\n"
+      "};\n");
+  EXPECT_EQ(
+      rewriteScope(code, VariableScope::ProtectedMember,
+                   NamingStyle::SnakeCase),
+      "class Widget {\n"
+      " public:\n"
+      "  int publicField;\n"
+      "  static int publicStatic;\n"
+      " protected:\n"
+      "  int protected_field;\n"
+      " private:\n"
+      "  int privateField;\n"
+      "  int Sum() { return publicField + protected_field + privateField; }\n"
+      "};\n");
+}
+
+TEST(RenameMemberAccess, StructVersusClassIsTheGoogleRule) {
+  // "Data members of classes (but not structs) have trailing underscores":
+  // a struct's members are public, a class's private, and constants are
+  // kConstant whatever their access -- constness outranks access.
+  const char* code =
+      "struct Point {\n"
+      "  int xPos;\n"
+      "  int yPos;\n"
+      "};\n"
+      "class Path {\n"
+      " public:\n"
+      "  static constexpr int max_points = 8;\n"
+      "  int Length() const { return pointCount < max_points ? pointCount : "
+      "max_points; }\n"
+      " private:\n"
+      "  static constexpr int chunk_size = 4;\n"
+      "  int pointCount = chunk_size;\n"
+      "};\n"
+      "int Use(Point p) { return p.xPos + p.yPos; }\n";
+  EXPECT_EQ(
+      rewriteWithRules(
+          code,
+          Rules{
+              {VariableScope::Member, toStyle(NamingStyle::TrailingUnderscore)},
+              {VariableScope::PublicMember, toStyle(NamingStyle::SnakeCase)},
+              {VariableScope::ConstMember, toStyle(NamingStyle::KConstant)}}),
+      "struct Point {\n"
+      "  int x_pos;\n"
+      "  int y_pos;\n"
+      "};\n"
+      "class Path {\n"
+      " public:\n"
+      "  static constexpr int kMaxPoints = 8;\n"
+      "  int Length() const { return point_count_ < kMaxPoints ? point_count_ "
+      ": kMaxPoints; }\n"
+      " private:\n"
+      "  static constexpr int kChunkSize = 4;\n"
+      "  int point_count_ = kChunkSize;\n"
+      "};\n"
+      "int Use(Point p) { return p.x_pos + p.y_pos; }\n");
+}
+
+TEST(RenameMemberAccess, AnAnonymousMemberLendsItsAccess) {
+  // A field of an anonymous union is `public` inside the union; what a user of
+  // the class sees is the access of the anonymous member itself.
+  const char* code =
+      "class Value {\n"
+      " public:\n"
+      "  int Get() const { return intValue; }\n"
+      " private:\n"
+      "  union {\n"
+      "    int intValue;\n"
+      "    float floatValue;\n"
+      "  };\n"
+      "};\n";
+  EXPECT_EQ(
+      rewriteScope(code, VariableScope::PublicMember, NamingStyle::SnakeCase),
+      code);
+  EXPECT_EQ(rewriteScope(code, VariableScope::PrivateMember,
+                         NamingStyle::TrailingUnderscore),
+            "class Value {\n"
+            " public:\n"
+            "  int Get() const { return int_value_; }\n"
+            " private:\n"
+            "  union {\n"
+            "    int int_value_;\n"
+            "    float float_value_;\n"
+            "  };\n"
+            "};\n");
+}
+
+TEST(ScopeRelations, SpecificityOrdersEveryOverlap) {
+  // Whenever two different scopes can match one declaration, one of them has
+  // to be strictly more specific, or neither rule could claim it.
+  const VariableScope all[] = {
+      VariableScope::Member,          VariableScope::StaticMember,
+      VariableScope::ConstMember,     VariableScope::PublicMember,
+      VariableScope::ProtectedMember, VariableScope::PrivateMember,
+      VariableScope::Local,           VariableScope::StaticLocal,
+      VariableScope::ConstLocal,      VariableScope::Global,
+      VariableScope::StaticGlobal,    VariableScope::ConstGlobal,
+      VariableScope::Method,          VariableScope::Type,
+      VariableScope::Namespace};
+  for (VariableScope a : all)
+    for (VariableScope b : all)
+      if (a != b && scopesCanMatchSameDecl(a, b))
+        EXPECT_NE(scopeSpecificity(a), scopeSpecificity(b))
+            << static_cast<int>(a) << " vs " << static_cast<int>(b);
+  // A member has exactly one access.
+  EXPECT_FALSE(scopesCanMatchSameDecl(VariableScope::PublicMember,
+                                      VariableScope::PrivateMember));
+  EXPECT_TRUE(
+      scopesCanMatchSameDecl(VariableScope::Local, VariableScope::ConstLocal));
+  EXPECT_FALSE(scopesCanMatchSameDecl(VariableScope::ConstLocal,
+                                      VariableScope::ConstGlobal));
+}
+
+TEST(ScopeRelations, EveryScopeNameRoundTrips) {
+  EXPECT_EQ(parseVariableScope("const_local"), VariableScope::ConstLocal);
+  EXPECT_EQ(parseVariableScope("private_member"), VariableScope::PrivateMember);
+  EXPECT_EQ(parseVariableScope("member"), VariableScope::Member);
+  EXPECT_EQ(parseVariableScope("locals"), std::nullopt);
+  EXPECT_NE(variableScopeNames().find("static_local"), std::string::npos);
 }

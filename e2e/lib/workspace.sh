@@ -112,7 +112,7 @@ materialize() {
   # exists.  An expunge is the only thing that clears it.
   if [[ -n "${FRESH:-}" ]]; then
     if [[ -f "$src/MODULE.bazel" ]]; then
-      env -C "$src" bazel clean --expunge >/dev/null 2>&1 || true
+      env -C "$src" "${TARGET_BAZEL:-bazel}" clean --expunge >/dev/null 2>&1 || true
     fi
     rm -rf "$src"
   fi

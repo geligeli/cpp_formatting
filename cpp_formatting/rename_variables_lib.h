@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
@@ -11,6 +12,7 @@
 #include <vector>
 
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/Decl.h"
 #include "clang/AST/DeclBase.h"
 #include "clang/Basic/SourceLocation.h"
 #include "clang/Lex/Preprocessor.h"
@@ -62,8 +64,22 @@ enum class VariableScope {
   Global,  ///< File- and namespace-scope variables (non-member, non-local).
 
   // Fine-grained member scopes
-  StaticMember,  ///< Static data members only (VarDecl::isStaticDataMember).
-  ConstMember,   ///< Static data members that are const or constexpr.
+  StaticMember,     ///< Static data members only (VarDecl::isStaticDataMember).
+  ConstMember,      ///< Static data members that are const or constexpr.
+  PublicMember,     ///< Data members (static or not) with public access.
+  ProtectedMember,  ///< ... with protected access.
+  PrivateMember,    ///< ... with private access.  The access is the one the
+                    ///< member has in the class it is looked up in: a field of
+                    ///< an anonymous struct or union takes the access of that
+                    ///< anonymous member, not the `public` it has inside it.
+
+  // Fine-grained local scopes.  Parameters are in neither.
+  StaticLocal,  ///< Locals with static storage duration (`static`, and
+                ///< `thread_local` at block scope).
+  ConstLocal,   ///< Locals whose value is fixed for the whole program: a
+                ///< `constexpr` local, or a `static` one of const type.  A
+                ///< plain `const auto x = f(y);` is not -- it is a different
+                ///< value on every call -- and stays an ordinary local.
 
   // Fine-grained global scopes
   StaticGlobal,  ///< File/namespace-scope vars declared with the static
@@ -88,12 +104,42 @@ enum class VariableScope {
 // True when one declaration can match both scopes -- the fine-grained scopes
 // are subsets of the broad ones, so a static data member is matched by
 // `member`, `static_member` and `const_member` alike.  Two rules that both
-// match it each rewrite the same bytes, and the second rewrite lands on text
-// the first already replaced: `MaxCount` under `member: snake_case` plus
-// `static_member: kConstant` comes out as `kMaxCountt`.  That is silent
-// corruption, not a conflict, so a caller configuring several rules must
-// reject the pair rather than run it.
+// *rewrote* it would corrupt it (the second rewrite lands on text the first
+// already replaced: `MaxCount` under `member: snake_case` plus `static_member:
+// kConstant` came out as `kMaxCountt`), so when several rules run over one AST
+// exactly one of them may claim a declaration -- see scopeSpecificity().
 bool scopesCanMatchSameDecl(VariableScope a, VariableScope b);
+
+// Which of several matching rules renames a declaration: the one whose scope
+// is the most specific, so that a ruleset can state the general case and its
+// exceptions --
+//
+//   - scope: local         # snake_case ...
+//   - scope: const_local   # ... except `static const` / `constexpr`: kConstant
+//
+// -- in either order.  Within a family (members, locals, globals) the order
+// is constness, then storage, then access, then the broad scope:
+//
+//   const_member  > static_member > public/protected/private_member > member
+//   const_local   > static_local  > local
+//   const_global  > static_global > global
+//
+// Constness first because that is the distinction naming conventions make
+// (`kMaxSize` whether it is private or not); the three access scopes exclude
+// each other, so no two scopes of one rank ever match the same declaration and
+// the winner is unique.  Scopes of different families never overlap.
+unsigned scopeSpecificity(VariableScope s);
+
+// True when the rule with scope \p s is the one that renames \p d among rules
+// with scopes \p all: it matches, and no more specific scope in \p all does.
+// An empty \p all means \p s is the only rule.
+bool scopeClaims(const clang::NamedDecl* d, VariableScope s,
+                 llvm::ArrayRef<VariableScope> all);
+
+// The scope a ruleset or a command line names (`member`, `const_local`, ...),
+// or nullopt; and every valid name, comma-separated, for the error message.
+auto parseVariableScope(llvm::StringRef name) -> std::optional<VariableScope>;
+auto variableScopeNames() -> std::string;
 
 // True when declarations of the two scopes can share a DeclContext, i.e. a
 // name one of them takes is a name the other cannot also have.  Data members
@@ -261,8 +307,9 @@ void watchConsumedMacroArgs(clang::Preprocessor& PP, ConsumedMacroArgs& Out);
 /// ConsumedMacroArgs); an identifier there is not a reference and does not
 /// decline anything.
 /// \p AllScopes lists every rule's scope when several rules run over one AST
-/// (empty means just \p Scope): the dependent-token recorder uses it to tell
-/// "another rule renames this member" from "nobody does".
+/// (empty means just \p Scope).  It decides which rule claims a declaration
+/// several of them match (scopeClaims()), and the dependent-token recorder
+/// uses it to tell "another rule renames this member" from "nobody does".
 void runRenameRuleOnAST(clang::ASTContext& Ctx, clang::Rewriter& RW,
                         const VariableRenameCallback& CB, VariableScope Scope,
                         const FileSet& CollectFrom,
@@ -365,6 +412,11 @@ auto RenameAllConstGlobalVariables(VariableRenameCallback CB,
 /// `override` checking is never broken.
 auto RenameAllTypes(VariableRenameCallback CB, OutputMode Mode,
                     FileSet CollectFrom)
+    -> std::unique_ptr<RenameActionFactory>;
+/// The factory for any scope; the named ones above are this with the scope
+/// filled in.
+auto RenameAllInScope(VariableRenameCallback CB, VariableScope Scope,
+                      OutputMode Mode, FileSet CollectFrom)
     -> std::unique_ptr<RenameActionFactory>;
 auto RenameAllNamespaces(VariableRenameCallback CB, OutputMode Mode,
                          FileSet CollectFrom)

@@ -148,6 +148,32 @@ static bool isProtocolStaticMemberName(const NamedDecl* D) {
   return VD && VD->isStaticDataMember() && VD->getName() == "value";
 }
 
+// The access a data member has in the class it is looked up in.  A field of
+// an anonymous struct or union is `public` *inside* that record, which says
+// nothing: what a user of the class sees is the access of the anonymous
+// member, so walk outwards to it.
+static AccessSpecifier effectiveAccess(const NamedDecl* D) {
+  AccessSpecifier AS = D->getAccess();
+  const auto* RD = dyn_cast<RecordDecl>(D->getDeclContext());
+  while (RD && RD->isAnonymousStructOrUnion()) {
+    AS = RD->getAccess();
+    RD = dyn_cast<RecordDecl>(RD->getDeclContext());
+  }
+  return AS;
+}
+
+static bool isDataMember(const NamedDecl* D) {
+  if (isa<FieldDecl>(D)) return true;
+  const auto* VD = dyn_cast<VarDecl>(D);
+  return VD && VD->isStaticDataMember();
+}
+
+// A local that is not a parameter.
+static const VarDecl* asLocalVar(const NamedDecl* D) {
+  const auto* VD = dyn_cast<VarDecl>(D);
+  return VD && VD->isLocalVarDecl() ? VD : nullptr;
+}
+
 bool matchesScope(const NamedDecl* D, VariableScope Scope) {
   switch (Scope) {
     case VariableScope::Member:
@@ -171,6 +197,23 @@ bool matchesScope(const NamedDecl* D, VariableScope Scope) {
       const auto* VD = dyn_cast<VarDecl>(D);
       return VD && VD->isStaticDataMember() &&
              (VD->isConstexpr() || VD->getType().isConstQualified());
+    }
+    case VariableScope::PublicMember:
+      return isDataMember(D) && effectiveAccess(D) == AS_public;
+    case VariableScope::ProtectedMember:
+      return isDataMember(D) && effectiveAccess(D) == AS_protected;
+    case VariableScope::PrivateMember:
+      return isDataMember(D) && effectiveAccess(D) == AS_private;
+    case VariableScope::StaticLocal: {
+      const VarDecl* VD = asLocalVar(D);
+      return VD && VD->isStaticLocal();
+    }
+    case VariableScope::ConstLocal: {
+      // Fixed for the whole program: constexpr, or static and const.  An
+      // automatic `const` local is initialized afresh on every call.
+      const VarDecl* VD = asLocalVar(D);
+      return VD && (VD->isConstexpr() ||
+                    (VD->isStaticLocal() && VD->getType().isConstQualified()));
     }
     case VariableScope::StaticGlobal: {
       const auto* VD = dyn_cast<VarDecl>(D);
@@ -741,7 +784,8 @@ class CollectRenamesVisitor
                         const FileSet& CollectFrom,
                         RenameConflicts* Conflicts = nullptr,
                         RenameVetoes* Vetoes = nullptr,
-                        std::vector<const Decl*>* Order = nullptr)
+                        std::vector<const Decl*>* Order = nullptr,
+                        llvm::ArrayRef<VariableScope> AllScopes = {})
       : SM(SM),
         CB(CB),
         Scope(Scope),
@@ -749,7 +793,8 @@ class CollectRenamesVisitor
         CollectFrom(CollectFrom),
         Conflicts(Conflicts),
         Vetoes(Vetoes),
-        Order(Order) {}
+        Order(Order),
+        AllScopes(AllScopes) {}
 
   bool VisitFieldDecl(FieldDecl* D) {
     collect(D);
@@ -793,7 +838,7 @@ class CollectRenamesVisitor
   // template that is not ours is left alone.
   void collectNamed(const NamedDecl* D, const Decl* Key,
                     const NamedDecl* Anchor) {
-    if (!Key || D->isImplicit() || !matchesScope(D, Scope)) return;
+    if (!Key || D->isImplicit() || !scopeClaims(D, Scope, AllScopes)) return;
     if (!D->getDeclName().isIdentifier() || D->getName().empty()) return;
     if (!shouldCollect(Anchor->getLocation(), SM, CollectFrom)) return;
     if (!Visited.insert(Key).second) return;
@@ -812,7 +857,7 @@ class CollectRenamesVisitor
   }
 
   void collect(NamedDecl* D) {
-    if (D->isImplicit() || !matchesScope(D, Scope)) return;
+    if (D->isImplicit() || !scopeClaims(D, Scope, AllScopes)) return;
     if (!shouldCollect(D->getLocation(), SM, CollectFrom)) return;
     const Decl* Key = D->getCanonicalDecl();
     if (!Visited.insert(Key).second) return;
@@ -835,7 +880,7 @@ class CollectRenamesVisitor
 
   void collectMethod(const CXXMethodDecl* D) {
     D = primaryTemplateMethod(D);
-    if (D->isImplicit() || !matchesScope(D, Scope)) return;
+    if (D->isImplicit() || !scopeClaims(D, Scope, AllScopes)) return;
     if (!shouldCollect(D->getLocation(), SM, CollectFrom)) return;
     const Decl* Key = D->getCanonicalDecl();
     if (!Visited.insert(Key).second) return;
@@ -926,6 +971,9 @@ class CollectRenamesVisitor
   SourceManager& SM;
   const VariableRenameCallback& CB;
   VariableScope Scope;
+  // Every configured rule's scope (empty: this is the only rule).  A
+  // declaration several of them match belongs to the most specific one.
+  llvm::ArrayRef<VariableScope> AllScopes;
   RenameMap& Renames;
   const FileSet& CollectFrom;
   RenameConflicts* Conflicts = nullptr;
@@ -1433,7 +1481,8 @@ class RecordDependentResolutionsVisitor
       vetoResolution(DepRes, TokenKey);
       if (ByOldName.count(Old.str()) == 0) return;
       const bool Owned = shouldCollect(Member->getLocation(), SM, CollectFrom);
-      if (Owned && !matchesScope(Member, Scope) && matchesAnyScope(Member)) {
+      if (Owned && !scopeClaims(Member, Scope, AllScopes) &&
+          matchesAnyScope(Member)) {
         return;
       }
       std::string Reason;
@@ -3125,6 +3174,9 @@ unsigned homesOf(VariableScope S) {
     case VariableScope::Member:
     case VariableScope::StaticMember:
     case VariableScope::ConstMember:
+    case VariableScope::PublicMember:
+    case VariableScope::ProtectedMember:
+    case VariableScope::PrivateMember:
     case VariableScope::Method:
       return Class;
     case VariableScope::Global:
@@ -3133,6 +3185,8 @@ unsigned homesOf(VariableScope S) {
     case VariableScope::Namespace:
       return Namespace;
     case VariableScope::Local:
+    case VariableScope::StaticLocal:
+    case VariableScope::ConstLocal:
       return Function;
     case VariableScope::Type:
       return Class | Namespace | Function;
@@ -3142,7 +3196,20 @@ unsigned homesOf(VariableScope S) {
 
 bool isDataMemberScope(VariableScope S) {
   return S == VariableScope::Member || S == VariableScope::StaticMember ||
-         S == VariableScope::ConstMember;
+         S == VariableScope::ConstMember || S == VariableScope::PublicMember ||
+         S == VariableScope::ProtectedMember ||
+         S == VariableScope::PrivateMember;
+}
+
+bool isAccessScope(VariableScope S) {
+  return S == VariableScope::PublicMember ||
+         S == VariableScope::ProtectedMember ||
+         S == VariableScope::PrivateMember;
+}
+
+bool isLocalScope(VariableScope S) {
+  return S == VariableScope::Local || S == VariableScope::StaticLocal ||
+         S == VariableScope::ConstLocal;
 }
 
 bool isGlobalScope(VariableScope S) {
@@ -3159,8 +3226,85 @@ bool scopesCanMatchSameDecl(VariableScope A, VariableScope B) {
   // are subsets of Global (a `static const` one is in both).  Across families
   // nothing overlaps -- matchesScope() excludes members from Global and locals
   // from everything else, and Method matches no VarDecl at all.
+  // The three access scopes are the exception: a member has one access.
+  if (isAccessScope(A) && isAccessScope(B)) return false;
   return (isDataMemberScope(A) && isDataMemberScope(B)) ||
-         (isGlobalScope(A) && isGlobalScope(B));
+         (isGlobalScope(A) && isGlobalScope(B)) ||
+         (isLocalScope(A) && isLocalScope(B));
+}
+
+unsigned scopeSpecificity(VariableScope S) {
+  switch (S) {
+    case VariableScope::ConstMember:
+    case VariableScope::ConstLocal:
+    case VariableScope::ConstGlobal:
+      return 3;
+    case VariableScope::StaticMember:
+    case VariableScope::StaticLocal:
+    case VariableScope::StaticGlobal:
+      return 2;
+    case VariableScope::PublicMember:
+    case VariableScope::ProtectedMember:
+    case VariableScope::PrivateMember:
+      return 1;
+    case VariableScope::Member:
+    case VariableScope::Local:
+    case VariableScope::Global:
+    case VariableScope::Method:
+    case VariableScope::Type:
+    case VariableScope::Namespace:
+      return 0;
+  }
+  return 0;
+}
+
+bool scopeClaims(const NamedDecl* D, VariableScope S,
+                 llvm::ArrayRef<VariableScope> All) {
+  if (!matchesScope(D, S)) return false;
+  const unsigned Mine = scopeSpecificity(S);
+  for (VariableScope Other : All)
+    if (Other != S && scopeSpecificity(Other) > Mine && matchesScope(D, Other))
+      return false;
+  return true;
+}
+
+namespace {
+struct ScopeName {
+  llvm::StringLiteral Name;
+  VariableScope Scope;
+};
+constexpr ScopeName kScopeNames[] = {
+    {"member", VariableScope::Member},
+    {"local", VariableScope::Local},
+    {"global", VariableScope::Global},
+    {"static_member", VariableScope::StaticMember},
+    {"const_member", VariableScope::ConstMember},
+    {"public_member", VariableScope::PublicMember},
+    {"protected_member", VariableScope::ProtectedMember},
+    {"private_member", VariableScope::PrivateMember},
+    {"static_local", VariableScope::StaticLocal},
+    {"const_local", VariableScope::ConstLocal},
+    {"static_global", VariableScope::StaticGlobal},
+    {"const_global", VariableScope::ConstGlobal},
+    {"method", VariableScope::Method},
+    {"type", VariableScope::Type},
+    {"namespace", VariableScope::Namespace},
+};
+}  // namespace
+
+auto parseVariableScope(llvm::StringRef Name) -> std::optional<VariableScope> {
+  for (const ScopeName& N : kScopeNames)
+    if (Name == N.Name) return N.Scope;
+  return std::nullopt;
+}
+
+auto variableScopeNames() -> std::string {
+  std::string Out;
+  for (const ScopeName& N : kScopeNames) {
+    if (!Out.empty()) Out += ", ";
+    Out += N.Name.str();
+  }
+  return Out;
 }
 
 bool scopesShareADeclContext(VariableScope A, VariableScope B) {
@@ -3202,14 +3346,16 @@ void runRenameRulesOnAST(ASTContext& Ctx, Rewriter& RW,
   //    of them in view.
   std::vector<RenamePlan> Plans(N);
   std::vector<RenamePlan*> PlanPtrs;
+  // Known before any rule collects: a declaration several rules match is
+  // collected by the most specific of them only (scopeClaims).
   std::vector<VariableScope> AllScopes;
+  for (size_t I = 0; I < N; ++I) AllScopes.push_back(Rules[I].Scope);
   for (size_t I = 0; I < N; ++I) {
     CollectRenamesVisitor Collector(SM, *Rules[I].CB, Rules[I].Scope,
                                     Plans[I].Renames, CollectFrom, Conflicts,
-                                    Vetoes, &Plans[I].Order);
+                                    Vetoes, &Plans[I].Order, AllScopes);
     Collector.TraverseDecl(TU);
     PlanPtrs.push_back(&Plans[I]);
-    AllScopes.push_back(Rules[I].Scope);
   }
   resolveRenameCollisions(Ctx, SM, PlanPtrs, Conflicts);
   if (RenamedNames)
@@ -3437,6 +3583,13 @@ auto RenameAllLocalVariables(VariableRenameCallback CB, OutputMode Mode,
     -> std::unique_ptr<RenameActionFactory> {
   return std::make_unique<RenameActionFactory>(
       std::move(CB), VariableScope::Local, Mode, std::move(CollectFrom));
+}
+
+auto RenameAllInScope(VariableRenameCallback CB, VariableScope Scope,
+                      OutputMode Mode, FileSet CollectFrom)
+    -> std::unique_ptr<RenameActionFactory> {
+  return std::make_unique<RenameActionFactory>(std::move(CB), Scope, Mode,
+                                               std::move(CollectFrom));
 }
 
 auto RenameAllGlobalVariables(VariableRenameCallback CB, OutputMode Mode,

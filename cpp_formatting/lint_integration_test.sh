@@ -422,13 +422,60 @@ class Widget {
 };
 EOF
 
-# The fine-grained scopes are subsets of the broad ones, so a static data
-# member would be renamed twice and the second rewrite would corrupt the first.
-expect_refused "can match the same declaration" run_rules \
+# The fine-grained scopes are subsets of the broad ones.  Two rules that both
+# renamed a static data member corrupted it once (`MaxCount` came out as
+# `kMaxCountt`: the second rewrite landed on bytes the first had replaced), and
+# the pair used to be refused.  Now the more specific rule claims the
+# declaration, which is how a ruleset states a convention and its exceptions.
+cat > "$tmpdir/widget.cpp" <<'EOF'
+class Widget {
+ public:
+  static const int MaxCount = 4;
+  int Clamp(int TextLength) const {
+    static const int HardLimit = 9;
+    int Remaining = TextLength < HardLimit ? TextLength : HardLimit;
+    return Remaining < MaxCount ? Remaining + itemCount : MaxCount;
+  }
+  int publicTotal = 0;
+ private:
+  int itemCount = 0;
+};
+EOF
+run_rules '  - scope: member
+    style: trailing_
+  - scope: static_member
+    style: kConstant
+  - scope: public_member
+    style: snake_case
+  - scope: local
+    style: snake_case
+  - scope: const_local
+    style: kConstant' || fail "nested scopes: exit $?"
+for want in 'static const int kMaxCount = 4;' \
+            'int Clamp(int text_length) const {' \
+            'static const int kHardLimit = 9;' \
+            'int remaining = text_length < kHardLimit ? text_length : kHardLimit;' \
+            'return remaining < kMaxCount ? remaining + item_count_ : kMaxCount;' \
+            'int public_total = 0;' \
+            'int item_count_ = 0;'; do
+  grep -qF "$want" "$tmpdir/widget.cpp" \
+    || { cat "$tmpdir/widget.cpp"; fail "nested scopes: expected '$want'"; }
+done
+cat > "$tmpdir/widget.cpp" <<'EOF'
+class Widget {
+ public:
+  int Value() const { return value_; }
+ private:
+  int value_;
+};
+EOF
+
+# What is still refused is the same scope twice: neither rule is more specific.
+expect_refused "name the same scope" run_rules \
 '  - scope: member
     style: snake_case
-  - scope: static_member
-    style: kConstant'
+  - scope: member
+    style: trailing_'
 
 # Disjoint styles in a shared scope are allowed: only trailing_ ever ends in
 # an underscore, so the two rules cannot land on one name.
