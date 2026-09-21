@@ -205,6 +205,11 @@ TEST(IndexDb, FilesById) {
   EXPECT_EQ(row->path, "bazel-out/gen/x.pb.h");
   EXPECT_EQ(row->kind, cpp_index::GENERATED);
   EXPECT_FALSE(f.db->File(99).has_value());
+  const std::vector<FileRow> named = f.db->FilesNamed("x.pb.h");
+  ASSERT_EQ(named.size(), 1u);
+  EXPECT_EQ(named[0].id, f.gen_h);
+  EXPECT_EQ(named[0].path, "bazel-out/gen/x.pb.h");
+  EXPECT_TRUE(f.db->FilesNamed("gen").empty());  // a directory
 }
 
 TEST(IndexDb, ListDirWalksTheTree) {

@@ -37,6 +37,7 @@ auto Trim(std::string_view s) -> std::string_view {
 enum Query {
   kFileIdOf,
   kFile,
+  kFilesNamed,
   kListDirs,
   kListFiles,
   kDirExists,
@@ -62,6 +63,8 @@ enum Query {
 constexpr const char* kSql[kNumQueries] = {
     /*kFileIdOf*/ "SELECT id FROM files WHERE path = ?",
     /*kFile*/ "SELECT path, kind FROM files WHERE id = ?",
+    /*kFilesNamed*/
+    "SELECT id, path, kind FROM files WHERE name = ? ORDER BY path",
     /*kListDirs*/ "SELECT path, name FROM dirs WHERE parent = ? ORDER BY name",
     /*kListFiles*/
     "SELECT id, path, name, kind FROM files WHERE dir = ? ORDER BY name",
@@ -312,6 +315,22 @@ auto IndexDb::File(int32_t id) const -> std::optional<FileRow> {
   f.path = std::string(s.ColumnText(0));
   f.kind = static_cast<cpp_index::FileKind>(s.ColumnInt(1));
   return f;
+}
+
+auto IndexDb::FilesNamed(std::string_view name) const -> std::vector<FileRow> {
+  std::vector<FileRow> out;
+  Lease c = Acquire();
+  if (!c.ok()) return out;
+  Statement& s = c->Stmt(kFilesNamed);
+  s.BindText(1, name);
+  while (s.Step()) {
+    FileRow f;
+    f.id = static_cast<int32_t>(s.ColumnInt(0));
+    f.path = std::string(s.ColumnText(1));
+    f.kind = static_cast<cpp_index::FileKind>(s.ColumnInt(2));
+    out.push_back(std::move(f));
+  }
+  return out;
 }
 
 auto IndexDb::ListDir(std::string_view dir) const

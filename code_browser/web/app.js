@@ -141,12 +141,44 @@
 
   // ---- rendering -------------------------------------------------------
 
-  function render(bytes, ann) {
+  // The spans of the index and the `#include` spellings, as one list sorted
+  // by offset.  An include is a span with `include` set and no symbol.
+  function mergeSpans(spans, includes) {
+    const out = [];
+    let i = 0;
+    for (const inc of includes) {
+      const b = inc.begin || 0;
+      while (i < spans.length && (spans[i].begin || 0) < b) out.push(spans[i++]);
+      out.push({ begin: b, end: inc.end || 0, include: inc });
+    }
+    while (i < spans.length) out.push(spans[i++]);
+    return out;
+  }
+
+  function includeElement(inc, text) {
+    const targets = inc.targets || [];
+    if (!targets.length) {
+      const el = document.createElement('span');
+      el.className = 'inc missing';
+      el.title = 'no indexed file matches this include';
+      el.textContent = text;
+      return el;
+    }
+    const a = document.createElement('a');
+    a.className = 'inc';
+    a.href = '#' + targets[0].path;
+    a.title = targets[0].path + (targets.length > 1 ? ` (+${targets.length - 1} more: click to choose)` : '');
+    a.textContent = text;
+    if (targets.length > 1) a.include = inc;
+    return a;
+  }
+
+  function render(bytes, ann, includes) {
     const code = $('code');
     code.textContent = '';
     state.symbols = new Map((ann.symbols || []).map((s) => [s.id, s]));
     state.tokens = new Map();
-    const spans = ann.spans || [];
+    const spans = mergeSpans(ann.spans || [], includes || []);
     const lineStarts = [0];
     for (let i = 0; i < bytes.length; i++)
       if (bytes[i] === 0x0a && i + 1 < bytes.length) lineStarts.push(i + 1);
@@ -171,6 +203,14 @@
         const s = spans[si++];
         const b = s.begin || 0, e = s.end || 0, sym = s.symbol || 0;
         if (e <= b || b < start) continue;
+        if (s.include) {
+          if (b < pos || e > end) continue;  // under a token: leave that alone
+          if (b > pos) codeEl.appendChild(document.createTextNode(decoder.decode(bytes.subarray(pos, b))));
+          codeEl.appendChild(includeElement(s.include, decoder.decode(bytes.subarray(b, e))));
+          pos = e;
+          lastTok = null;
+          continue;
+        }
         if (lastTok && b === lastTok.begin && e === lastTok.end) {
           addSymbol(lastTok, sym, s);  // one token, several symbols
           continue;
@@ -230,14 +270,16 @@
       return;
     }
     status(`loading ${path}…`);
-    let file, ann;
+    let file, ann, includes;
     try {
-      [file, ann] = await Promise.all([
+      [file, ann, includes] = await Promise.all([
         getBytes(fileUrl(path)),
         getJson(`/api/annotations?path=${encodeURIComponent(path)}`).catch((e) => {
           if (String(e.message).startsWith('404')) return { spans: [], symbols: [] };
           throw e;
         }),
+        // Links only: a file without them is still a file.
+        getJson(`/api/includes?path=${encodeURIComponent(path)}`).catch(() => ({})),
       ]);
     } catch (e) {
       status(e.message, true);
@@ -245,7 +287,6 @@
     }
     state.path = path;
     state.bytes = file.bytes;
-    closePopover();
     $('file-title').textContent = path;
     const banner = $('banner');
     if (file.headers.get('X-Newer-Than-Index')) {
@@ -254,7 +295,10 @@
     } else {
       banner.hidden = true;
     }
-    render(file.bytes, ann);
+    render(file.bytes, ann, includes.includes);
+    // The panel outlives the file (that is how a reference list is walked):
+    // what it selected is highlighted here as well.
+    if (state.selected !== null) selectSymbol(state.selected);
     document.title = path.split('/').pop() + ' – code browser';
     status(`${path} — ${(ann.spans || []).length} annotated tokens`);
     revealInTree(path);
@@ -270,7 +314,7 @@
     el.scrollIntoView({ block: 'center' });
   }
 
-  // ---- selection and popover ------------------------------------------
+  // ---- selection and the panel ---------------------------------------
 
   function selectSymbol(id) {
     if (state.selected !== null)
@@ -279,8 +323,53 @@
     for (const el of state.tokens.get(id) || []) el.classList.add('hl');
   }
 
-  function closePopover() {
-    $('popover').hidden = true;
+  function closePanel() {
+    $('panel').hidden = true;
+  }
+
+  // Opens the panel below the code with one tab per entry of `tabs`:
+  // {label, kind, build(pane), onSelect()}.  A pane is built the first time
+  // its tab is shown.  One thing clicked is one tab; a token that names several
+  // symbols, several.
+  function openPanel(tabs) {
+    const ribbon = $('panel-tabs');
+    const body = $('panel-body');
+    ribbon.textContent = '';
+    body.textContent = '';
+    const entries = tabs.map((tab) => {
+      const button = document.createElement('button');
+      button.className = 'tab';
+      button.setAttribute('role', 'tab');
+      if (tab.kind) {
+        const kind = document.createElement('span');
+        kind.className = 'kind k-' + tab.kind.toLowerCase();
+        kind.textContent = kindShort(tab.kind);
+        button.appendChild(kind);
+      }
+      button.appendChild(document.createTextNode(tab.label));
+      ribbon.appendChild(button);
+      const pane = document.createElement('div');
+      pane.className = 'pane';
+      pane.hidden = true;
+      body.appendChild(pane);
+      return { tab, button, pane, built: false };
+    });
+    const show = (entry) => {
+      for (const e of entries) {
+        e.pane.hidden = e !== entry;
+        e.button.classList.toggle('current', e === entry);
+        e.button.setAttribute('aria-selected', e === entry ? 'true' : 'false');
+      }
+      if (!entry.built) {
+        entry.built = true;
+        entry.tab.build(entry.pane);
+      }
+      if (entry.tab.onSelect) entry.tab.onSelect();
+      body.scrollTop = 0;
+    };
+    for (const entry of entries) entry.button.addEventListener('click', () => show(entry));
+    $('panel').hidden = false;
+    if (entries.length) show(entries[0]);
   }
 
   function location(loc) {
@@ -289,52 +378,63 @@
     return { text: line ? `${loc.path}:${line}` : loc.path, href: '#' + loc.path + (line ? ':' + line : '') };
   }
 
-  function symbolCard(summary, container) {
-    const card = document.createElement('div');
-    card.className = 'card';
+  // Everything about one symbol: what it is, then its details and its
+  // references side by side, both loaded at once.
+  function symbolPane(summary, pane) {
     const head = document.createElement('div');
-    head.className = 'card-head';
-    const kind = document.createElement('span');
-    kind.className = 'kind k-' + (summary.kind || 'unknown').toLowerCase();
-    kind.textContent = kindShort(summary.kind);
-    head.appendChild(kind);
+    head.className = 'pane-head';
     const name = document.createElement('span');
     name.className = 'qname';
     name.textContent = summary.qualified_name || summary.name;
     head.appendChild(name);
-    card.appendChild(head);
     if (summary.type) {
-      const type = document.createElement('div');
+      const type = document.createElement('span');
       type.className = 'type';
       type.textContent = summary.type;
-      card.appendChild(type);
+      head.appendChild(type);
     }
     const def = location(summary.definition);
-    const actions = document.createElement('div');
-    actions.className = 'actions';
     if (def) {
       const a = document.createElement('a');
       a.href = def.href;
       a.textContent = 'definition: ' + def.text;
-      actions.appendChild(a);
+      head.appendChild(a);
     }
-    const refs = document.createElement('button');
-    refs.textContent = 'references';
-    refs.addEventListener('click', () => showReferences(summary.id, card));
-    actions.appendChild(refs);
-    const info = document.createElement('button');
-    info.textContent = 'details';
-    info.addEventListener('click', () => showDetails(summary.id, card));
-    actions.appendChild(info);
-    card.appendChild(actions);
-    const body = document.createElement('div');
-    body.className = 'card-body';
-    card.appendChild(body);
-    container.appendChild(card);
+    pane.appendChild(head);
+    const columns = document.createElement('div');
+    columns.className = 'columns';
+    const details = document.createElement('div');
+    const refs = document.createElement('div');
+    columns.appendChild(details);
+    columns.appendChild(refs);
+    pane.appendChild(columns);
+    showDetails(summary.id, details);
+    showReferences(summary.id, refs);
   }
 
-  async function showReferences(id, card) {
-    const body = card.querySelector('.card-body');
+  // The candidates of an include that more than one indexed file matches.
+  function includePane(inc, pane) {
+    const title = document.createElement('div');
+    title.className = 'section';
+    title.textContent = `${inc.targets.length} indexed files match ${inc.angled ? '<' : '"'}${inc.spelling}${inc.angled ? '>' : '"'}, best first`;
+    pane.appendChild(title);
+    const list = document.createElement('ul');
+    for (const t of inc.targets) {
+      const li = document.createElement('li');
+      const a = document.createElement('a');
+      a.href = '#' + t.path;
+      a.textContent = t.path;
+      li.appendChild(a);
+      const kind = document.createElement('span');
+      kind.className = 'roles';
+      kind.textContent = ' ' + (t.kind || 'SOURCE').toLowerCase() + (t.available === true ? '' : ', not in this checkout');
+      li.appendChild(kind);
+      list.appendChild(li);
+    }
+    pane.appendChild(list);
+  }
+
+  async function showReferences(id, body) {
     body.textContent = 'loading…';
     let refs;
     try {
@@ -376,8 +476,7 @@
     }
   }
 
-  async function showDetails(id, card) {
-    const body = card.querySelector('.card-body');
+  async function showDetails(id, body) {
     body.textContent = 'loading…';
     let info;
     try {
@@ -444,27 +543,32 @@
     }
   }
 
-  function openPopover(tok) {
+  // Keeps what was clicked in view: the panel takes its room from the code.
+  function keepVisible(el) {
+    const view = $('code').getBoundingClientRect();
+    const rect = el.getBoundingClientRect();
+    if (rect.bottom > view.bottom || rect.top < view.top) el.scrollIntoView({ block: 'center' });
+  }
+
+  function openSymbolPanel(tok) {
     const ids = (tok.dataset.s || '').split(',').filter(Boolean).map(Number);
     if (!ids.length) return;
-    selectSymbol(ids[0]);
-    const pop = $('popover');
-    pop.textContent = '';
-    const close = document.createElement('button');
-    close.className = 'close';
-    close.textContent = '×';
-    close.addEventListener('click', closePopover);
-    pop.appendChild(close);
-    for (const id of ids) {
+    openPanel(ids.map((id) => {
       const summary = state.symbols.get(id) || { id, name: '?', kind: 'unknown' };
-      symbolCard(summary, pop);
-    }
-    pop.hidden = false;
-    const rect = tok.getBoundingClientRect();
-    const top = Math.min(rect.bottom + 6, window.innerHeight - 40);
-    const left = Math.min(rect.left, window.innerWidth - Math.min(560, window.innerWidth - 16));
-    pop.style.top = top + 'px';
-    pop.style.left = Math.max(8, left) + 'px';
+      return {
+        label: summary.name || summary.qualified_name || '?',
+        kind: summary.kind || 'unknown',
+        build: (pane) => symbolPane(summary, pane),
+        onSelect: () => selectSymbol(id),
+      };
+    }));
+    keepVisible(tok);
+  }
+
+  function openIncludePanel(el) {
+    const inc = el.include;
+    openPanel([{ label: `#include ${inc.spelling}`, build: (pane) => includePane(inc, pane) }]);
+    keepVisible(el);
   }
 
   // ---- search ----------------------------------------------------------
@@ -535,7 +639,8 @@
     if (state.selected === null) return;
     const els = state.tokens.get(state.selected) || [];
     if (!els.length) return;
-    const y = window.innerHeight / 2;
+    const view = $('code').getBoundingClientRect();
+    const y = (view.top + view.bottom) / 2;
     let index = els.findIndex((el) => el.getBoundingClientRect().top > y);
     if (direction < 0) index = (index < 0 ? els.length : index) - 1;
     else if (index < 0) index = 0;
@@ -561,16 +666,23 @@
     window.addEventListener('hashchange', onHash);
 
     $('code').addEventListener('click', (ev) => {
+      const inc = ev.target.closest('a.inc');
+      if (inc) {
+        // One candidate is a plain link; several are chosen from in the panel.
+        if (!inc.include || ev.ctrlKey || ev.metaKey || ev.shiftKey) return;
+        ev.preventDefault();
+        openIncludePanel(inc);
+        return;
+      }
       const tok = ev.target.closest('.tok');
       if (!tok) return;
       ev.preventDefault();
-      openPopover(tok);
+      openSymbolPanel(tok);
     });
+    $('panel-close').addEventListener('click', closePanel);
     document.addEventListener('click', (ev) => {
-      if (ev.target.closest('#popover') || ev.target.closest('.tok')) return;
       if (!ev.target.closest('#search-results') && !ev.target.closest('#search'))
         $('search-results').hidden = true;
-      if (!ev.target.closest('.tok')) closePopover();
     });
     $('search').addEventListener('input', () => {
       clearTimeout(searchTimer);
@@ -595,7 +707,7 @@
         $('search').focus();
         $('search').select();
       } else if (ev.key === 'Escape') {
-        closePopover();
+        closePanel();
       } else if (ev.key === 'n') {
         stepHighlighted(+1);
       } else if (ev.key === 'p') {

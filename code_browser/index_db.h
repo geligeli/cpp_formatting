@@ -132,6 +132,9 @@ class IndexDb {
   // root; "/" holds the absolute SYSTEM paths).
   auto FileIdOf(std::string_view path) const -> std::optional<int32_t>;
   auto File(int32_t id) const -> std::optional<FileRow>;
+  // Every file with this last path component, by path.  What an `#include`
+  // names is resolved against these: the index records no include edges.
+  auto FilesNamed(std::string_view name) const -> std::vector<FileRow>;
   auto ListDir(std::string_view dir) const
       -> std::optional<std::vector<DirEntry>>;  // nullopt: no such directory
 

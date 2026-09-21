@@ -59,6 +59,7 @@ class ApiHandler {
   auto Files(const ApiRequest&) const -> ApiResponse;
   auto FileBytes(const ApiRequest&) const -> ApiResponse;
   auto Annotations(const ApiRequest&) const -> ApiResponse;
+  auto Includes(const ApiRequest&) const -> ApiResponse;
   auto SymbolInfo(const ApiRequest&, std::string_view rest) const
       -> ApiResponse;
   auto References(const ApiRequest&, std::string_view rest) const

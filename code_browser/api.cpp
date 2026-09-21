@@ -301,6 +301,105 @@ auto RequestedFileOf(const IndexDb& db, const Params& params,
   return f;
 }
 
+// An `#include "x"` / `#include <x>` line.  [begin, end) is the spelling.
+struct IncludeDirective {
+  uint32_t begin = 0;
+  uint32_t end = 0;
+  std::string spelling;
+  bool angled = false;
+};
+
+// Line by line, with no preprocessor: a directive inside a comment or a
+// disabled `#if` is found too (and is as clickable as any other), and one
+// whose file is named by a macro is not.
+auto ScanIncludes(std::string_view text) -> std::vector<IncludeDirective> {
+  std::vector<IncludeDirective> out;
+  const auto blank = [](char c) { return c == ' ' || c == '\t'; };
+  size_t line = 0;
+  while (line < text.size()) {
+    size_t eol = text.find('\n', line);
+    if (eol == std::string_view::npos) eol = text.size();
+    size_t i = line;
+    const size_t next = eol + 1;
+    line = next;
+    while (i < eol && blank(text[i])) ++i;
+    if (i == eol || text[i] != '#') continue;
+    ++i;
+    while (i < eol && blank(text[i])) ++i;
+    const std::string_view rest = text.substr(i, eol - i);
+    size_t keyword = 0;
+    for (const std::string_view k : {"include_next", "include", "import"})
+      if (rest.rfind(k, 0) == 0) {
+        keyword = k.size();
+        break;
+      }
+    if (keyword == 0) continue;
+    i += keyword;
+    while (i < eol && blank(text[i])) ++i;
+    if (i == eol || (text[i] != '"' && text[i] != '<')) continue;
+    const bool angled = text[i] == '<';
+    const size_t begin = i + 1;
+    const size_t close = text.find(angled ? '>' : '"', begin);
+    if (close == std::string_view::npos || close >= eol || close == begin)
+      continue;
+    IncludeDirective d;
+    d.begin = static_cast<uint32_t>(begin);
+    d.end = static_cast<uint32_t>(close);
+    d.spelling = std::string(text.substr(begin, close - begin));
+    d.angled = angled;
+    out.push_back(std::move(d));
+  }
+  return out;
+}
+
+// The indexed files `d` can name from `includer`, best first: the file next
+// to the includer (quoted form), the spelling as a path from the root, then
+// the paths ending in it -- first-party ones first, then the fewest
+// directories in front of the spelling (`<time.h>` is `.../include/time.h`
+// before `.../include/sys/time.h` or a library's `internal/time.h`), then
+// the shortest.  No include path is known here, so this is a ranking and not
+// a lookup; several candidates are all returned.
+auto ResolveInclude(const IndexDb& db, std::string_view includer,
+                    const IncludeDirective& d) -> std::vector<FileRow> {
+  namespace fs = std::filesystem;
+  const std::string spelling =
+      fs::path(d.spelling).lexically_normal().generic_string();
+  const std::string name = fs::path(spelling).filename().generic_string();
+  if (name.empty() || name == "." || name == "..") return {};
+  const std::string sibling = (fs::path(includer).parent_path() / d.spelling)
+                                  .lexically_normal()
+                                  .generic_string();
+  const bool suffixable = spelling.rfind("../", 0) != 0 && spelling[0] != '/';
+  const auto rank = [&](const FileRow& row) -> int {
+    if (!d.angled && row.path == sibling) return 0;
+    if (row.path == spelling) return 1;
+    if (row.path == sibling) return 2;
+    if (suffixable && row.path.size() > spelling.size() &&
+        row.path.compare(row.path.size() - spelling.size(), spelling.size(),
+                         spelling) == 0 &&
+        row.path[row.path.size() - spelling.size() - 1] == '/')
+      return row.kind == cpp_index::SOURCE ? 3 : 4;
+    return -1;
+  };
+  std::vector<std::pair<int, FileRow>> ranked;
+  for (FileRow& row : db.FilesNamed(name))
+    if (const int r = rank(row); r >= 0) ranked.emplace_back(r, std::move(row));
+  std::stable_sort(ranked.begin(), ranked.end(),
+                   [](const auto& a, const auto& b) {
+                     if (a.first != b.first) return a.first < b.first;
+                     const auto depth = [](const std::string& p) {
+                       return std::count(p.begin(), p.end(), '/');
+                     };
+                     const auto da = depth(a.second.path);
+                     const auto db = depth(b.second.path);
+                     if (da != db) return da < db;
+                     return a.second.path.size() < b.second.path.size();
+                   });
+  std::vector<FileRow> out;
+  for (auto& [r, row] : ranked) out.push_back(std::move(row));
+  return out;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -318,6 +417,7 @@ auto ApiHandler::Handle(const ApiRequest& request) const -> ApiResponse {
   if (path == "/api/files") return Files(request);
   if (path == "/api/file") return FileBytes(request);
   if (path == "/api/annotations") return Annotations(request);
+  if (path == "/api/includes") return Includes(request);
   if (path == "/api/search") return Search(request);
   if (path == "/api/at") return At(request);
   if (path == "/api/symbol") return SymbolInfo(request, "");
@@ -428,6 +528,35 @@ auto ApiHandler::Annotations(const ApiRequest& request) const -> ApiResponse {
     t->set_name(u.name);
   }
   return WithEtag(Json(out), db_.etag(), request);
+}
+
+auto ApiHandler::Includes(const ApiRequest& request) const -> ApiResponse {
+  ApiResponse error;
+  const Params params(request.query);
+  const std::optional<RequestedFile> f = RequestedFileOf(db_, params, &error);
+  if (!f) return error;
+  const std::optional<std::filesystem::path> resolved =
+      repo_.Resolve(f->path, f->kind());
+  const std::shared_ptr<const CachedFile> bytes =
+      resolved ? files_.Get(repo_, *resolved) : nullptr;
+  if (!bytes) return ErrorResponse(404, "no such file in the checkout");
+  api::Includes out;
+  out.set_path(f->path);
+  for (const IncludeDirective& d : ScanIncludes(bytes->data)) {
+    api::Include* inc = out.add_includes();
+    inc->set_begin(d.begin);
+    inc->set_end(d.end);
+    inc->set_spelling(d.spelling);
+    inc->set_angled(d.angled);
+    for (const FileRow& row : ResolveInclude(db_, f->path, d)) {
+      api::IncludeTarget* t = inc->add_targets();
+      t->set_path(row.path);
+      t->set_kind(row.kind);
+      t->set_available(repo_.Resolve(row.path, row.kind).has_value());
+    }
+  }
+  // Depends on the file as well as on the index.
+  return WithEtag(Json(out), db_.etag() + "-" + bytes->etag, request);
 }
 
 auto ApiHandler::SymbolInfo(const ApiRequest& request,

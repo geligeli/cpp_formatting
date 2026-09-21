@@ -22,7 +22,7 @@
 #                      workspace root (a cpp_index.Index protobuf; read it with
 #                      `cpp_format --dump-index [--lookup=<file>:<offset>]`)
 #     browse           `index`, then serve the workspace in the code browser
-#                      over it (http://127.0.0.1:8080/): every indexed token
+#                      over it (it prints its URL; --port=N picks the port): every indexed token
 #                      annotated, click through to definitions and references.
 #                      Prints the browser binary and its command line first.
 #

@@ -1,7 +1,7 @@
 // code_browser: serves a git checkout with every indexed token annotated.
 //
 //   code_browser --db=index.sqlite --root=/path/to/checkout
-//   code_browser --index=index.pb --root=. --port=8080     # imports on demand
+//   code_browser --index=index.pb --root=. [--port=N]     # imports on demand
 //
 //   code_browser --index=index.pb --import-to=index.sqlite   # import and exit
 //
@@ -62,7 +62,7 @@ cl::opt<std::string> ExecRoot(
 cl::opt<std::string> Address("address", cl::desc("Address to bind"),
                              cl::init("127.0.0.1"), cl::cat(Category));
 cl::opt<unsigned> Port("port", cl::desc("Port to bind (0: any free port)"),
-                       cl::init(8080), cl::cat(Category));
+                       cl::init(0), cl::cat(Category));
 cl::opt<std::string> PortFile(
     "port-file", cl::desc("Write the bound port to this file once listening"),
     cl::cat(Category));

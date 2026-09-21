@@ -1,8 +1,11 @@
 # code_browser
 
 An HTTP server that serves a git checkout with every indexed token
-annotated: click an identifier to see what it is, jump to its definition, list
-its references. The index is the one `cpp_format --merge-index` produces (see
+annotated: click an identifier and a panel below the code says what it is,
+where it is defined and declared, what it is related to, and lists its
+references (one tab per symbol when a token names several); the panel stays
+open while you follow them into other files. An `#include` is a link to the
+file it names. The index is the one `cpp_format --merge-index` produces (see
 [cpp_formatting/index.proto](../cpp_formatting/index.proto)), imported once
 into SQLite.
 
@@ -17,8 +20,8 @@ tools/cpp_format.sh browse                         # [pattern] [--port=N] [--che
 tools/cpp_format.sh index                          # writes index.pb
 # 2. Serve it.  --index imports into index.pb.sqlite when that is missing or
 #    older than the .pb; --db skips the import.
-bazel run //code_browser -- --index=$PWD/index.pb --root=$PWD --port=8080
-# 3. http://127.0.0.1:8080/
+bazel run //code_browser -- --index=$PWD/index.pb --root=$PWD
+# 3. Open the URL it prints: a free port by default, --port=N to choose.
 ```
 
 `index_import index.pb [--out=x.sqlite] [--force]` does the import on its
@@ -49,13 +52,16 @@ fields as declared, defaults omitted).
 | `/api/files?prefix=<dir>` | `FileList`: one level of the tree the index spans (`""` is the root; absolute SYSTEM paths sit under `/`) |
 | `/api/file?path=<p>` | the bytes (`text/plain`), with `ETag`, `Last-Modified`, `X-File-Id`, `X-File-Kind`, and `X-Newer-Than-Index: 1` when the file changed after the index was built |
 | `/api/annotations?path=<p>` | `Annotations`: every occurrence as a byte-range `Span`, plus a `SymbolSummary` for every symbol they name |
+| `/api/includes?path=<p>` | `Includes`: every `#include` line's spelling as a byte range, with the indexed files it can name, best first. The index records no include edges and no include paths, so this is a resolution by path: the includer's sibling (quoted form), the spelling from the root, then the indexed paths ending in it — first-party first, then the fewest directories in front of the spelling. One candidate is a link; several open the panel to choose from |
 | `/api/symbol/<id>`, `/api/symbol?usr=<u>` | `SymbolInfo`: definitions, declarations, relations both ways, counts |
 | `/api/refs/<id>?role=&exclude=&file=&offset=&limit=` | `References`, grouped per file with line text; `role`/`exclude` take a bitmask or `DEFINITION\|CALL`; `limit` ≤ 5000 |
 | `/api/search?q=&limit=&kind=&locals=1` | `SearchResults`: name prefix, substring (3+ chars, via trigrams) or `ns::Name` |
 | `/api/at?path=<p>&offset=<n>` | `OccurrencesAt`: what `cpp_format --dump-index --lookup` says |
 
 Errors are `Error{status, message}` with 400/404/405/414. Responses that
-depend only on the index carry its ETag and answer `If-None-Match` with 304.
+depend only on the index carry its ETag and answer `If-None-Match` with 304
+(`/api/includes` reads the file too, so its ETag is the index's and the
+file's).
 
 ## Files the index names
 

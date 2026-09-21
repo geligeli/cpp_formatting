@@ -92,6 +92,29 @@ message Annotations {
   repeated Unresolved unresolved = 5;
 }
 
+// One `#include` of a file, with the indexed files its spelling can name.
+// The index records no include edges, so this is a resolution by path: the
+// file next to the includer (quoted form only), the spelling as a path, then
+// every indexed path that ends in it -- best candidate first.
+message IncludeTarget {
+  string path = 1;
+  cpp_index.FileKind kind = 2;
+  bool available = 3;  // present in the checkout
+}
+
+message Include {
+  uint32 begin = 1;  // of the spelling, between the quotes or brackets
+  uint32 end = 2;
+  string spelling = 3;
+  bool angled = 4;
+  repeated IncludeTarget targets = 5;  // empty: no indexed file matches
+}
+
+message Includes {
+  string path = 1;
+  repeated Include includes = 2;  // in file order
+}
+
 message Related {
   cpp_index.RelationKind kind = 1;
   bool reverse = 2;  // false: this symbol -> related; true: related -> this

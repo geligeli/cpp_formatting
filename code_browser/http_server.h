@@ -17,7 +17,7 @@ namespace code_browser {
 
 struct ServerOptions {
   std::string address = "127.0.0.1";
-  uint16_t port = 8080;                   // 0: any free port; see bound_port()
+  uint16_t port = 0;                      // 0: any free port; see bound_port()
   unsigned threads = 0;                   // 0: one per hardware thread
   std::chrono::seconds idle_timeout{30};  // per read/write, and keep-alive idle
   std::chrono::seconds drain_timeout{5};  // on Stop(): in-flight responses

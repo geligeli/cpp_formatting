@@ -59,6 +59,9 @@ class ApiTest : public ::testing::Test {
     const int32_t util_h = file("sub/util.h", cpp_index::SOURCE);
     const int32_t gen_h = file("bazel-out/gen/x.pb.h", cpp_index::GENERATED);
     (void)gen_h;
+    // Two more files named x.pb.h, for the ranking of an ambiguous include.
+    file("bazel-out/other/deep/x.pb.h", cpp_index::GENERATED);
+    file("sub/a/b/x.pb.h", cpp_index::SOURCE);
     const auto symbol = [&](const char* usr, const char* name,
                             const char* qualified, cpp_index::SymbolKind kind,
                             int32_t cfile, uint32_t cb, uint32_t ce,
@@ -200,7 +203,7 @@ TEST_F(ApiTest, RepoInfo) {
   EXPECT_EQ(info.root(), fs::canonical(dir_).string());
   EXPECT_EQ(info.head_commit(), "");
   EXPECT_EQ(info.index_etag(), db_->etag());
-  EXPECT_EQ(info.stats().files(), 4u);
+  EXPECT_EQ(info.stats().files(), 6u);
   EXPECT_EQ(info.stats().symbols(), 4u);
   EXPECT_EQ(info.stats().occurrences(), 8u);
   EXPECT_EQ(info.stats().source_path(), "test.pb");
@@ -270,6 +273,66 @@ TEST_F(ApiTest, AnnotationsCarrySpansAndSymbols) {
   EXPECT_EQ(r.etag, "\"" + db_->etag() + "\"");
   EXPECT_EQ(Get("/api/annotations", "path=widget.cpp", r.etag).status, 304);
   EXPECT_EQ(Get("/api/annotations", "path=notes.txt").status, 404);
+}
+
+TEST_F(ApiTest, IncludesResolveAgainstTheIndexedFiles) {
+  ApiResponse r = Get("/api/includes", "path=widget.cpp");
+  api::Includes inc = Parse<api::Includes>(r);
+  ASSERT_EQ(inc.includes_size(), 1);
+  EXPECT_EQ(inc.includes(0).begin(), 10u);
+  EXPECT_EQ(inc.includes(0).end(), 18u);
+  EXPECT_EQ(inc.includes(0).spelling(), "widget.h");
+  EXPECT_FALSE(inc.includes(0).angled());
+  ASSERT_EQ(inc.includes(0).targets_size(), 1);
+  EXPECT_EQ(inc.includes(0).targets(0).path(), "widget.h");
+  EXPECT_EQ(inc.includes(0).targets(0).kind(), cpp_index::SOURCE);
+  EXPECT_TRUE(inc.includes(0).targets(0).available());
+  ASSERT_FALSE(r.etag.empty());
+  EXPECT_EQ(Get("/api/includes", "path=widget.cpp", r.etag).status, 304);
+
+  // A file the index does not know still has its includes resolved: next to
+  // the includer, by path suffix, up a directory, and not at all.
+  Write("sub/user.cpp",
+        "// c\n"
+        "#include \"util.h\"\n"
+        "  #  include <gen/x.pb.h>\n"
+        "#include \"../widget.h\"\n"
+        "#include \"missing.h\"\n"
+        "#include WIDGET_HEADER\n"
+        "#define X \"widget.h\"\n");
+  inc = Parse<api::Includes>(Get("/api/includes", "path=sub/user.cpp"));
+  ASSERT_EQ(inc.includes_size(), 4);
+  ASSERT_EQ(inc.includes(0).targets_size(), 1);
+  EXPECT_EQ(inc.includes(0).targets(0).path(), "sub/util.h");
+  EXPECT_TRUE(inc.includes(1).angled());
+  EXPECT_EQ(inc.includes(1).spelling(), "gen/x.pb.h");
+  ASSERT_EQ(inc.includes(1).targets_size(), 1);
+  EXPECT_EQ(inc.includes(1).targets(0).path(), "bazel-out/gen/x.pb.h");
+  EXPECT_EQ(inc.includes(1).targets(0).kind(), cpp_index::GENERATED);
+  EXPECT_FALSE(inc.includes(1).targets(0).available());
+  ASSERT_EQ(inc.includes(2).targets_size(), 1);
+  EXPECT_EQ(inc.includes(2).targets(0).path(), "widget.h");
+  EXPECT_EQ(inc.includes(3).targets_size(), 0);
+
+  // Two candidates: the includer's sibling first, then the other match.
+  Write("sub/widget.cpp", "#include \"widget.h\"\n#include <widget.h>\n");
+  inc = Parse<api::Includes>(Get("/api/includes", "path=sub/widget.cpp"));
+  ASSERT_EQ(inc.includes_size(), 2);
+  ASSERT_EQ(inc.includes(0).targets_size(), 1);  // sub/widget.h is not indexed
+  EXPECT_EQ(inc.includes(0).targets(0).path(), "widget.h");
+
+  // Several files end in the spelling: first-party first, then the fewest
+  // directories in front of it.  `gen/x.pb.h` above named only one of them.
+  Write("main.cpp", "#include <x.pb.h>\n");
+  inc = Parse<api::Includes>(Get("/api/includes", "path=main.cpp"));
+  ASSERT_EQ(inc.includes_size(), 1);
+  ASSERT_EQ(inc.includes(0).targets_size(), 3);
+  EXPECT_EQ(inc.includes(0).targets(0).path(), "sub/a/b/x.pb.h");
+  EXPECT_EQ(inc.includes(0).targets(1).path(), "bazel-out/gen/x.pb.h");
+  EXPECT_EQ(inc.includes(0).targets(2).path(), "bazel-out/other/deep/x.pb.h");
+
+  EXPECT_EQ(Get("/api/includes", "path=nope.cpp").status, 404);
+  EXPECT_EQ(Get("/api/includes", "").status, 400);
 }
 
 TEST_F(ApiTest, SymbolInfoByIdAndUsr) {

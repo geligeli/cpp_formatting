@@ -113,7 +113,7 @@ CI gate.
 the code browser on the result:
 
 ```sh
-tools/cpp_format.sh browse                  # http://127.0.0.1:8080/
+tools/cpp_format.sh browse                  # a free port; prints the URL
 tools/cpp_format.sh browse --port=9000      # flags go to the server
 tools/cpp_format.sh browse //app/...        # index one package tree only
 tools/cpp_format.sh browse --check          # index, print the stats, exit
@@ -988,14 +988,15 @@ for the targets under a pattern -- the whole repository by default. An index is
 itself a valid merge input, so it can be extended with further units.
 
 **Browsing it.** [code_browser/](code_browser/) is an HTTP server that serves
-a checkout with every indexed token annotated: click an identifier to see
-what it is, jump to its definition, list its references. It reads the index
+a checkout with every indexed token annotated: click an identifier and a panel
+below the code shows what it is, its definition and its references; an
+`#include` is a link to the file it names. It reads the index
 from SQLite (`code_browser --index=index.pb` imports it into `index.pb.sqlite`
 when that is missing or older), so nothing is loaded up front.
 `tools/cpp_format.sh browse` is the one command: it indexes the repository,
-prints the browser's binary and command line, and serves the workspace at
-`http://127.0.0.1:8080/` (`--port=N` picks a port); run it again to update the
-index. See [code_browser/README.md](code_browser/README.md) for the routes. In
+prints the browser's binary and command line, and serves the workspace on a
+free port of `127.0.0.1`, printing the URL (`--port=N` picks the port); run
+it again to update the index. See [code_browser/README.md](code_browser/README.md) for the routes. In
 this repository `tools/cpp_format.sh` builds everything from source; a consumer
 of the prebuilt kit gets the same command from a release asset, with nothing to
 build.
