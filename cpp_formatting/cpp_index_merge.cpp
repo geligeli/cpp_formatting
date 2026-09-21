@@ -25,6 +25,7 @@
 #include "llvm/Support/ErrorOr.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -56,6 +57,13 @@ auto parseIndexFormat(llvm::StringRef Name, IndexFormat& Out) -> bool {
 // ---------------------------------------------------------------------------
 // Normalization
 // ---------------------------------------------------------------------------
+
+auto fileKindForPath(llvm::StringRef Path) -> cpp_index::FileKind {
+  if (llvm::sys::path::is_absolute(Path)) return cpp_index::SYSTEM;
+  if (Path.starts_with("bazel-out/")) return cpp_index::GENERATED;
+  if (Path.starts_with("external/")) return cpp_index::EXTERNAL;
+  return cpp_index::SOURCE;
+}
 
 namespace {
 
@@ -344,6 +352,50 @@ auto mergeUnits(const std::vector<IndexUnit>& Units) -> IndexUnit {
   return Out;
 }
 
+auto linkGenerated(IndexUnit& Unit) -> size_t {
+  // Anchors by range.  Occurrences are sorted by (file, begin, end, ...), so
+  // the anchors are too, and a range's symbols come out in symbol order.
+  using Range = std::tuple<int32_t, uint32_t, uint32_t>;
+  std::vector<std::pair<Range, int32_t>> Anchors;
+  for (const Occurrence& O : Unit.occurrences())
+    if (O.roles() & cpp_index::GENERATES)
+      Anchors.push_back({Range{O.file(), O.begin(), O.end()}, O.symbol()});
+  if (Anchors.empty()) return 0;
+
+  size_t Added = 0;
+  for (int32_t I = 0; I < Unit.symbols_size(); ++I) {
+    Symbol& S = *Unit.mutable_symbols(I);
+    if (!S.has_canonical()) continue;
+    const Range Key{S.canonical().file(), S.canonical().begin(),
+                    S.canonical().end()};
+    auto It = std::lower_bound(Anchors.begin(), Anchors.end(), Key,
+                               [](const std::pair<Range, int32_t>& A,
+                                  const Range& K) { return A.first < K; });
+    bool Changed = false;
+    for (; It != Anchors.end() && It->first == Key; ++It) {
+      // The anchor's own symbol is declared where it is declared, not
+      // generated from itself.
+      if (It->second == I) continue;
+      Relation R;
+      R.set_kind(cpp_index::GENERATED_FROM);
+      R.set_symbol(It->second);
+      const bool Present = std::any_of(
+          S.relations().begin(), S.relations().end(),
+          [&](const Relation& X) { return relationKey(X) == relationKey(R); });
+      if (Present) continue;
+      *S.add_relations() = R;
+      Changed = true;
+      ++Added;
+    }
+    if (Changed)
+      std::sort(S.mutable_relations()->begin(), S.mutable_relations()->end(),
+                [](const Relation& A, const Relation& B) {
+                  return relationKey(A) < relationKey(B);
+                });
+  }
+  return Added;
+}
+
 auto buildIndex(const IndexUnit& Unit) -> Index {
   Index Out;
   Out.set_producer(Unit.producer());
@@ -419,6 +471,7 @@ auto roleNames(uint32_t Roles) -> std::string {
       {cpp_index::NAME_REFERENCE, "NAME_REFERENCE"},
       {cpp_index::DEPENDENT, "DEPENDENT"},
       {cpp_index::PASTED, "PASTED"},
+      {cpp_index::GENERATES, "GENERATES"},
   };
   std::string Out;
   for (const auto& [Bit, Name] : kNames) {
@@ -656,6 +709,7 @@ auto runMergeIndex(const std::vector<std::string>& InputPaths,
                    const MergeOptions& Opts) -> int {
   IndexUnit Unit;
   if (!mergeUnitFiles(InputPaths, Opts, Unit)) return 2;
+  linkGenerated(Unit);
   const Index Merged = buildIndex(Unit);
   return writeMessage(Merged, OutputPath, Format) ? 0 : 1;
 }
@@ -714,6 +768,15 @@ auto runDumpIndex(llvm::StringRef Path, IndexFormat Format,
     if (S.has_canonical())
       OS << "  canonical " << Idx.files(S.canonical().file()).path() << ":"
          << S.canonical().begin() << "-" << S.canonical().end() << "\n";
+    // Provenance, both ways: what this was generated from, and what was
+    // generated from this.
+    for (const Relation& R : S.relations())
+      if (R.kind() == cpp_index::GENERATED_FROM)
+        OS << "  generated from " << Idx.symbols(R.symbol()).usr() << "\n";
+    for (const Symbol& Other : Idx.symbols())
+      for (const Relation& R : Other.relations())
+        if (R.kind() == cpp_index::GENERATED_FROM && R.symbol() == O->symbol())
+          OS << "  generates " << Other.usr() << "\n";
     for (const FileOccurrences& FO : Idx.per_file())
       for (const Occurrence& Occ : FO.occurrences()) {
         if (Occ.symbol() != O->symbol()) continue;

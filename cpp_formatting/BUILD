@@ -401,6 +401,7 @@ cc_binary(
         ":lint_lib",
         ":naming_convention",
         ":output_mode",
+        ":proto_index_lib",
         ":rename_variables_lib",
         ":trailing_return_types_lib",
         ":tu_driver",
@@ -448,6 +449,39 @@ cc_test(
         ":cpp_index_merge",
         "@googletest//:gtest_main",
         "@llvm-project//llvm:Support",
+    ],
+)
+
+# The protobuf producer of the index: `cpp_format --emit-proto-index`.  Clang-
+# free like cpp_index_merge; the parser is protoc's own front end.
+cc_library(
+    name = "proto_index_lib",
+    srcs = ["proto_index_lib.cpp"],
+    hdrs = ["proto_index_lib.h"],
+    implementation_deps = [
+        ":cpp_index_merge",
+        "@llvm-project//llvm:Support",
+        "@protobuf",
+    ],
+    deps = [
+        ":index_cc_proto",
+        "@protobuf//src/google/protobuf/compiler:importer",
+    ],
+)
+
+cc_test(
+    name = "proto_index_test",
+    srcs = ["proto_index_test.cpp"],
+    copts = [
+        "-DGTEST_HAS_RTTI=0",
+    ],
+    deps = [
+        ":cpp_index_merge",
+        ":index_cc_proto",
+        ":proto_index_lib",
+        "@googletest//:gtest_main",
+        "@protobuf",
+        "@protobuf//src/google/protobuf/compiler:importer",
     ],
 )
 

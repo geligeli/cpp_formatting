@@ -5,6 +5,8 @@
 #     told via --owned-files which other files' occurrences to record)
 #   * `cpp_format --merge-index --output=<index.pb> [--records-from=<list>]`
 #   * `cpp_format --dump-index [--format=...] [--lookup=<path>:<offset>]`
+#   * `cpp_format --emit-proto-index=<unit.pb> [--anchors=...] file.proto` and
+#     the merge's link between generated C++ and the .proto it came from
 #
 # Arguments (Bazel $(location ...) expansions):
 #   $1  cpp_format binary
@@ -190,5 +192,97 @@ grep -q "^  widget.cpp:$off_write-$((off_write + 9)) REFERENCE|WRITE$" lookup4.t
 grep -q "^dependent token 'itemCount' at widget.h:$off_dep-$((off_dep + 9)) is unresolved" lookup5.txt \
   || fail "dependent: unresolved token not reported"
 echo "PASS: dependent tokens resolved across TUs"
+
+# ---------------------------------------------------------------------------
+# Test 7 — a second language: .proto units, anchors and the generated link
+# ---------------------------------------------------------------------------
+# `--emit-proto-index` describes a .proto; given what the code generator said
+# about its output (protoc's GeneratedCodeInfo: byte ranges of the generated
+# header, each with the path of the descriptor it came from) it also anchors
+# the proto symbols on those ranges, and the merge links every C++ symbol
+# declared on an anchored range to them.  The header here is written by hand
+# and the metadata byte by byte, so the test needs no protoc.
+mkdir -p proto/gen
+printf 'syntax = "proto3";\npackage demo;\nmessage W {\n\tint32 size = 1;\n}\n' \
+  > proto/w.proto
+cat > proto/gen/w.pb.h <<'EOF'
+struct W {
+  int size() const;
+  void set_size(int v);
+};
+EOF
+cat > proto/user.cpp <<'EOF'
+#include "gen/w.pb.h"
+void use(W& w) { w.set_size(w.size() + 1); }
+EOF
+byte() { printf "\\$(printf '%03o' "$1")"; }
+# One GeneratedCodeInfo.annotation: path (packed), source_file, begin, end and
+# an optional semantic (1 = SET).  Every number here is below 128, so every
+# varint is one byte.
+annotation() {  # <begin> <end> <semantic> <path...>
+  local begin="$1" end="$2" semantic="$3"; shift 3
+  local source="w.proto" body
+  body="$(mktemp)"
+  { byte 10; byte "$#"; for p in "$@"; do byte "$p"; done
+    byte 18; byte "${#source}"; printf '%s' "$source"
+    byte 24; byte "$begin"; byte 32; byte "$end"
+    if [[ "$semantic" != 0 ]]; then byte 40; byte "$semantic"; fi
+  } > "$body"
+  byte 10; byte "$(wc -c < "$body")"; cat "$body"
+  rm -f "$body"
+}
+off_get="$(offset_of proto/gen/w.pb.h 'size() const')"
+off_set="$(offset_of proto/gen/w.pb.h 'set_size')"
+off_class="$(offset_of proto/gen/w.pb.h 'W {')"
+{ annotation "$off_class" "$((off_class + 1))" 0 4 0
+  annotation "$off_get" "$((off_get + 4))" 0 4 0 2 0
+  annotation "$off_set" "$((off_set + 8))" 1 4 0 2 0
+} > proto/w.pb.h.meta
+
+( cd proto
+  printf 'gen/w.pb.h\n' > owned.txt
+  "$cpp_format" --emit-index=user.pb --owned-files=owned.txt user.cpp -- -std=c++17
+  "$cpp_format" --emit-proto-index=w.pb --proto-path=. \
+    --anchors=w.pb.h.meta=gen/w.pb.h w.proto
+  "$cpp_format" --merge-index --output=index.pb user.pb w.pb
+  "$cpp_format" --dump-index --format=text index.pb > index.txt )
+grep -q 'usr: "proto:demo.W.size"' proto/index.txt || fail "proto: field symbol missing"
+grep -q 'language: PROTO' proto/index.txt || fail "proto: language not recorded"
+grep -q 'kind: MESSAGE' proto/index.txt || fail "proto: message kind missing"
+grep -q 'path: "w.proto"' proto/index.txt || fail "proto: the .proto is not a file of the index"
+# The field's name comes after a tab: a column the tokenizer counts as eight.
+off_field="$(offset_of proto/w.proto 'size = 1')"
+"$cpp_format" --dump-index --lookup="w.proto:$off_field" proto/index.pb > proto/lookup_field.txt
+grep -q '^proto:demo.W.size$' proto/lookup_field.txt \
+  || fail "proto: lookup at the field does not find it (tab columns?)"
+grep -q "^  w.proto:$off_field-$((off_field + 4)) DEFINITION$" proto/lookup_field.txt \
+  || fail "proto: field definition range wrong"
+grep -q "^  gen/w.pb.h:$off_set-$((off_set + 8)) WRITE|GENERATES$" proto/lookup_field.txt \
+  || fail "proto: setter anchor missing"
+grep -q '^  generates c:@S@W@F@set_size#I#$' proto/lookup_field.txt \
+  || fail "proto: the field does not list the setter generated from it"
+grep -q '^  generates c:@S@W@F@size#1$' proto/lookup_field.txt \
+  || fail "proto: the field does not list the getter generated from it"
+# From the code: the call in user.cpp leads to the proto field.
+off_call="$(offset_of proto/user.cpp 'set_size')"
+"$cpp_format" --dump-index --lookup="user.cpp:$off_call" proto/index.pb > proto/lookup_call.txt
+grep -q '^  generated from proto:demo.W.size$' proto/lookup_call.txt \
+  || fail "proto: the setter call does not lead to the proto field"
+off_w="$(offset_of proto/user.cpp 'W&')"
+"$cpp_format" --dump-index --lookup="user.cpp:$off_w" proto/index.pb > proto/lookup_class.txt
+grep -q '^  generated from proto:demo.W$' proto/lookup_class.txt \
+  || fail "proto: the class does not lead to the message"
+# The linked index is a merge input like any other, and a fixpoint.
+"$cpp_format" --merge-index --output=proto/again.pb proto/index.pb
+cmp -s proto/index.pb proto/again.pb || fail "proto: re-merging the linked index changed it"
+"$cpp_format" --merge-index --output=proto/reordered.pb proto/w.pb proto/user.pb
+cmp -s proto/index.pb proto/reordered.pb || fail "proto: the link depends on the input order"
+# A .proto that does not compile is an error with the parser's diagnostic.
+printf 'syntax = "proto3";\nmessage M { Missing m = 1; }\n' > proto/bad.proto
+if ( cd proto && "$cpp_format" --emit-proto-index=bad.pb --proto-path=. bad.proto ) 2> proto/bad.err; then
+  fail "proto: a broken .proto was indexed"
+fi
+grep -q 'bad.proto:2:13' proto/bad.err || fail "proto: no diagnostic for the broken .proto"
+echo "PASS: proto units, anchors and the generated link"
 
 echo "ALL INDEX INTEGRATION TESTS PASSED"

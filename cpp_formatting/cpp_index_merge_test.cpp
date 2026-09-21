@@ -378,3 +378,131 @@ TEST(IndexMerge, PendingDependentTokensAreDroppedOnceResolved) {
   normalizeUnit(Bad);
   EXPECT_EQ(Bad.pending_size(), 0);
 }
+
+namespace {
+
+/// A proto-ish unit: `size` defined in w.proto, anchored on three ranges of
+/// the generated header.
+auto anchorUnit() -> IndexUnit {
+  IndexUnit U;
+  const int32_t Proto = addFile(U, "w.proto");
+  const int32_t Header = addFile(U, "bazel-out/w.pb.h", cpp_index::GENERATED);
+  const int32_t Size = addSymbol(U, "proto:demo.W.size", "size");
+  U.mutable_symbols(Size)->mutable_canonical()->set_file(Proto);
+  U.mutable_symbols(Size)->mutable_canonical()->set_begin(40);
+  U.mutable_symbols(Size)->mutable_canonical()->set_end(44);
+  addOcc(U, Proto, 40, 44, Size, cpp_index::DEFINITION);
+  addOcc(U, Header, 100, 104, Size, cpp_index::GENERATES);
+  addOcc(U, Header, 200, 208, Size, cpp_index::GENERATES | cpp_index::WRITE);
+  addOcc(U, Header, 300, 310, Size, cpp_index::GENERATES);
+  return U;
+}
+
+/// A C++-ish unit: the getter and the setter declared on two of those
+/// ranges, a third symbol declared next to one, and a user of the setter.
+auto generatedUnit() -> IndexUnit {
+  IndexUnit U;
+  const int32_t Header = addFile(U, "bazel-out/w.pb.h", cpp_index::GENERATED);
+  const int32_t User = addFile(U, "user.cpp");
+  auto Declared = [&](const std::string& Usr, uint32_t Begin, uint32_t End) {
+    const int32_t S = addSymbol(U, Usr, Usr);
+    U.mutable_symbols(S)->mutable_canonical()->set_file(Header);
+    U.mutable_symbols(S)->mutable_canonical()->set_begin(Begin);
+    U.mutable_symbols(S)->mutable_canonical()->set_end(End);
+    return S;
+  };
+  Declared("c:@S@W@F@size#", 100, 104);
+  const int32_t Setter = Declared("c:@S@W@F@set_size#", 200, 208);
+  Declared("c:@S@W@F@swap#", 201, 208);  // overlaps an anchor, is not one
+  addOcc(U, User, 7, 15, Setter, cpp_index::REFERENCE | cpp_index::CALL);
+  return U;
+}
+
+auto generatedFrom(const IndexUnit& U, const std::string& Usr)
+    -> std::vector<std::string> {
+  std::vector<std::string> Out;
+  for (const Symbol& S : U.symbols())
+    if (S.usr() == Usr)
+      for (const cpp_index::Relation& R : S.relations())
+        if (R.kind() == cpp_index::GENERATED_FROM)
+          Out.push_back(U.symbols(R.symbol()).usr());
+  return Out;
+}
+
+}  // namespace
+
+// The one rule that crosses languages: a symbol declared on exactly the range
+// of a GENERATES anchor was generated from the anchor's symbol.
+TEST(IndexMerge, LinkGeneratedJoinsCanonicalRangesWithAnchors) {
+  IndexUnit U = mergeUnits({anchorUnit(), generatedUnit()});
+  EXPECT_EQ(linkGenerated(U), 2u);
+  EXPECT_EQ(generatedFrom(U, "c:@S@W@F@size#"),
+            std::vector<std::string>{"proto:demo.W.size"});
+  EXPECT_EQ(generatedFrom(U, "c:@S@W@F@set_size#"),
+            std::vector<std::string>{"proto:demo.W.size"});
+  EXPECT_TRUE(generatedFrom(U, "c:@S@W@F@swap#").empty());
+  // The anchor's own symbol is declared in the .proto, not generated.
+  EXPECT_TRUE(generatedFrom(U, "proto:demo.W.size").empty());
+
+  // Still canonical, and a fixpoint: linking again, or merging the linked
+  // unit again (an index is a merge input), changes nothing.
+  const std::string Linked = bytes(U);
+  IndexUnit Again = U;
+  normalizeUnit(Again);
+  EXPECT_EQ(bytes(Again), Linked);
+  EXPECT_EQ(linkGenerated(Again), 0u);
+  EXPECT_EQ(bytes(Again), Linked);
+  IndexUnit Remerged = mergeUnits({unitFromIndex(buildIndex(U))});
+  linkGenerated(Remerged);
+  EXPECT_EQ(bytes(Remerged), Linked);
+}
+
+TEST(IndexMerge, LinkGeneratedLeavesAUnitWithoutAnchorsAlone) {
+  IndexUnit U = mergeUnits({generatedUnit()});
+  const std::string Before = bytes(U);
+  EXPECT_EQ(linkGenerated(U), 0u);
+  EXPECT_EQ(bytes(U), Before);
+
+  // Anchors with nothing declared on them are not an error either.
+  IndexUnit Anchors = mergeUnits({anchorUnit()});
+  const std::string AnchorsBefore = bytes(Anchors);
+  EXPECT_EQ(linkGenerated(Anchors), 0u);
+  EXPECT_EQ(bytes(Anchors), AnchorsBefore);
+}
+
+// Linking only adds relations between symbols that are there, so it does not
+// matter when it happens: linking a partial index and merging the rest later
+// ends where merging everything and linking once does, in any order.
+TEST(IndexMerge, LinkGeneratedIsMonotoneAndOrderIndependent) {
+  auto Link = [](IndexUnit U) {
+    linkGenerated(U);
+    return U;
+  };
+  const std::string All =
+      bytes(Link(mergeUnits({anchorUnit(), generatedUnit()})));
+  EXPECT_EQ(bytes(Link(mergeUnits({generatedUnit(), anchorUnit()}))), All);
+  EXPECT_EQ(bytes(Link(mergeUnits(
+                {Link(mergeUnits({anchorUnit()})), generatedUnit()}))),
+            All);
+  EXPECT_EQ(bytes(Link(mergeUnits(
+                {Link(mergeUnits({generatedUnit()})), anchorUnit()}))),
+            All);
+
+  // Two producers anchoring one range (a field and the oneof case it is) give
+  // two relations, sorted.
+  IndexUnit Second;
+  const int32_t Header =
+      addFile(Second, "bazel-out/w.pb.h", cpp_index::GENERATED);
+  const int32_t Case = addSymbol(Second, "proto:demo.W.choice", "choice");
+  addOcc(Second, Header, 100, 104, Case, cpp_index::GENERATES);
+  IndexUnit Both = mergeUnits({anchorUnit(), Second, generatedUnit()});
+  EXPECT_EQ(linkGenerated(Both), 3u);
+  EXPECT_EQ(
+      generatedFrom(Both, "c:@S@W@F@size#"),
+      (std::vector<std::string>{"proto:demo.W.choice", "proto:demo.W.size"}));
+}
+
+TEST(IndexMerge, GeneratesIsARoleName) {
+  EXPECT_EQ(roleNames(cpp_index::GENERATES | cpp_index::WRITE),
+            "WRITE|GENERATES");
+}

@@ -33,12 +33,15 @@ exports_files(["cpp_format.yaml"])
 # internal sub-packages for some (io, json) and knows nothing for others
 # (message.h, text_format.h).
 # gazelle:resolve_regexp cc ^google/protobuf/ @protobuf//:protobuf
+# gazelle:resolve cc google/protobuf/compiler/importer.h @protobuf//src/google/protobuf/compiler:importer
 #
 # The proto rules are written by hand (the proto language is not enabled, so
 # the cc_proto_library names stay ours); tell the C++ side where the generated
 # headers come from.
 # gazelle:resolve cc cpp_formatting/index.pb.h //cpp_formatting:index_cc_proto
 # gazelle:resolve cc code_browser/api.pb.h //code_browser:api_cc_proto
+# gazelle:resolve cc bazel/testdata/proto/inventory.pb.h //bazel/testdata:inventory_cc_proto
+# gazelle:resolve cc proto/unit.pb.h //bazel/testdata:unit_cc_proto
 #
 # Every test here takes its main() from gtest_main, which no #include names.
 # gtest_main exports gtest, so resolving the header to it gives a test both.

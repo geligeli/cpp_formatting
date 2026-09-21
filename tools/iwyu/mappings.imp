@@ -61,6 +61,10 @@
   # that the JSON functions return); it is not a dependency of ours.
   { include: ["\"absl/status/status.h\"", private, "\"google/protobuf/json/json.h\"", public] },
   { include: ["\"absl/status/status.h\"", private, "\"google/protobuf/util/json_util.h\"", public] },
+  # Likewise the absl::string_view that a descriptor's name() is and that
+  # the compiler front end's virtual functions take.
+  { include: ["\"absl/strings/string_view.h\"", private, "\"google/protobuf/descriptor.h\"", public] },
+  { include: ["\"absl/strings/string_view.h\"", private, "\"google/protobuf/compiler/importer.h\"", public] },
 
   # --- Boost -----------------------------------------------------------------
   # Beast is used through its two umbrella headers, as its documentation does.

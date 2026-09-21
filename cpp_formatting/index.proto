@@ -21,12 +21,25 @@
 //     `bazel-out/.../foo.pb.h`, `external/...`) -- never absolute, so a unit
 //     from a remote cache is usable on another machine.
 //
-// Extension hooks: any producer may emit an IndexUnit -- a proto-aware indexer
-// would describe `.proto` files with `Language.PROTO` symbols and let the C++
-// symbols of a generated `.pb.h` point back at them with a
-// `RelationKind.GENERATED_FROM` relation -- and the merger unions them all
-// under one symbol table keyed by USR.  `attributes` carries whatever a
-// producer wants to say that has no field yet.
+// Several languages, one index.  Any producer may emit an IndexUnit, and the
+// merger unions them all under one symbol table keyed by USR, knowing nothing
+// about any of them.  What keeps that composable:
+//
+//   * A producer describes its own language only, and its USRs live in a
+//     namespace of their own, named by prefix: `c:` is Clang's (C, C++, ObjC),
+//     `proto:` is a protobuf full name (`proto:demo.Widget.size`); `py:` and
+//     `rs:` are reserved.  `Symbol.language` says which it is.
+//   * A producer whose language has a code generator also emits *anchors*: an
+//     occurrence of its own symbol, with `Role.GENERATES`, on the range of the
+//     generated file that was generated from it -- taken from the generator's
+//     own metadata (protoc's `GeneratedCodeInfo`), so it names bytes of a
+//     file and never a symbol of the other language.
+//   * The merge joins the two: a symbol whose `canonical` range is exactly an
+//     anchor's gets a `RelationKind.GENERATED_FROM` relation to the anchor's
+//     symbol (`linkGenerated()` in cpp_index_merge.h).  That rule is the only
+//     thing that crosses languages, and it is the same for every pair.
+//
+// `attributes` carries whatever a producer wants to say that has no field yet.
 
 syntax = "proto3";
 
@@ -46,11 +59,14 @@ enum Language {
   C = 1;
   CXX = 2;
   OBJC = 3;
-  PROTO = 10;  // reserved for a proto-aware producer
+  PROTO = 10;  // a `.proto` file (`cpp_format --emit-proto-index`)
 }
 
-// Mirrors clang::index::SymbolKind so a producer maps it with a switch, but
-// the numbers are ours: a Clang enum change cannot silently change the format.
+// 1..30 mirror clang::index::SymbolKind so that producer maps it with a
+// switch, but the numbers are ours: a Clang enum change cannot silently change
+// the format.  Another language reuses a kind whose concept is the same (a
+// proto `enum` is an ENUM, its values ENUM_CONSTANTs, a message's field a
+// FIELD) and takes a new number, in a block of its own, where none is.
 enum SymbolKind {
   SYMBOL_KIND_UNSPECIFIED = 0;
   MODULE = 1;
@@ -83,6 +99,13 @@ enum SymbolKind {
   TEMPLATE_TEMPLATE_PARM = 28;
   NON_TYPE_TEMPLATE_PARM = 29;
   CONCEPT = 30;
+
+  // Protobuf.
+  MESSAGE = 40;
+  ONEOF = 41;
+  SERVICE = 42;
+  RPC = 43;
+  PACKAGE = 44;
 }
 
 enum SymbolSubKind {
@@ -137,6 +160,13 @@ enum Role {
   // argument (MACRO_ARGUMENT), is what says that argument is part of it.
   // Always alone: which role the formed occurrence has is on the invocation.
   PASTED = 4096;
+  // An anchor: the text of this range, in a generated file, was generated
+  // from the symbol -- a proto field's occurrence on `set_size` in a `.pb.h`.
+  // With WRITE when the generator says the generated thing modifies it (a
+  // setter, a `mutable_` accessor).  Never combined with a role above other
+  // than WRITE: an anchor is not a use of the symbol, and readers listing
+  // references leave it out.
+  GENERATES = 8192;
 }
 
 enum RelationKind {
@@ -151,10 +181,13 @@ enum RelationKind {
   CONTAINED_BY = 8;  // the occurrence is inside the related symbol's body
   IB_TYPE_OF = 9;
   SPECIALIZATION_OF = 10;
-  // Provenance: this symbol was generated from the related one (a message
-  // class in a `.pb.h` from the `message` in its `.proto`).  Reserved for a
-  // producer that indexes the source language.
+  // Provenance: this symbol was generated from the related one (`set_size`
+  // in a `.pb.h` from the field `size` in its `.proto`).  No producer writes
+  // it: the merge derives it from the GENERATES anchors (see the top).
   GENERATED_FROM = 100;
+  // 101 is kept for BINDS_TO: a hand-written binding (pybind11, PyO3, cxx),
+  // where both ends are first-class definitions rather than one generated
+  // from the other.
 }
 
 // How the occurrence's spelling relates to the preprocessor.
@@ -194,8 +227,9 @@ message Relation {
 }
 
 message Symbol {
-  // Clang's Unified Symbol Resolution string: the identity of the symbol
-  // across translation units, processes and machines.  `c:@N@demo@S@Widget`.
+  // The identity of the symbol across translation units, processes, machines
+  // and producers.  For C++ Clang's Unified Symbol Resolution string,
+  // `c:@N@demo@S@Widget`; for another language its own prefix (see the top).
   string usr = 1;
   string name = 2;  // `Widget`
   string qualified_name = 3;  // `demo::Widget`
@@ -255,6 +289,7 @@ message IndexUnit {
   // dependent name resolved through the primary template and confirmed by an
   // instantiation).
   repeated Occurrence occurrences = 6;
+  reserved 7;  // Index.per_file: how a reader tells the two messages apart
   // Sorted by (file, begin, end, name), unique; never overlaps a DEPENDENT
   // occurrence's range.
   repeated DependentToken pending = 8;

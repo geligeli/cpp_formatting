@@ -308,13 +308,6 @@ auto isSymbolLevel(cpp_index::RelationKind K) -> bool {
   }
 }
 
-auto fileKindFor(llvm::StringRef Path) -> cpp_index::FileKind {
-  if (llvm::sys::path::is_absolute(Path)) return cpp_index::SYSTEM;
-  if (Path.starts_with("bazel-out/")) return cpp_index::GENERATED;
-  if (Path.starts_with("external/")) return cpp_index::EXTERNAL;
-  return cpp_index::SOURCE;
-}
-
 /// The path a file is recorded under: its name as Clang opened it, dots
 /// removed (`-I.` yields `./x.h` while the main file is `x.h`), relative to
 /// the working directory where possible.
@@ -615,7 +608,7 @@ class IndexConsumer : public index::IndexDataConsumer {
       if (Inserted) {
         cpp_index::File* F = Unit.add_files();
         F->set_path(Path);
-        F->set_kind(fileKindFor(Path));
+        F->set_kind(fileKindForPath(Path));
       }
       Info.Index = PathIt->second;
       if (FID == MainFID) {

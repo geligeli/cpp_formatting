@@ -6,6 +6,7 @@
 // llvm:Support only, so it sits at the lint_lib layer -- `--merge-index` and
 // `--dump-index` never parse any C++.
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -26,6 +27,11 @@ enum class IndexFormat { Binary, Text, Json };
 /// Parses `binary`, `text` or `json`.
 auto parseIndexFormat(llvm::StringRef Name, IndexFormat& Out) -> bool;
 
+/// The kind of the file an index records as \p Path -- from the path alone,
+/// so that no two units (or producers) ever disagree about a file: absolute is
+/// SYSTEM, `bazel-out/` GENERATED, `external/` EXTERNAL, anything else SOURCE.
+auto fileKindForPath(llvm::StringRef Path) -> cpp_index::FileKind;
+
 // ---------------------------------------------------------------------------
 // Normalization and merging
 // ---------------------------------------------------------------------------
@@ -41,6 +47,16 @@ void normalizeUnit(cpp_index::IndexUnit& Unit);
 /// The union of several units, normalized -- so independent of their order.
 auto mergeUnits(const std::vector<cpp_index::IndexUnit>& Units)
     -> cpp_index::IndexUnit;
+
+/// The one rule that crosses languages (see index.proto): every symbol whose
+/// `canonical` range is exactly the range of a `GENERATES` occurrence -- an
+/// anchor a producer put on the generated file -- gets a `GENERATED_FROM`
+/// relation to the anchor's symbol.  \p Unit must be normalized and stays so.
+/// A pure function of the content that only ever adds relations between
+/// symbols the unit already has, so it is idempotent, a linked index is a
+/// valid merge input, and a unit without anchors is left untouched byte for
+/// byte.  Returns the number of relations added.
+auto linkGenerated(cpp_index::IndexUnit& Unit) -> size_t;
 
 /// Groups a (normalized) unit's occurrences per file, for offset lookup.
 auto buildIndex(const cpp_index::IndexUnit& Unit) -> cpp_index::Index;
@@ -99,8 +115,9 @@ auto mergeUnitFiles(const std::vector<std::string>& Paths,
                     const MergeOptions& Opts, cpp_index::IndexUnit& Out)
     -> bool;
 
-/// `cpp_format --merge-index`: reads every input, merges, groups per file and
-/// writes the Index to \p OutputPath.  Exit code: 0, or 2 when an input
+/// `cpp_format --merge-index`: reads every input, merges, links generated
+/// symbols to what they were generated from (linkGenerated), groups per file
+/// and writes the Index to \p OutputPath.  Exit code: 0, or 2 when an input
 /// cannot be read, 1 when the output cannot be written.
 auto runMergeIndex(const std::vector<std::string>& InputPaths,
                    llvm::StringRef OutputPath, IndexFormat Format,

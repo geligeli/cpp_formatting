@@ -17,6 +17,7 @@
 #include "cpp_formatting/lint_lib.h"
 #include "cpp_formatting/naming_convention.h"
 #include "cpp_formatting/output_mode.h"
+#include "cpp_formatting/proto_index_lib.h"
 #include "cpp_formatting/rename_variables_lib.h"
 #include "cpp_formatting/trailing_return_types_lib.h"
 #include "cpp_formatting/tu_driver.h"
@@ -418,13 +419,16 @@ bool addOwnedFilesFrom(StringRef ListFile, FileSet& FS) {
 // ---------------------------------------------------------------------------
 
 auto main(int argc, const char** argv) -> int {
-  // Aggregate and the two index sub-tools do not use the LibTooling
+  // Aggregate and the index sub-tools do not use the LibTooling
   // compilation-database machinery; dispatch them before CommonOptionsParser.
   for (int i = 1; i < argc; ++i) {
     const StringRef Arg(argv[i]);
     if (Arg == "--aggregate") return runAggregate(argc, argv);
     if (Arg == "--merge-index") return runMergeIndexCli(argc, argv);
     if (Arg == "--dump-index") return runDumpIndexCli(argc, argv);
+    // The protobuf producer of the index: a `.proto` is not C++ either.
+    if (Arg == "--emit-proto-index" || Arg.starts_with("--emit-proto-index="))
+      return runEmitProtoIndex(std::vector<std::string>(argv + 1, argv + argc));
   }
 
   auto ExpectedParser =
