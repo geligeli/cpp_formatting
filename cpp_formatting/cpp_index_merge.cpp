@@ -1,14 +1,17 @@
 #include "cpp_formatting/cpp_index_merge.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <fstream>
 #include <iterator>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -17,9 +20,12 @@
 #include "google/protobuf/io/zero_copy_stream_impl_lite.h"
 #include "google/protobuf/json/json.h"
 #include "google/protobuf/text_format.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/ErrorOr.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Process.h"
 #include "llvm/Support/raw_ostream.h"
 
 using cpp_index::Attribute;
@@ -189,11 +195,17 @@ void normalizeUnit(IndexUnit& Unit) {
     auto [It, Inserted] = FilesByPath.emplace(F.path(), F);
     if (!Inserted) mergeFileInto(F, It->second);
   }
+  // (Not std::distance on the map's iterators: that is linear per entry, and
+  // a merge of a repository's units has millions of entries.)
   std::vector<int32_t> FileMap;
-  FileMap.reserve(static_cast<size_t>(Unit.files_size()));
-  for (const File& F : Unit.files())
-    FileMap.push_back(static_cast<int32_t>(
-        std::distance(FilesByPath.begin(), FilesByPath.find(F.path()))));
+  {
+    llvm::StringMap<int32_t> NewIndex;
+    for (const auto& [Path, F] : FilesByPath)
+      NewIndex.try_emplace(Path, static_cast<int32_t>(NewIndex.size()));
+    FileMap.reserve(static_cast<size_t>(Unit.files_size()));
+    for (const File& F : Unit.files())
+      FileMap.push_back(NewIndex.lookup(F.path()));
+  }
   const auto mapFile = [&](int32_t Old) -> std::optional<int32_t> {
     if (Old < 0 || static_cast<size_t>(Old) >= FileMap.size())
       return std::nullopt;
@@ -207,10 +219,14 @@ void normalizeUnit(IndexUnit& Unit) {
     if (!Inserted) mergeSymbolInto(S, It->second);
   }
   std::vector<int32_t> SymbolMap;
-  SymbolMap.reserve(static_cast<size_t>(Unit.symbols_size()));
-  for (const Symbol& S : Unit.symbols())
-    SymbolMap.push_back(static_cast<int32_t>(
-        std::distance(SymbolsByUsr.begin(), SymbolsByUsr.find(S.usr()))));
+  {
+    llvm::StringMap<int32_t> NewIndex;
+    for (const auto& [Usr, S] : SymbolsByUsr)
+      NewIndex.try_emplace(Usr, static_cast<int32_t>(NewIndex.size()));
+    SymbolMap.reserve(static_cast<size_t>(Unit.symbols_size()));
+    for (const Symbol& S : Unit.symbols())
+      SymbolMap.push_back(NewIndex.lookup(S.usr()));
+  }
 
   // 3. Occurrences: remap, drop the unmappable, sort, dedup.
   std::vector<Occurrence> Occs;
@@ -492,16 +508,155 @@ auto writeMessage(const google::protobuf::Message& Message,
 // CLI entry points
 // ---------------------------------------------------------------------------
 
-auto runMergeIndex(const std::vector<std::string>& InputPaths,
-                   llvm::StringRef OutputPath, IndexFormat Format) -> int {
-  std::vector<IndexUnit> Units;
-  Units.reserve(InputPaths.size());
-  for (const std::string& P : InputPaths) {
-    IndexUnit U;
-    if (!readUnit(P, U)) return 2;
-    Units.push_back(std::move(U));
+namespace {
+
+/// The merge's progress line.  Called from the merging threads.
+class ProgressReporter {
+ public:
+  ProgressReporter(MergeProgress Mode, size_t Total)
+      : Total(Total), Tty(llvm::sys::Process::StandardErrIsDisplayed()) {
+    Enabled = Mode == MergeProgress::On || (Mode == MergeProgress::Auto && Tty);
   }
-  const Index Merged = buildIndex(mergeUnits(Units));
+
+  /// One more input has been read and folded.
+  void unitDone() {
+    if (!Enabled) return;
+    const std::lock_guard<std::mutex> Lock(Mutex);
+    ++Done;
+    // A terminal redraws one line; a log gets a line per tenth.
+    if (!Tty && Done != Total &&
+        (Done * 10) / Total == ((Done - 1) * 10) / Total)
+      return;
+    std::string Line =
+        "cpp_format: merging the index: " + std::to_string(Done) + "/" +
+        std::to_string(Total) + " units";
+    draw(Line);
+  }
+
+  /// A step that is not counted in units.
+  void step(const std::string& What) {
+    if (!Enabled) return;
+    const std::lock_guard<std::mutex> Lock(Mutex);
+    draw("cpp_format: merging the index: " + What);
+  }
+
+  /// Ends the redrawn line, so what is printed next starts on its own.
+  void finish() {
+    if (!Enabled || !Tty) return;
+    const std::lock_guard<std::mutex> Lock(Mutex);
+    llvm::errs() << "\r\033[K";
+    llvm::errs().flush();
+  }
+
+ private:
+  void draw(const std::string& Line) {
+    if (Tty)
+      llvm::errs() << "\r\033[K" << Line;
+    else
+      llvm::errs() << Line << "\n";
+    llvm::errs().flush();
+  }
+
+  size_t Total;
+  bool Tty;
+  bool Enabled = false;
+  std::mutex Mutex;
+  size_t Done = 0;
+};
+
+/// How many inputs a thread reads before it folds them into its partial unit:
+/// enough that the sort in normalizeUnit() is not repeated per input, few
+/// enough that a thread never holds more than this many parsed units.
+constexpr size_t kFoldBatch = 16;
+
+}  // namespace
+
+auto mergeUnitFiles(const std::vector<std::string>& Paths,
+                    const MergeOptions& Opts, IndexUnit& Out) -> bool {
+  ProgressReporter Progress(Opts.Progress, Paths.size());
+  const unsigned Cpus = std::max(1u, std::thread::hardware_concurrency());
+  const size_t Threads = std::max<size_t>(
+      1, std::min<size_t>(Opts.Jobs == 0 ? Cpus : Opts.Jobs,
+                          (Paths.size() + kFoldBatch - 1) / kFoldBatch));
+
+  // Contiguous runs of the inputs, of about equal size in bytes (a unit's cost
+  // is its size, and they differ by orders of magnitude).
+  std::vector<uint64_t> Sizes;
+  uint64_t TotalBytes = 0;
+  for (const std::string& P : Paths) {
+    uint64_t Size = 0;
+    if (llvm::sys::fs::file_size(P, Size)) Size = 0;  // readUnit() will say why
+    Sizes.push_back(Size + 1);
+    TotalBytes += Size + 1;
+  }
+  std::vector<std::pair<size_t, size_t>> Runs;  // [begin, end)
+  {
+    size_t Begin = 0;
+    uint64_t Seen = 0;
+    for (size_t I = 0; I < Paths.size(); ++I) {
+      Seen += Sizes[I];
+      if (Runs.size() + 1 < Threads &&
+          Seen >= TotalBytes * (Runs.size() + 1) / Threads) {
+        Runs.emplace_back(Begin, I + 1);
+        Begin = I + 1;
+      }
+    }
+    if (Begin < Paths.size() || Runs.empty())
+      Runs.emplace_back(Begin, Paths.size());
+  }
+
+  std::vector<IndexUnit> Partial(Runs.size());
+  std::atomic<bool> Failed{false};
+  const auto foldRun = [&](size_t R) {
+    std::vector<IndexUnit> Batch;  // [0] is what this run has folded so far
+    Batch.emplace_back();
+    const auto fold = [&] {
+      if (Batch.size() == 1) return;
+      IndexUnit Folded = mergeUnits(Batch);
+      Batch.clear();
+      Batch.push_back(std::move(Folded));
+    };
+    for (size_t I = Runs[R].first; I < Runs[R].second && !Failed; ++I) {
+      IndexUnit U;
+      if (!readUnit(Paths[I], U)) {
+        Failed = true;
+        return;
+      }
+      Batch.push_back(std::move(U));
+      if (Batch.size() > kFoldBatch) fold();
+      Progress.unitDone();
+    }
+    fold();
+    Partial[R] = std::move(Batch.front());
+  };
+  if (Runs.size() == 1) {
+    foldRun(0);
+  } else {
+    std::vector<std::thread> Workers;
+    for (size_t R = 0; R < Runs.size(); ++R) Workers.emplace_back(foldRun, R);
+    for (std::thread& W : Workers) W.join();
+  }
+  if (Failed) {
+    Progress.finish();
+    return false;
+  }
+  if (Partial.size() == 1) {
+    Out = std::move(Partial.front());
+  } else {
+    Progress.step("combining " + std::to_string(Partial.size()) +
+                  " partial indexes");
+    Out = mergeUnits(Partial);
+  }
+  Progress.finish();
+  return true;
+}
+
+auto runMergeIndex(const std::vector<std::string>& InputPaths,
+                   llvm::StringRef OutputPath, IndexFormat Format,
+                   const MergeOptions& Opts) -> int {
+  IndexUnit Unit;
+  if (!mergeUnitFiles(InputPaths, Opts, Unit)) return 2;
+  const Index Merged = buildIndex(Unit);
   return writeMessage(Merged, OutputPath, Format) ? 0 : 1;
 }
 

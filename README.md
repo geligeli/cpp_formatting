@@ -591,7 +591,7 @@ bazel run //cpp_formatting:cpp_format -- \
 | `--format=<fmt>` | Output format for `--lint`: `text` (default), `sarif`, or `diff` |
 | `--jobs=<N>` / `-j<N>` | Translation units to parse in parallel. `0` (default) uses every CPU; larger values are capped at the CPU count. The result does not depend on it (see [Parallel parsing](#parallel-parsing)). |
 | `--emit-index=<file>` | Index mode: parse the sources and write one `cpp_index.IndexUnit` (binary protobuf). Runs no formatting pass and takes no config; see [Symbol index](#symbol-index). |
-| `--merge-index --output=<file> [--records-from=<list>] <unit.pb>...` | Merge index units (or earlier indexes) into one `cpp_index.Index`. `--format=binary\|text\|json` picks the encoding (default binary). |
+| `--merge-index --output=<file> [--records-from=<list>] <unit.pb>...` | Merge index units (or earlier indexes) into one `cpp_index.Index`. `--format=binary\|text\|json` picks the encoding (default binary). The merge runs on every CPU (`--jobs=N`/`-jN` to limit it; the bytes do not depend on it) and shows its progress on a terminal (`--progress` forces it, a line per tenth when stderr is not one; `--no-progress` silences it). |
 | `--dump-index [--format=text\|json\|binary] [--lookup=<path>:<offset>] <file>` | Print a unit or index, or list the symbol at a byte offset and every occurrence of it. |
 
 **Pass ordering:** `normalize_variables` rules are applied first (in the order
@@ -986,7 +986,10 @@ a header-only dependency by its dependents' TUs. A `no-cpp-index` tag opts a
 target out. Then
 `cpp_format --merge-index` unions the units: files by path, symbols by USR,
 identical occurrences deduplicated. `cpp_format.sh index [pattern]` does both
-for the targets under a pattern -- the whole repository by default. An index is
+for the targets under a pattern -- the whole repository by default. It builds
+with `--keep_going`: a target that does not compile costs the index that
+target's translation units (it says how many), not the index. (Formatting stays
+all-or-nothing: a rename must see every reference.) An index is
 itself a valid merge input, so it can be extended with further units.
 
 **Browsing it.** [code_browser/](code_browser/) is an HTTP server that serves

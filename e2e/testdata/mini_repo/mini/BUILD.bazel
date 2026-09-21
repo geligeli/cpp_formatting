@@ -50,3 +50,16 @@ cc_library(
     srcs = ["other_platform.cpp"],
     target_compatible_with = ["@platforms//:incompatible"],
 )
+
+# A target that does not compile (`manual`, so `//...` leaves it alone, and
+# `no-cpp-format`, because formatting is all-or-nothing).  The index is not:
+# `index` and `browse` build with --keep_going, index every translation unit
+# that does parse, and say that this one is missing.
+cc_library(
+    name = "broken",
+    srcs = ["broken.cpp"],
+    tags = [
+        "manual",
+        "no-cpp-format",
+    ],
+)

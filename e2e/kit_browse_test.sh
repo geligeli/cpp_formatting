@@ -214,6 +214,12 @@ check_consumer() {  # <flavor>
   # one, so "the whole repository" has to mean "what can be built here".
   grep -q "cpp_format: skipping //mini:other_platform (incompatible" "$log" \
     || { tail -20 "$log" >&2; fail "[$flavor] the incompatible target was not skipped"; }
+  # ... and a target that does not compile: the build keeps going, and the
+  # index covers everything else.
+  grep -q "cpp_format: some targets did not build .*; indexing the rest" "$log" \
+    || { tail -20 "$log" >&2; fail "[$flavor] a broken target stopped the index"; }
+  grep -q "cpp_format: 1 translation unit(s) are not in the index" "$log" \
+    || { tail -20 "$log" >&2; fail "[$flavor] the missing translation unit was not reported"; }
   grep -q "cpp_format: wrote $ws/index.pb" "$log" || fail "[$flavor] the index was not written"
   grep -q "code_browser: importing" "$log" || fail "[$flavor] the first run did not import the index"
   # What the user is told before the server starts: which binary, the exact

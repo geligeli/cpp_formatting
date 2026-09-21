@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <initializer_list>
 #include <string>
 #include <vector>
 
@@ -248,6 +249,77 @@ TEST(IndexMerge, ReadUnitAcceptsBothMessages) {
   EXPECT_FALSE(readUnit("/nonexistent/dir/unit.pb", Missing));
   llvm::sys::fs::remove(UnitPath);
   llvm::sys::fs::remove(IndexPath);
+}
+
+// The threaded merge is a reduction over contiguous runs of the inputs, and
+// has to give the bytes of the one-shot merge whatever the thread count --
+// including for the one order-dependent rule (the first duplicate that has a
+// field fills it) and for a pending token that a unit in *another* run
+// resolves.
+TEST(IndexMerge, MergeUnitFilesIsTheSameForAnyThreadCount) {
+  std::vector<IndexUnit> Units;
+  std::vector<std::string> Paths;
+  for (int I = 0; I < 80; ++I) {
+    IndexUnit U;
+    U.add_translation_units("tu" + std::to_string(I) + ".cpp");
+    const int32_t Common = addFile(U, "common.h");
+    const int32_t Own = addFile(U, "tu" + std::to_string(I) + ".cpp");
+    // Unnamed in most units; the first unit that names it wins.
+    const int32_t Shared =
+        addSymbol(U, "c:@shared", I % 3 == 1 ? "name" + std::to_string(I) : "");
+    const int32_t Local = addSymbol(U, "c:@local" + std::to_string(I), "local");
+    addOcc(U, Common, 10, 16, Shared, cpp_index::DECLARATION);
+    addOcc(U, Own, 5, 10, Shared, cpp_index::REFERENCE);
+    addOcc(U, Own, 20, 25, Local, cpp_index::DEFINITION);
+    if (I == 70) {
+      addOcc(U, Common, 40, 45, Local,
+             cpp_index::REFERENCE | cpp_index::DEPENDENT);
+    } else {
+      cpp_index::DependentToken* P = U.add_pending();
+      P->set_file(Common);
+      P->set_begin(40);
+      P->set_end(45);
+      P->set_name("dep");
+      P = U.add_pending();  // never resolved
+      P->set_file(Common);
+      P->set_begin(50);
+      P->set_end(55);
+      P->set_name("open");
+    }
+    llvm::SmallString<128> Path;
+    int FD = 0;
+    ASSERT_FALSE(llvm::sys::fs::createTemporaryFile("unit", "pb", FD, Path));
+    llvm::sys::fs::closeFile(FD);
+    ASSERT_TRUE(writeMessage(U, Path, IndexFormat::Binary));
+    Paths.push_back(std::string(Path));
+    Units.push_back(std::move(U));
+  }
+  const IndexUnit Expected = mergeUnits(Units);
+  ASSERT_EQ(Expected.pending_size(), 1);
+  EXPECT_EQ(Expected.pending(0).name(), "open");
+  for (const unsigned Jobs : {1u, 2u, 5u, 64u}) {
+    MergeOptions Opts;
+    Opts.Jobs = Jobs;
+    Opts.Progress = MergeProgress::Off;
+    IndexUnit Got;
+    ASSERT_TRUE(mergeUnitFiles(Paths, Opts, Got));
+    EXPECT_EQ(bytes(Got), bytes(Expected)) << "jobs=" << Jobs;
+  }
+  bool Named = false;
+  for (const Symbol& S : Expected.symbols())
+    if (S.usr() == "c:@shared") {
+      EXPECT_EQ(S.name(), "name1");
+      Named = true;
+    }
+  EXPECT_TRUE(Named);
+
+  Paths.push_back("/nonexistent/unit.pb");
+  IndexUnit Got;
+  MergeOptions Opts;
+  Opts.Progress = MergeProgress::Off;
+  EXPECT_FALSE(mergeUnitFiles(Paths, Opts, Got));
+  Paths.pop_back();
+  for (const std::string& P : Paths) llvm::sys::fs::remove(P);
 }
 
 TEST(IndexMerge, UnknownEnumValueSurvivesARoundTrip) {

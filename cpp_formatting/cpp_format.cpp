@@ -265,10 +265,29 @@ auto parseFormatFlag(StringRef Value, IndexFormat& Out) -> bool {
 auto runMergeIndexCli(int argc, const char** argv) -> int {
   std::string Output;
   IndexFormat Format = IndexFormat::Binary;
+  MergeOptions Opts;
   std::vector<std::string> Inputs;
   for (int i = 1; i < argc; ++i) {
     StringRef Arg(argv[i]);
     if (Arg == "--merge-index") continue;
+    if (Arg == "--progress") {
+      Opts.Progress = MergeProgress::On;
+      continue;
+    }
+    if (Arg == "--no-progress") {
+      Opts.Progress = MergeProgress::Off;
+      continue;
+    }
+    if (Arg.starts_with("--jobs=") || (Arg.starts_with("-j") && Arg != "-j")) {
+      const StringRef N = Arg.starts_with("--jobs=")
+                              ? Arg.drop_front(std::string("--jobs=").size())
+                              : Arg.drop_front(2);
+      if (N.getAsInteger(10, Opts.Jobs)) {
+        llvm::errs() << "bad thread count '" << N << "'\n";
+        return 2;
+      }
+      continue;
+    }
     if (Arg == "--output" || Arg == "-o") {
       if (i + 1 >= argc) {
         llvm::errs() << Arg << " requires a file argument\n";
@@ -294,7 +313,8 @@ auto runMergeIndexCli(int argc, const char** argv) -> int {
     } else if (Arg.starts_with("-")) {
       llvm::errs() << "unknown --merge-index flag '" << Arg
                    << "' (expected --output=<file>, --format=<binary|text|"
-                      "json>, or --records-from=<file>)\n";
+                      "json>, --records-from=<file>, --jobs=<N> or "
+                      "--[no-]progress)\n";
       return 2;
     } else {
       Inputs.push_back(Arg.str());
@@ -309,7 +329,7 @@ auto runMergeIndexCli(int argc, const char** argv) -> int {
                     "(positional, or listed in --records-from=<file>)\n";
     return 2;
   }
-  return runMergeIndex(Inputs, Output, Format);
+  return runMergeIndex(Inputs, Output, Format, Opts);
 }
 
 auto runDumpIndexCli(int argc, const char** argv) -> int {

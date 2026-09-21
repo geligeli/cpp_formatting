@@ -76,11 +76,35 @@ auto writeMessage(const google::protobuf::Message& Message,
 // CLI entry points
 // ---------------------------------------------------------------------------
 
+/// Whether `--merge-index` reports how far it is, on stderr.
+enum class MergeProgress {
+  Auto,  ///< when stderr is a terminal: one line, redrawn
+  On,    ///< always; a line per step when stderr is not a terminal
+  Off,
+};
+
+struct MergeOptions {
+  unsigned Jobs = 0;  ///< threads; 0 = one per CPU
+  MergeProgress Progress = MergeProgress::Auto;
+};
+
+/// Reads and merges the units at \p Paths on `Opts.Jobs` threads.  The merge
+/// is a reduction: each thread folds a contiguous run of the inputs into one
+/// normalized unit, and the partial units are merged in input order -- which
+/// keeps the one order-dependent rule (a symbol's empty field is filled from
+/// the *first* duplicate that has it) exactly as mergeUnits() over all of them
+/// applies it, so the result is byte-identical for any number of threads.
+/// Returns false (after a diagnostic) when an input cannot be read.
+auto mergeUnitFiles(const std::vector<std::string>& Paths,
+                    const MergeOptions& Opts, cpp_index::IndexUnit& Out)
+    -> bool;
+
 /// `cpp_format --merge-index`: reads every input, merges, groups per file and
 /// writes the Index to \p OutputPath.  Exit code: 0, or 2 when an input
 /// cannot be read, 1 when the output cannot be written.
 auto runMergeIndex(const std::vector<std::string>& InputPaths,
-                   llvm::StringRef OutputPath, IndexFormat Format) -> int;
+                   llvm::StringRef OutputPath, IndexFormat Format,
+                   const MergeOptions& Opts = {}) -> int;
 
 /// `cpp_format --dump-index`: reads one unit or index and either prints it in
 /// \p Format, or, given \p Lookup = (path, offset), prints the symbol(s) at

@@ -219,8 +219,10 @@ if [[ "$mode" == compile_commands ]]; then
   # compiled and no edit-record action runs.  Each target's fragment is at a
   # deterministic path -- //pkg:name -> <bazel-bin>/pkg/name.compile_commands.jsonl;
   # source-less targets write none.
-  "$BAZEL" build "${targets[@]}" \
-    --aspects="$ASPECT" --output_groups=cpp_format_compile_commands >/dev/null
+  # --keep_going: the entries of the targets that analyze are still written.
+  "$BAZEL" build --keep_going "${targets[@]}" \
+    --aspects="$ASPECT" --output_groups=cpp_format_compile_commands >/dev/null \
+    || echo "cpp_format: some targets did not build; their entries are missing" >&2
   frags=()
   for t in "${targets[@]}"; do
     rel="${t#//}"
@@ -243,8 +245,24 @@ if [[ "$mode" == index || "$mode" == browse ]]; then
 else
   aspect="$ASPECT"; group=cpp_format_edits; manifest_suffix=cpp_format.manifest
 fi
-"$BAZEL" build "${targets[@]}" \
-  --aspects="$aspect" --output_groups="+$group" >/dev/null
+# --keep_going: one target that does not build must not hide what is wrong
+# with the others -- and for the index it need not stop anything: a symbol
+# index of everything that does parse is worth having (a repository always has
+# some target that is broken on this machine), so `index` and `browse` go on
+# with the units that were written and say how many are missing.  Formatting
+# stays all-or-nothing: a translation unit that was not parsed is one whose
+# references nobody saw, and a rename that skips them is half-applied.
+build_rc=0
+"$BAZEL" build --keep_going "${targets[@]}" \
+  --aspects="$aspect" --output_groups="+$group" >/dev/null || build_rc=$?
+if [[ $build_rc -ne 0 ]]; then
+  if [[ "$mode" == index || "$mode" == browse ]]; then
+    echo "cpp_format: some targets did not build (bazel exited $build_rc); indexing the rest" >&2
+  else
+    echo "cpp_format: the build failed (bazel exited $build_rc); nothing was formatted" >&2
+    exit "$build_rc"
+  fi
+fi
 
 # 3. Resolve the cpp_format binary and the emitted record files.
 #
@@ -280,6 +298,7 @@ bin="$(resolve_binary "$BIN_LABEL")"
 # worth of them does not fit on a command line.
 list="$(mktemp)"
 trap 'rm -f "$list"' EXIT
+missing=0
 for t in "${targets[@]}"; do
   rel="${t#//}"
   pkg="${rel%%:*}"
@@ -287,9 +306,19 @@ for t in "${targets[@]}"; do
   manifest="$bazel_bin/$pkg/$name.$manifest_suffix"
   [[ -f "$manifest" ]] || continue
   while IFS= read -r rec; do
-    [[ -n "$rec" ]] && printf '%s\n' "$exec_root/$rec"
+    [[ -n "$rec" ]] || continue
+    # A failed build (index modes only, see above) leaves the manifest of a
+    # target without some of the records it lists.
+    if [[ $build_rc -ne 0 && ! -f "$exec_root/$rec" ]]; then
+      missing=$((missing + 1))
+      continue
+    fi
+    printf '%s\n' "$exec_root/$rec"
   done < "$manifest" >> "$list"
 done
+if [[ $missing -gt 0 ]]; then
+  echo "cpp_format: $missing translation unit(s) are not in the index: they did not build" >&2
+fi
 if [[ ! -s "$list" ]]; then
   echo "cpp_format: no records emitted for $pattern" >&2
   exit 0
