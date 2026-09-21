@@ -11,4 +11,7 @@ cpp_format_install(
     visibility = ["//visibility:public"],
 )
 
-exports_files(["cpp_format.sh"])
+exports_files([
+    "cpp_format.sh",
+    "proto_index.bzl",
+])

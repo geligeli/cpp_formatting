@@ -13,6 +13,7 @@ pattern such as `//...`, which is why nothing like this is offered to users.
 """
 
 load("//bazel:cpp_format.bzl", "CppFormatEditsInfo", "CppIndexInfo", "cpp_format_aspect", "cpp_index_aspect")
+load("//bazel:proto_index.bzl", "ProtoIndexInfo", "proto_index_aspect")
 
 def _files_rule(aspect, provider, field, doc):
     def _impl(ctx):
@@ -47,4 +48,11 @@ cpp_index_units = _files_rule(
     CppIndexInfo,
     "units",
     "The per-translation-unit index units of `deps`, transitively (what `--merge-index` merges).",
+)
+
+proto_index_units = _files_rule(
+    proto_index_aspect,
+    ProtoIndexInfo,
+    "units",
+    "The per-.proto index units of the proto_library `deps`, transitively.",
 )

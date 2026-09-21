@@ -1,0 +1,11 @@
+// Part of the cross-language index fixture (see ../BUILD.bazel): an enum in a
+// file of its own, imported under a stripped prefix.
+syntax = "proto3";
+
+package demo.inventory;
+
+enum Unit {
+  UNIT_UNSPECIFIED = 0;
+  PIECE = 1;
+  KILOGRAM = 2;
+}

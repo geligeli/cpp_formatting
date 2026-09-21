@@ -219,7 +219,7 @@ wire() {
   #    a symlink out of the workspace.  //third_party/cpp_format is the layout
   #    cpp_format.sh already defaults to, so no env is strictly required.
   mkdir -p "$src/third_party/cpp_format" "$src/tools"
-  cp "$REPO_ROOT/bazel/integration"/{cpp_format.bzl,extensions.bzl,BUILD.bazel,cpp_format.sh} \
+  cp "$REPO_ROOT/bazel/integration"/{cpp_format.bzl,proto_index.bzl,extensions.bzl,BUILD.bazel,cpp_format.sh} \
      "$src/third_party/cpp_format/"
   install -m 0755 "$REPO_ROOT/bazel/integration/cpp_format.sh" "$src/tools/cpp_format.sh"
 

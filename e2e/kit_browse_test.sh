@@ -2,6 +2,7 @@
 # The prebuilt kit's `cpp_format.sh browse`, in a consumer workspace.
 #
 #   e2e/kit_browse_test.sh [--tool=PATH] [--browser=PATH] [--work-dir=DIR] [--keep]
+#                           [--no-protos]
 #
 # A consumer of bazel/integration/ gets the code browser as a release asset,
 # through the kit's module extension.  That path cannot be a `bazel test` here:
@@ -35,20 +36,35 @@
 #   * the launched server serves *the consumer's checkout*: /api/repo names it
 #     as root, /api/file returns its bytes, and a cross-target reference
 #     (geometry.cpp -> a member declared in shapes.h) is in the index;
+#   * neither loads the index's second producer, for .proto files: it is an
+#     aspect in a file of its own, the only one in the kit that loads
+#     @protobuf -- a repository the vendored consumer does not have -- and the
+#     script names it only when the repository has a proto_library;
 #   * a release without the browser asset fails with a message that says so;
 #   * with no release() tag at all, `bazel mod deps` still works, and the first
 #     thing that needs the binary says which line to add.
+#
+# And, unless --no-protos (it builds protoc and the protobuf runtime in the
+# consumer's own output base, which takes minutes), both ways again over
+# e2e/testdata/proto_repo, a consumer with a proto_library, a cc_proto_library
+# and a C++ user of the generated code:
+#   * `browse` indexes the .proto with the kit's proto_index aspect -- protoc's
+#     annotations, the prebuilt cpp_format's --emit-proto-index -- next to the
+#     C++, and the server answers both directions of the link: the field lists
+#     the accessors generated from it and their uses in main.cpp, and the
+#     accessor's summary names the field.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TOOL="" BROWSER="" WORK="" KEEP=0
+TOOL="" BROWSER="" WORK="" KEEP=0 PROTOS=1
 for arg in "$@"; do
   case "$arg" in
     --tool=*) TOOL="${arg#*=}" ;;
     --browser=*) BROWSER="${arg#*=}" ;;
     --work-dir=*) WORK="${arg#*=}" ;;
     --keep) KEEP=1 ;;
-    -h|--help) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --no-protos) PROTOS=0 ;;
+    -h|--help) sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -63,7 +79,8 @@ server=""
 cleanup() {
   [[ -n "$server" ]] && kill "$server" 2>/dev/null || true
   if [[ "$KEEP" -eq 0 ]]; then
-    for ws in "$WORK"/import "$WORK"/vendor "$WORK"/stale "$WORK"/untagged; do
+    for ws in "$WORK"/import "$WORK"/vendor "$WORK"/stale "$WORK"/untagged \
+        "$WORK"/proto-import "$WORK"/proto-vendor; do
       [[ -d "$ws" ]] && (cd "$ws" && consumer_bazel clean --expunge >/dev/null 2>&1) || true
     done
     chmod -R u+w "$WORK" 2>/dev/null || true
@@ -132,10 +149,10 @@ install -m 0755 "$TOOL" "$WORK/release/$VERSION-nobrowser/cpp_format-$plat"
 # ---------------------------------------------------------------------------
 # 2. Consumer workspaces.
 # ---------------------------------------------------------------------------
-make_consumer() {  # <flavor> <version>
-  local flavor="$1" version="$2" ws="$WORK/$1"
+make_consumer() {  # <flavor> <version> [<workspace dir name> [<fixture>]]
+  local flavor="$1" version="$2" ws="$WORK/${3:-$1}" fixture="${4:-mini_repo}"
   rm -rf "$ws"
-  cp -r "$REPO_ROOT/e2e/testdata/mini_repo" "$ws"
+  cp -r "$REPO_ROOT/e2e/testdata/$fixture" "$ws"
   # Without a .bazelversion bazelisk takes the newest Bazel, and the result of
   # this test would change with it.  BAZELVERSION=latest is how to ask for that
   # on purpose (it is how the kit's Bazel 9 breakage was found).
@@ -146,7 +163,7 @@ make_consumer() {  # <flavor> <version>
   [[ "$version" == none ]] && release="# (no cpp_format.release() tag)"
   if [[ "$flavor" == vendor ]]; then
     mkdir -p "$ws/third_party/cpp_format"
-    cp "$REPO_ROOT/bazel/integration"/{cpp_format.bzl,extensions.bzl,BUILD.bazel,cpp_format.sh} \
+    cp "$REPO_ROOT/bazel/integration"/{cpp_format.bzl,proto_index.bzl,extensions.bzl,BUILD.bazel,cpp_format.sh} \
        "$ws/third_party/cpp_format/"
     cat >> "$ws/MODULE.bazel" <<EOF
 
@@ -222,6 +239,12 @@ check_consumer() {  # <flavor>
     || { tail -20 "$log" >&2; fail "[$flavor] the missing translation unit was not reported"; }
   grep -q "cpp_format: wrote $ws/index.pb" "$log" || fail "[$flavor] the index was not written"
   grep -q "code_browser: importing" "$log" || fail "[$flavor] the first run did not import the index"
+  # No proto_library here, so the .proto producer's aspect was never named,
+  # and its .bzl is the only thing in the kit that loads @protobuf.  The
+  # vendored flavor is what pins that: this consumer has no repository called
+  # protobuf, so naming the aspect would have failed the build above.  (Whether
+  # protobuf was *fetched* says nothing: Bazel 8 fetches it for its own
+  # autoloads in any workspace.)
   # What the user is told before the server starts: which binary, the exact
   # command line (so it can be restarted by hand), and how to update the index.
   grep -q "cpp_format: code browser binary: /.*code_browser" "$log" \
@@ -281,6 +304,83 @@ for flavor in import vendor; do
   make_consumer "$flavor" "$VERSION"
   check_consumer "$flavor"
 done
+
+# ---------------------------------------------------------------------------
+# 2b. A consumer with a .proto: the second producer, and the link.
+# ---------------------------------------------------------------------------
+# The value of a (proto3 JSON, pretty-printed) integer field in a response.
+json_int() {  # <file> <field>
+  grep -o "\"$2\": *[0-9]*" "$1" | head -1 | grep -o '[0-9]*$'
+}
+
+check_proto_consumer() {  # <flavor>
+  local flavor="$1" name="proto-$1" ws="$WORK/proto-$1" log="$WORK/proto-$1.log"
+  make_consumer "$flavor" "$VERSION" "$name" proto_repo
+  # protoc and the protobuf runtime are compiled once for the two flavors.
+  printf 'build --disk_cache=%s\n' "$WORK/disk_cache" > "$ws/.bazelrc"
+  local script
+  script="$(consumer_script "$name" "$flavor")"
+
+  note "[$name] cpp_format.sh browse indexes the .proto and serves the link"
+  local port="$WORK/$name.port"
+  rm -f "$port"
+  (cd "$ws" && BAZEL="$WORK/bazel" "$script" browse --port=0 --port-file="$port" \
+      --log-requests=false) >"$log" 2>&1 &
+  server=$!
+  # The first build compiles protobuf: allow for it.
+  for _ in $(seq 1 18000); do
+    [[ -s "$port" ]] && break
+    kill -0 "$server" 2>/dev/null || break
+    sleep 0.1
+  done
+  [[ -s "$port" ]] || { tail -40 "$log" >&2; fail "[$name] the server did not start"; }
+  if grep -q "cpp_format: some targets did not build\|cpp_format: some .proto files were not indexed\|has no --emit-proto-index" "$log"; then
+    tail -40 "$log" >&2
+    fail "[$name] an index action failed"
+  fi
+  local url="http://127.0.0.1:$(cat "$port")"
+
+  # The .proto is a file of the tree, under its real path.
+  curl -fsS "$url/api/files?prefix=shop" > "$WORK/$name.files.json" || fail "[$name] /api/files"
+  grep -q '"path": *"shop/shop.proto"' "$WORK/$name.files.json" \
+    || { cat "$WORK/$name.files.json" >&2; fail "[$name] shop.proto is not in the tree"; }
+
+  # proto -> C++: the field knows the accessors generated from it...
+  curl -fsS "$url/api/symbol?usr=proto:shop.Item.quantity" > "$WORK/$name.field.json" \
+    || fail "[$name] the proto field is not in the index"
+  grep -q '"language": *"PROTO"' "$WORK/$name.field.json" || fail "[$name] the field is not a PROTO symbol"
+  grep -q '"kind": *"GENERATED_FROM"' "$WORK/$name.field.json" \
+    || { cat "$WORK/$name.field.json" >&2; fail "[$name] nothing is linked to the proto field"; }
+  grep -q '"qualified_name": *"shop::Item::set_quantity"' "$WORK/$name.field.json" \
+    || { cat "$WORK/$name.field.json" >&2; fail "[$name] the setter is not linked to the field"; }
+  # ... and its references are theirs too: main.cpp reads it twice and sets it.
+  local field
+  field="$(json_int "$WORK/$name.field.json" id)"
+  curl -fsS "$url/api/refs/$field?expand=generated" > "$WORK/$name.refs.json" || fail "[$name] /api/refs"
+  grep -q '"path": *"shop/main.cpp"' "$WORK/$name.refs.json" \
+    || { cat "$WORK/$name.refs.json" >&2; fail "[$name] the uses in main.cpp are not the field's"; }
+  [[ "$(json_int "$WORK/$name.refs.json" total)" -eq 4 ]] \
+    || { cat "$WORK/$name.refs.json" >&2; fail "[$name] expected the definition and three uses"; }
+
+  # C++ -> proto: what main.cpp's tokens are annotated with names the field.
+  curl -fsS "$url/api/annotations?path=shop/main.cpp" > "$WORK/$name.ann.json" || fail "[$name] /api/annotations"
+  grep -q '"usr": *"proto:shop.Item.name"' "$WORK/$name.ann.json" \
+    || { head -c 600 "$WORK/$name.ann.json" >&2; fail "[$name] set_name does not lead to the proto field"; }
+
+  local child signalled=0
+  for child in $(children_of "$server"); do
+    kill -INT "$child" 2>/dev/null && signalled=1
+  done
+  [[ "$signalled" -eq 1 ]] || kill -INT "$server" 2>/dev/null || true
+  wait "$server" || true
+  server=""
+}
+
+if [[ "$PROTOS" -eq 1 ]]; then
+  for flavor in import vendor; do
+    check_proto_consumer "$flavor"
+  done
+fi
 
 # ---------------------------------------------------------------------------
 # 3. A release that predates the browser says so.

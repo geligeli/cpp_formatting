@@ -1,0 +1,24 @@
+load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+
+# A consumer with a .proto: what `cpp_format.sh browse` has to index with the
+# second producer (the proto_index aspect of the kit) and link to the C++ that
+# cc_proto_library generates from it.  e2e/kit_browse_test.sh is its only user;
+# it is a fixture of its own so that mini_repo, which every formatting scenario
+# copies, does not start building protobuf.
+proto_library(
+    name = "shop_proto",
+    srcs = ["shop.proto"],
+)
+
+cc_proto_library(
+    name = "shop_cc_proto",
+    deps = [":shop_proto"],
+)
+
+cc_binary(
+    name = "shop",
+    srcs = ["main.cpp"],
+    deps = [":shop_cc_proto"],
+)

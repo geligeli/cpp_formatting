@@ -1,0 +1,26 @@
+// The cross-language index fixture (see ../BUILD.bazel): a message with a
+// nested message, a oneof and a map, used from C++ in ../inventory_user.cpp.
+syntax = "proto3";
+
+package demo.inventory;
+
+// unit_proto strips "/bazel/testdata", so this is not the file's real path:
+// the index has to map it back.
+import "proto/unit.proto";
+
+message Inventory {
+  message Slot {
+    string label = 1;
+    int32 count = 2;
+    Unit unit = 3;
+  }
+
+  repeated Slot slots = 1;
+
+  oneof owner {
+    string person = 2;
+    string team = 3;
+  }
+
+  map<string, Slot> by_label = 4;
+}

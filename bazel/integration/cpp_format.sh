@@ -47,6 +47,13 @@
 #   compile_commands entries and is indexed); `no-cpp-index` excludes it from
 #   the index.  COMPILE_COMMANDS_OUT and INDEX_OUT override the output paths.
 #
+#   The index spans languages: `index` and `browse` also index the .proto
+#   files of every proto_library under the pattern, and link the C++ that
+#   cc_proto_library generates from them to the message, field or enumerator
+#   it came from -- in the browser, a click on a field in a .proto lists its
+#   uses in C++, and a click on `msg.set_size(1)` leads to the field.
+#   CPP_FORMAT_INDEX_PROTOS=0 leaves the .proto files out.
+#
 #   A target this platform cannot build (target_compatible_with) is skipped,
 #   with a note, in every mode.  Every build is --keep_going: index, browse and
 #   compile_commands go on without the targets that fail (and say what is
@@ -163,6 +170,9 @@ self="${CPP_FORMAT_SH_NAME:-$0}"
 # derived from ASPECT (baked in by `install`, or given via env); CPP_INDEX_ASPECT
 # overrides it outright.
 INDEX_ASPECT="${CPP_INDEX_ASPECT:-${ASPECT%\%*}%cpp_index_aspect}"
+# The index's other producers each have a .bzl of their own next to it (so
+# that a repository without the language never loads its rules).
+PROTO_INDEX_ASPECT="${CPP_PROTO_INDEX_ASPECT:-${ASPECT%:*}:proto_index.bzl%proto_index_aspect}"
 
 # 1. Enumerate first-party cc_* targets under the pattern: only those, so the
 #    aspect is applied to each source target exactly once, at the top level
@@ -177,7 +187,14 @@ case "$mode" in
   *) query="$query except attr(tags, 'no-cpp-format', $pattern)" ;;
 esac
 mapfile -t targets < <("$BAZEL" query "$query" 2>/dev/null)
-if [[ ${#targets[@]} -eq 0 ]]; then
+# The index has a producer per language, each with its own kind of target.
+proto_targets=()
+if [[ ( "$mode" == index || "$mode" == browse ) && "${CPP_FORMAT_INDEX_PROTOS:-1}" != 0 ]]; then
+  mapfile -t proto_targets < <("$BAZEL" query \
+    "kind('proto_library rule', $pattern) except attr(tags, 'no-cpp-index', $pattern)" \
+    2>/dev/null)
+fi
+if [[ ${#targets[@]} -eq 0 && ${#proto_targets[@]} -eq 0 ]]; then
   echo "cpp_format: no cc targets under $pattern" >&2
   exit 0
 fi
@@ -192,7 +209,7 @@ fi
 # If the cquery itself fails, the list stays as it is and the build below
 # reports why.
 query_file="$(mktemp)"
-{ echo 'set('; printf '"%s"\n' "${targets[@]}"; echo ')'; } > "$query_file"
+{ echo 'set('; printf '"%s"\n' "${targets[@]}" "${proto_targets[@]}"; echo ')'; } > "$query_file"
 if compatible="$("$BAZEL" cquery --query_file="$query_file" --output=starlark \
     --starlark:expr='"" if "IncompatiblePlatformProvider" in providers(target) else str(target.label)' \
     2>/dev/null)"; then
@@ -210,9 +227,18 @@ if compatible="$("$BAZEL" cquery --query_file="$query_file" --output=starlark \
     fi
   done
   targets=("${kept[@]}")
+  kept=()
+  for t in "${proto_targets[@]}"; do
+    if [[ -n "${is_compatible[$t]:-}" ]]; then
+      kept+=("$t")
+    else
+      echo "cpp_format: skipping $t (incompatible with this platform)" >&2
+    fi
+  done
+  proto_targets=("${kept[@]}")
 fi
 rm -f "$query_file"
-if [[ ${#targets[@]} -eq 0 ]]; then
+if [[ ${#targets[@]} -eq 0 && ${#proto_targets[@]} -eq 0 ]]; then
   echo "cpp_format: no cc targets under $pattern can be built for this platform" >&2
   exit 0
 fi
@@ -261,8 +287,10 @@ fi
 # stays all-or-nothing: a translation unit that was not parsed is one whose
 # references nobody saw, and a rename that skips them is half-applied.
 build_rc=0
-"$BAZEL" build --keep_going "${targets[@]}" \
-  --aspects="$aspect" --output_groups="+$group" >/dev/null || build_rc=$?
+if [[ ${#targets[@]} -gt 0 ]]; then
+  "$BAZEL" build --keep_going "${targets[@]}" \
+    --aspects="$aspect" --output_groups="+$group" >/dev/null || build_rc=$?
+fi
 if [[ $build_rc -ne 0 ]]; then
   if [[ "$mode" == index || "$mode" == browse ]]; then
     echo "cpp_format: some targets did not build (bazel exited $build_rc); indexing the rest" >&2
@@ -295,6 +323,28 @@ resolve_binary() {
 }
 bin="$(resolve_binary "$BIN_LABEL")"
 
+# The .proto files, in a build of their own: whatever goes wrong there -- a
+# repository whose protobuf is not the module the aspect loads, a .proto that
+# does not compile -- costs the index its .proto files and nothing else.  The
+# analysis is shared with the build above.  It comes after the binary because
+# a release from before --emit-proto-index would fail every one of these
+# actions; asking it once says so in a line instead.
+if [[ ${#proto_targets[@]} -gt 0 ]]; then
+  probe="$("$bin" --emit-proto-index 2>&1 || true)"
+  if [[ "$probe" == *"--emit-proto-index=<unit>"* ]]; then
+    proto_rc=0
+    "$BAZEL" build --keep_going "${proto_targets[@]}" \
+      --aspects="$PROTO_INDEX_ASPECT" --output_groups=+proto_index >/dev/null || proto_rc=$?
+    if [[ $proto_rc -ne 0 ]]; then
+      echo "cpp_format: some .proto files were not indexed (bazel exited $proto_rc); indexing the rest" >&2
+      build_rc=$proto_rc
+    fi
+  else
+    echo "cpp_format: this cpp_format has no --emit-proto-index, so the .proto files are left out of the index (a newer cpp_format.release(version = ...) has it)" >&2
+    proto_targets=()
+  fi
+fi
+
 # Each target's manifest is at a deterministic path -- //pkg:name ->
 # <bazel-bin>/pkg/name.cpp_format.manifest (or .cpp_index.manifest) -- and
 # lists that target's per-file record files, exec-root relative.  It is read
@@ -307,23 +357,31 @@ bin="$(resolve_binary "$BIN_LABEL")"
 list="$(mktemp)"
 trap 'rm -f "$list"' EXIT
 missing=0
-for t in "${targets[@]}"; do
-  rel="${t#//}"
-  pkg="${rel%%:*}"
-  name="${rel##*:}"
-  manifest="$bazel_bin/$pkg/$name.$manifest_suffix"
-  [[ -f "$manifest" ]] || continue
-  while IFS= read -r rec; do
-    [[ -n "$rec" ]] || continue
-    # A failed build (index modes only, see above) leaves the manifest of a
-    # target without some of the records it lists.
-    if [[ $build_rc -ne 0 && ! -f "$exec_root/$rec" ]]; then
-      missing=$((missing + 1))
-      continue
-    fi
-    printf '%s\n' "$exec_root/$rec"
-  done < "$manifest" >> "$list"
-done
+# Appends to $list the records the manifests of <targets...> list.
+read_manifests() {  # <manifest suffix> <targets...>
+  local suffix="$1" t rel pkg name manifest rec
+  shift
+  for t in "$@"; do
+    rel="${t#//}"
+    pkg="${rel%%:*}"
+    name="${rel##*:}"
+    manifest="$bazel_bin/$pkg/$name.$suffix"
+    [[ -f "$manifest" ]] || continue
+    while IFS= read -r rec; do
+      [[ -n "$rec" ]] || continue
+      # A failed build (index modes only, see above) leaves the manifest of a
+      # target without some of the records it lists.
+      if [[ $build_rc -ne 0 && ! -f "$exec_root/$rec" ]]; then
+        missing=$((missing + 1))
+        continue
+      fi
+      printf '%s\n' "$exec_root/$rec"
+    done < "$manifest" >> "$list"
+  done
+}
+read_manifests "$manifest_suffix" "${targets[@]}"
+# One list for every producer: the merge does not care who wrote a unit.
+read_manifests proto_index.manifest "${proto_targets[@]}"
 if [[ $missing -gt 0 ]]; then
   echo "cpp_format: $missing translation unit(s) are not in the index: they did not build" >&2
 fi

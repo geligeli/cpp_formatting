@@ -1,3 +1,5 @@
+load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
 load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
@@ -12,6 +14,7 @@ load(
     "cpp_compile_commands_fragments",
     "cpp_format_records",
     "cpp_index_units",
+    "proto_index_units",
 )
 
 # A small first-party cc_library used to exercise the cpp_format Bazel
@@ -103,8 +106,94 @@ exports_files(
         "demo.cpp",
         "demo.h",
         "demo_main.cpp",
+        "inventory_user.cpp",
+        "proto/inventory.proto",
+        "proto/unit.proto",
     ],
     visibility = ["//code_browser:__pkg__"],
+)
+
+# The index across two languages.  A .proto is indexed by a producer of its
+# own (the proto_index aspect), which also anchors each message, field and
+# enumerator on the bytes of the generated header that came from it -- as
+# protoc itself reports them; the C++ aspect indexes inventory_user.cpp knowing
+# nothing about protos; and the merge links every generated C++ symbol to what
+# it was generated from.  unit_proto strips its import prefix, so its file
+# reaches the tools as a `_virtual_imports` symlink and its header sits next
+# to that, while the index must still call it bazel/testdata/proto/unit.proto.
+proto_library(
+    name = "unit_proto",
+    srcs = ["proto/unit.proto"],
+    strip_import_prefix = "/bazel/testdata",
+)
+
+proto_library(
+    name = "inventory_proto",
+    srcs = ["proto/inventory.proto"],
+    deps = [":unit_proto"],
+)
+
+cc_proto_library(
+    name = "unit_cc_proto",
+    deps = [":unit_proto"],
+)
+
+cc_proto_library(
+    name = "inventory_cc_proto",
+    deps = [":inventory_proto"],
+)
+
+cc_library(
+    name = "inventory_user",
+    srcs = ["inventory_user.cpp"],
+    deps = [
+        ":inventory_cc_proto",
+        ":unit_cc_proto",
+    ],
+)
+
+cpp_index_units(
+    name = "inventory_cpp_units",
+    deps = [":inventory_user"],
+)
+
+proto_index_units(
+    name = "inventory_proto_units",
+    deps = [":inventory_proto"],
+)
+
+genrule(
+    name = "inventory_index",
+    srcs = [
+        ":inventory_cpp_units",
+        ":inventory_proto_units",
+    ],
+    outs = ["inventory_index.pb"],
+    cmd = "$(execpath //cpp_formatting:cpp_format) --merge-index --output=$@ $(SRCS)",
+    tools = ["//cpp_formatting:cpp_format"],
+    visibility = ["//code_browser:__pkg__"],
+)
+
+# From the C++ use to the .proto and back, over the real protoc and the real
+# cc_proto_library: what pins that protoc's annotation ranges are the ranges
+# Clang declares the generated symbols on.
+sh_test(
+    name = "proto_index_test",
+    srcs = ["proto_index_test.sh"],
+    args = [
+        "$(location :inventory_index.pb)",
+        "$(location //cpp_formatting:cpp_format)",
+        "$(location proto/inventory.proto)",
+        "$(location proto/unit.proto)",
+        "$(location inventory_user.cpp)",
+    ],
+    data = [
+        "inventory_user.cpp",
+        "proto/inventory.proto",
+        "proto/unit.proto",
+        ":inventory_index.pb",
+        "//cpp_formatting:cpp_format",
+    ],
 )
 
 exports_files(

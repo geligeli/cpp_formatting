@@ -203,8 +203,10 @@ build:lint --output_groups=+cpp_format_edits
 # Symbol index: the same, for the per-file index units (e.g. `bazel build
 # --config=index //bazel/testdata/...`).  The merged index of a target pattern
 # is `tools/cpp_format.sh index`; `tools/cpp_format.sh browse` serves it.
-build:index --aspects=//bazel:cpp_format.bzl%cpp_index_aspect
-build:index --output_groups=+cpp_index
+# The .proto files are the second producer's (bazel/proto_index.bzl), which
+# only proto_library targets get anything from.
+build:index --aspects=//bazel:cpp_format.bzl%cpp_index_aspect,//bazel:proto_index.bzl%proto_index_aspect
+build:index --output_groups=+cpp_index,+proto_index
 
 # Personal, machine-local overrides.  Last import wins, so anything in here
 # takes precedence over the settings above.
