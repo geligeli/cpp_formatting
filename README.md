@@ -126,9 +126,14 @@ in the workspace root — add `index.pb*` to your `.gitignore` — and serves *y
 checkout* with every indexed token annotated: click an identifier and a panel
 below the code shows its definition, relations and references (it stays open
 while you follow them; a token that names several symbols gets a tab each), and
-every `#include` is a link to the file it names. A target that does not build
-does not stop it: the rest is indexed, and the script says how many translation
-units are missing. Before the server starts it prints the browser
+every `#include` is a link to the file it names. **`.proto` files are indexed
+too**, and linked to the C++ generated from them: click a field in a `.proto`
+and the panel lists every use of its accessors in your C++ (a call of
+`set_size()` marked as a write of `size`); click `msg.set_size(1)` and the
+panel leads with the field it was generated from, in the `.proto` rather than
+in a header under `bazel-out` (ctrl-click goes straight there). A target that
+does not build does not stop it: the rest is indexed, and the script says how
+many translation units are missing. Before the server starts it prints the browser
 binary it resolved and the exact command line it runs, so you can restart the
 server by hand. **The index is a snapshot**, read once at start: after editing
 sources, stop the server and run `browse` again. Only the translation units
@@ -595,7 +600,8 @@ bazel run //cpp_formatting:cpp_format -- \
 | `--format=<fmt>` | Output format for `--lint`: `text` (default), `sarif`, or `diff` |
 | `--jobs=<N>` / `-j<N>` | Translation units to parse in parallel. `0` (default) uses every CPU; larger values are capped at the CPU count. The result does not depend on it (see [Parallel parsing](#parallel-parsing)). |
 | `--emit-index=<file>` | Index mode: parse the sources and write one `cpp_index.IndexUnit` (binary protobuf). Runs no formatting pass and takes no config; see [Symbol index](#symbol-index). |
-| `--merge-index --output=<file> [--records-from=<list>] <unit.pb>...` | Merge index units (or earlier indexes) into one `cpp_index.Index`. `--format=binary\|text\|json` picks the encoding (default binary). The merge runs on every CPU (`--jobs=N`/`-jN` to limit it; the bytes do not depend on it) and shows its progress on a terminal (`--progress` forces it, a line per tenth when stderr is not one; `--no-progress` silences it). |
+| `--emit-proto-index=<file> [--path-map=<file>] [--proto-path=<dir>]... [--anchors=<meta>=<path>]... <file.proto>` | Index mode for a `.proto`: write its `IndexUnit` -- messages, fields, enums, oneofs, services and rpcs, with every reference to a type. `--anchors` takes what protoc wrote next to a generated file (`--cpp_out=annotate_headers:` gives `x.pb.h.meta`) and the path the index knows that file under; see [Symbol index](#symbol-index). |
+| `--merge-index --output=<file> [--records-from=<list>] <unit.pb>...` | Merge index units (or earlier indexes) into one `cpp_index.Index`, and link generated symbols to what they were generated from. `--format=binary\|text\|json` picks the encoding (default binary). The merge runs on every CPU (`--jobs=N`/`-jN` to limit it; the bytes do not depend on it) and shows its progress on a terminal (`--progress` forces it, a line per tenth when stderr is not one; `--no-progress` silences it). |
 | `--dump-index [--format=text\|json\|binary] [--lookup=<path>:<offset>] <file>` | Print a unit or index, or list the symbol at a byte offset and every occurrence of it. |
 
 **Pass ordering:** `normalize_variables` rules are applied first (in the order
@@ -1010,11 +1016,36 @@ this repository `tools/cpp_format.sh` builds everything from source; a consumer
 of the prebuilt kit gets the same command from a release asset, with nothing to
 build.
 
-**Extending it.** Any producer may emit `IndexUnit`s -- a proto-aware indexer
-would describe `.proto` files with `Language.PROTO` symbols and let the C++
-symbols of a generated `.pb.h` point back at them through a `GENERATED_FROM`
-relation -- and `--merge-index` unions them all under one symbol table. `File`
-and `Symbol` carry free-form `attributes` for whatever has no field yet.
+**More than one language.** The index is one format with a producer per
+language, and `--merge-index` unions whatever they emit under one symbol table,
+knowing nothing about any of them. C++ is one producer; `.proto` files are the
+second (`cpp_format --emit-proto-index`, run by an aspect on `proto_library`),
+with `Language.PROTO` symbols whose USRs are `proto:<full.name>` -- each
+language names its symbols under a prefix of its own (`c:` is Clang's).
+
+What connects two languages is never a naming rule. A producer whose language
+has a code generator also emits **anchors**: occurrences of its own symbols,
+with the role `GENERATES`, on the byte ranges of the generated file that came
+from them -- as the generator itself reports them. For protobuf that is
+protoc's `GeneratedCodeInfo` (`--cpp_out=annotate_headers:` writes it as
+`x.pb.h.meta` and leaves the header byte for byte what `cc_proto_library`
+compiles). The merge then applies the one rule that crosses languages: a
+symbol whose declaration is *exactly* an anchored range gets a
+`GENERATED_FROM` relation to the anchor's symbol. `set_size` in `x.pb.h` is
+declared on the range protoc says came from the field `size`, so it is
+generated from `proto:pkg.Msg.size` -- without the proto producer knowing what
+a C++ accessor is called, or the C++ one that `.proto` files exist. Another
+generator (protoc's `.pyi` stubs have the same metadata) or another language is
+another producer; the rule and the browser stay as they are.
+
+```sh
+cpp_format --dump-index --lookup=app/main.cpp:1234 index.pb   # on `set_size`
+#   c:@N@pkg@S@Msg@F@set_size#I#
+#     INSTANCE_METHOD pkg::Msg::set_size : void (int32_t)
+#     generated from proto:pkg.Msg.size
+```
+
+`File` and `Symbol` carry free-form `attributes` for whatever has no field yet.
 
 **Dependent tokens.** `t.m` where `t` is a template parameter, `Helper<T>::k`,
 or a call `f(t)` with dependent arguments names no declaration until the
@@ -1125,9 +1156,12 @@ cpp_formatting/
   cpp_index_lib.h                         # IndexDataConsumer -> IndexUnit, IndexActionFactory, test helper
   cpp_index_lib.cpp                       # location mapping, owned-file filter, symbol interning
   cpp_index_test.cpp                      # gtest unit tests (in-memory TUs)
-  cpp_index_merge.h                       # Clang-free: normalize, merge, group per file, lookup, I/O
+  cpp_index_merge.h                       # Clang-free: normalize, merge, link generated symbols, group per file, lookup, I/O
   cpp_index_merge.cpp                     # implementation
   cpp_index_merge_test.cpp                # gtest unit tests
+  proto_index_lib.h                       # the .proto producer (--emit-proto-index): protoc's parser -> IndexUnit, anchors
+  proto_index_lib.cpp                     # spans -> byte offsets, symbols, references, GeneratedCodeInfo -> anchors
+  proto_index_test.cpp                    # gtest unit tests (in-memory .proto files)
   index_integration_test.sh               # shell integration tests for the three modes
 
   # Shared

@@ -10,7 +10,7 @@ Guidance for AI coding agents (Claude Code, Kimi Code, Codex, etc.) working in t
 | Finding a file, a public API or a test; what each test pins | [docs/source-map.md](docs/source-map.md) |
 | Why a pass rewrites or declines something; `tu_driver` phases and re-runs; cross-file renames; template-dependent tokens; macros | [docs/design.md](docs/design.md) |
 | A reference kind, veto, collision, capture/hiding check, spelling audit or index behaviour that looks odd | [docs/non-obvious-behaviours.md](docs/non-obvious-behaviours.md) |
-| The aspects, edit records and aggregation, `--owned-files`, `compile_commands`, the index aspect, the prebuilt kit | [docs/integration.md](docs/integration.md) |
+| The aspects, edit records and aggregation, `--owned-files`, `compile_commands`, the index aspects (C++ and `.proto`), the prebuilt kit | [docs/integration.md](docs/integration.md) |
 | e2e corpus scenarios and what each one found | [docs/e2e.md](docs/e2e.md), [e2e/README.md](e2e/README.md) |
 | `code_browser` routes | [code_browser/README.md](code_browser/README.md) |
 | End-user documentation (keep in step with behaviour changes) | [README.md](README.md) |
@@ -25,7 +25,7 @@ bazel test //...
 bazel test //cpp_formatting:rename_variables_test        # one suite
 ```
 
-Test targets in `//cpp_formatting`: `trailing_return_types_test`, `const_placement_test`, `naming_convention_test`, `rename_variables_test`, `rename_state_test`, `tu_driver_test`, `lint_lib_test`, `cpp_index_merge_test`, `cpp_index_test` (gtest) and `trailing_return_types_integration_test`, `const_placement_integration_test`, `normalize_variables_integration_test`, `lint_integration_test`, `aggregate_integration_test`, `index_integration_test` (shell). More under `//bazel/testdata`, `//code_browser`, `//tools/platforms/smoke`.
+Test targets in `//cpp_formatting`: `trailing_return_types_test`, `const_placement_test`, `naming_convention_test`, `rename_variables_test`, `rename_state_test`, `tu_driver_test`, `lint_lib_test`, `cpp_index_merge_test`, `cpp_index_test`, `proto_index_test` (gtest) and `trailing_return_types_integration_test`, `const_placement_integration_test`, `normalize_variables_integration_test`, `lint_integration_test`, `aggregate_integration_test`, `index_integration_test` (shell). More under `//bazel/testdata`, `//code_browser`, `//tools/platforms/smoke`.
 
 Running a binary (dry run prints to stdout; `-i`/`--in-place` writes; compile flags follow the second `--`):
 
@@ -66,13 +66,13 @@ Two unrelated things are called LLVM: `@llvm` is the **toolchain** (hermetic-llv
 - `trailing_return_types{,_lib}` — `int f()` ↔ `auto f() -> int` (`ReturnTypeStyle::Trailing|Leading`; Leading is mostly guards).
 - `const_placement{,_lib}` — `const int` ↔ `int const` (`ConstStyle::East|West`); only a qualifier of the type *specifier* moves.
 - `normalize_variables` + `rename_variables_lib`, `naming_convention`, `rename_state` — renames by scope (`member`, `local`, `global`, `method`, `type`, `namespace`, and the fine-grained `static_`/`const_`/`public_`/`protected_`/`private_member`, `static_`/`const_local`, `static_`/`const_global`): collect → scan (vetoes) → rewrite, plus cross-TU resolution of template-dependent tokens.
-- `cpp_format` + `cpp_format_lib` — all passes from a YAML config in **one** parse per TU; also hosts `--emit-edits`, `--owned-files`, `--aggregate`, `--emit-index`, `--merge-index`, `--dump-index`.
+- `cpp_format` + `cpp_format_lib` — all passes from a YAML config in **one** parse per TU; also hosts `--emit-edits`, `--owned-files`, `--aggregate`, `--emit-index`, `--emit-proto-index`, `--merge-index`, `--dump-index`.
 - `tu_driver` — the parallel TU driver all four binaries share (`TUSlot`, `TUSlotClient`, `runTranslationUnits()`).
 - `lint_lib` — `LintReport` (text/SARIF), unified diff, the edit-record model and `runEditAggregation()` (also behind the standalone `aggregate_edits`).
-- `cpp_index_lib` (per TU, on `clang::index`), `cpp_index_merge` (Clang-free), `index.proto` — the symbol index.
+- `cpp_index_lib` (per TU, on `clang::index`), `proto_index_lib` (per `.proto`, on protoc's parser), `cpp_index_merge` (Clang-free), `index.proto` — the symbol index: one format, a producer per language.
 - `embedded_clang_resource`, `embed_file` — Clang's builtin headers are embedded in every binary and self-extracted to the cache dir.
 
-Elsewhere: [bazel/cpp_format.bzl](bazel/cpp_format.bzl) (the from-source aspects; fixtures and the test-only `aspect_outputs.bzl` in `bazel/testdata/`), [bazel/integration/](bazel/integration/) (the prebuilt-binary kit consumers import by URL), [code_browser/](code_browser/) (HTTP server over the index in SQLite; C++20, Boost.Beast), [e2e/](e2e/), [tools/](tools/) (`cpp_format.sh`, `gazelle`, `iwyu`, `hermetic_std`, `platforms`), [patches/](patches/) (applied to LLVM at fetch time).
+Elsewhere: [bazel/cpp_format.bzl](bazel/cpp_format.bzl) and [bazel/proto_index.bzl](bazel/proto_index.bzl) (the from-source aspects; fixtures and the test-only `aspect_outputs.bzl` in `bazel/testdata/`), [bazel/integration/](bazel/integration/) (the prebuilt-binary kit consumers import by URL), [code_browser/](code_browser/) (HTTP server over the index in SQLite; C++20, Boost.Beast), [e2e/](e2e/), [tools/](tools/) (`cpp_format.sh`, `gazelle`, `iwyu`, `hermetic_std`, `platforms`), [patches/](patches/) (applied to LLVM at fetch time).
 
 ## YAML config (`cpp_format --config=<file>`)
 
@@ -106,6 +106,7 @@ Each is explained, with the case that found it, in the docs above.
 - A TU writes only into its own `TUSlot`; cross-TU state changes hands at barriers on the driver thread, in **source order** (non-headers, then headers). That is what makes `-j` invisible — keep every merged collection ordered.
 - Direct runs: a new veto discards the pass and re-runs everything (shared `DepRes` cleared, `Vetoes` kept); a TU whose seeded resolutions went stale is re-run alone. **Emit mode seeds nothing and never re-runs** — records carry owners, vetoes, dependencies and skips, and `mergeEditReports` does the dropping.
 - Key spaces differ: `Vetoes` are cwd-relative, `DependentResolutions` and edit records use absolute real paths, index paths are the cwd-relative names Clang opened (an index must be machine-independent).
+- **An index producer names only its own language.** What crosses languages is `GENERATES` anchors — byte ranges of a generated file, from the generator's own metadata (protoc's `.pb.h.meta`), never a naming table or another producer's USRs — and `linkGenerated()` in the merge, which only adds `GENERATED_FROM` between symbols that exist, on *exact* range equality. It must stay pure, idempotent, monotone and flag-free; the browser knows `language` and the relation, never a pair of languages.
 - `tu_driver` and the three single-pass binaries stay protobuf-free (`TUSlot::IndexBytes`). Index serialization is a pure function of content: no `map<>`, every repeated field ordered, enums open. The threaded `--merge-index` folds **contiguous runs in input order** — that is what keeps it byte-identical to the one-shot merge (a symbol's empty field is filled by the *first* duplicate).
 
 **Bazel integration**
@@ -113,7 +114,7 @@ Each is explained, with the case that found it, in the docs above.
 - Records, not diffs. A target always writes its manifest, even empty (Bazel never deletes stale outputs). Record lists go through `--records-from` (command-line limits).
 - **`cpp_format.sh` is the only driver of the aspects** — there are no `cpp_format_targets`/`cpp_index_targets` macros, and none should come back: a rule's `deps` cannot be a pattern (`//...`), so they could never cover "the whole repo". What tests need from inside Bazel is the test-only [bazel/testdata/aspect_outputs.bzl](bazel/testdata/aspect_outputs.bzl). The script is *sourced* by `compile_commands_test` for `merge_compile_commands`: functions first, then the `BASH_SOURCE` guard, then everything that calls Bazel.
 - **The script names every target explicitly**, so it drops the platform-incompatible ones itself (a `cquery`; Bazel only skips them for a pattern) and builds with `--keep_going` — which only `index`/`browse`/`compile_commands` survive. Formatting must stay fatal: an unparsed TU is a set of unseen references.
-- **The aspects exist twice** — [bazel/cpp_format.bzl](bazel/cpp_format.bzl) and [bazel/integration/cpp_format.bzl](bazel/integration/cpp_format.bzl). Change them together. Both build the compile context with `_compilation_context()` (merges `implementation_deps`) and pass the target's `copts`.
+- **The aspects exist twice** — [bazel/cpp_format.bzl](bazel/cpp_format.bzl) and [bazel/integration/cpp_format.bzl](bazel/integration/cpp_format.bzl), and likewise `proto_index.bzl`. Change them together. `proto_index.bzl` is the only file that loads `@protobuf`, and the script names its aspect only when there is a `proto_library` (and builds those targets separately): a C++-only consumer must never load it. Both build the compile context with `_compilation_context()` (merges `implementation_deps`) and pass the target's `copts`.
 - **Aspect and binary are versioned together:** an aspect change that needs a new flag ships with a bump of `cpp_format.release(version=…)` in [MODULE.bazel](MODULE.bazel).
 - This module is **imported by URL** by kit consumers: `llvm` (toolchain), `gazelle`, `gazelle_cc` and the `release()` pin are `dev_dependency`; the kit never names `@llvm-project`; the `gazelle` targets live in `//tools/gazelle`, not the root package; the kit's `_config` defaults to `@@//:cpp_format.yaml` (the *root* module's); the `use_extension`/`use_repo` for `@cpp_format_bin` must stay non-dev.
 - **`install` bakes canonical labels** (aspect, `cpp_format`, `code_browser`) into the placed script. The script names them on the *consumer's* command line, where an apparent `@code_browser_bin` is only visible if their `use_repo()` lists it — and the quick start's lists `cpp_format_bin` alone. `e2e/kit_browse_test.sh` runs that configuration.
