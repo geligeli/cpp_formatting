@@ -158,6 +158,27 @@ cc_test(
     ],
 )
 
+# The API over an index of two languages (a .proto, the C++ generated from it,
+# its users), put together and linked as `cpp_format --merge-index` does.
+cc_test(
+    name = "cross_language_test",
+    size = "small",
+    srcs = ["cross_language_test.cpp"],
+    copts = TEST_COPTS,
+    deps = [
+        ":api",
+        ":api_cc_proto",
+        ":file_cache",
+        ":index_db",
+        ":index_schema",
+        ":repo",
+        "//cpp_formatting:cpp_index_merge",
+        "//cpp_formatting:index_cc_proto",
+        "@googletest//:gtest_main",
+        "@protobuf",
+    ],
+)
+
 # The pages, embedded so the binary is self-contained.  --assets-dir serves
 # web/ from disk instead while they are being edited.
 [
@@ -256,6 +277,10 @@ sh_test(
         "//bazel/testdata:demo.h",
         "//bazel/testdata:demo_main.cpp",
         "//bazel/testdata:index.pb",
+        "//bazel/testdata:inventory_index.pb",
+        "//bazel/testdata:inventory_user.cpp",
+        "//bazel/testdata:proto/inventory.proto",
+        "//bazel/testdata:proto/unit.proto",
         "//code_browser/tools:http_get",
         "//cpp_formatting:cpp_format",
     ],

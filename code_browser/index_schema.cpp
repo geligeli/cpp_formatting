@@ -2,6 +2,7 @@
 
 #include <sqlite3.h>
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
@@ -208,7 +209,33 @@ auto ImportIndex(const cpp_index::Index& index, sqlite3* raw,
       }
   }
 
+  // A generated file that only a producer of *another* language's anchors
+  // names (index.proto: GENERATES) -- the `.pb.h` of a proto_library no C++
+  // in the index includes -- is nothing anybody can open or land in: no
+  // symbol is declared there and nothing in it is a use.  It stays out of the
+  // tree, and its anchors out of the database.
+  std::vector<bool> hidden(static_cast<size_t>(index.files_size()), false);
+  {
+    std::vector<bool> declared_in(hidden.size(), false);
+    for (const cpp_index::Symbol& s : index.symbols())
+      if (s.has_canonical() && s.canonical().file() >= 0 &&
+          static_cast<size_t>(s.canonical().file()) < declared_in.size())
+        declared_in[static_cast<size_t>(s.canonical().file())] = true;
+    for (const cpp_index::FileOccurrences& fo : index.per_file()) {
+      if (fo.file() < 0 || fo.file() >= index.files_size()) continue;
+      const auto f = static_cast<size_t>(fo.file());
+      if (index.files(fo.file()).kind() != cpp_index::GENERATED ||
+          declared_in[f] || fo.occurrences().empty())
+        continue;
+      hidden[f] = std::all_of(fo.occurrences().begin(), fo.occurrences().end(),
+                              [](const cpp_index::Occurrence& o) {
+                                return o.roles() & cpp_index::GENERATES;
+                              });
+    }
+  }
+
   // 2. Files and the directory tree above them.
+  uint32_t files = 0;
   {
     Statement file = prepare(
         "INSERT INTO files(id, path, kind, dir, name) VALUES(?,?,?,?,?)");
@@ -216,6 +243,8 @@ auto ImportIndex(const cpp_index::Index& index, sqlite3* raw,
         prepare("INSERT OR IGNORE INTO dirs(path, parent, name) VALUES(?,?,?)");
     std::unordered_set<std::string> seen_dirs;
     for (int32_t i = 0; i < index.files_size() && error.empty(); ++i) {
+      if (hidden[static_cast<size_t>(i)]) continue;
+      ++files;
       const cpp_index::File& f = index.files(i);
       const auto [d, name] = SplitPath(f.path());
       file.BindInt(1, i);
@@ -312,8 +341,11 @@ auto ImportIndex(const cpp_index::Index& index, sqlite3* raw,
     int64_t id = 0;
     for (const cpp_index::FileOccurrences& fo : index.per_file()) {
       if (!error.empty()) break;
+      const bool skip = fo.file() >= 0 && fo.file() < index.files_size() &&
+                        hidden[static_cast<size_t>(fo.file())];
       for (const cpp_index::Occurrence& o : fo.occurrences()) {
         ++id;
+        if (skip) continue;
         occ.BindInt(1, id);
         occ.BindInt(2, fo.file());
         occ.BindInt(3, o.begin());
@@ -370,7 +402,7 @@ auto ImportIndex(const cpp_index::Index& index, sqlite3* raw,
     put("imported_at_ns", std::to_string(imported_at));
     put("imported_at", Rfc3339(imported_at));
     put("etag", etag);
-    put("files", std::to_string(index.files_size()));
+    put("files", std::to_string(files));
     put("symbols", std::to_string(num_symbols));
     put("occurrences", std::to_string(occurrences));
     put("unresolved", std::to_string(index.unresolved_size()));
@@ -381,7 +413,7 @@ auto ImportIndex(const cpp_index::Index& index, sqlite3* raw,
   if (std::string e = exec("PRAGMA optimize"); !e.empty()) return e;
 
   if (stats) {
-    stats->files = static_cast<uint32_t>(index.files_size());
+    stats->files = files;
     stats->symbols = static_cast<uint32_t>(num_symbols);
     stats->occurrences = occurrences;
     stats->unresolved = static_cast<uint32_t>(index.unresolved_size());

@@ -15,7 +15,7 @@
     [1, 'declaration'], [2, 'definition'], [4, 'reference'], [8, 'read'],
     [16, 'write'], [32, 'call'], [64, 'dynamic'], [128, 'address-of'],
     [256, 'implicit'], [512, 'undef'], [1024, 'name-ref'], [2048, 'dependent'],
-    [4096, 'pasted'],
+    [4096, 'pasted'], [8192, 'generates'],
   ];
   const roleNames = (bits) =>
       ROLE_NAMES.filter(([b]) => bits & b).map(([, n]) => n).join(' ');
@@ -30,8 +30,17 @@
     TEMPLATE_TYPE_PARM: 'template parameter',
     TEMPLATE_TEMPLATE_PARM: 'template template parameter',
     NON_TYPE_TEMPLATE_PARM: 'non-type template parameter', CONCEPT: 'concept',
+    MESSAGE: 'message', ONEOF: 'oneof', SERVICE: 'service', RPC: 'rpc',
+    PACKAGE: 'package',
   };
   const kindShort = (k) => KIND_SHORT[k] || (k || 'symbol').toLowerCase();
+  // A symbol's language, where saying it helps: C and C++ are the default.
+  const LANGUAGE_SHORT = { PROTO: 'proto', OBJC: 'objc' };
+  const languageShort = (l) => LANGUAGE_SHORT[l] || '';
+  // `field`, or `proto field` for a symbol of another language.
+  const kindLabel = (s) =>
+      [languageShort(s && s.language), kindShort(s && s.kind)].filter(Boolean).join(' ');
+  const ROLE_GENERATES = 8192;
 
   const state = {
     path: null,
@@ -249,6 +258,7 @@
       if (tok.roles & 2) el.classList.add('r-def');
       else if (tok.roles & 1) el.classList.add('r-decl');
       if (tok.roles & 16) el.classList.add('r-write');
+      if (tok.roles & ROLE_GENERATES) el.classList.add('r-generates');
       if (span.macro === 'MACRO_BODY') el.classList.add('macro-body');
       el.dataset.s = tok.syms.join(',');
       if (!state.tokens.has(sym)) state.tokens.set(sym, []);
@@ -343,7 +353,7 @@
       if (tab.kind) {
         const kind = document.createElement('span');
         kind.className = 'kind k-' + tab.kind.toLowerCase();
-        kind.textContent = kindShort(tab.kind);
+        kind.textContent = kindLabel(tab);
         button.appendChild(kind);
       }
       button.appendChild(document.createTextNode(tab.label));
@@ -393,11 +403,23 @@
       type.textContent = summary.type;
       head.appendChild(type);
     }
+    // Generated code is read where it was written: the .proto field before
+    // the accessor's declaration in a header under bazel-out.
+    const origin = summary.origin;
+    const from = origin && location(origin.definition);
+    if (origin) {
+      const a = document.createElement('a');
+      a.className = 'origin';
+      a.href = from ? from.href : '#';
+      a.textContent = `generated from ${kindLabel(origin)} ${origin.qualified_name || origin.name}` +
+          (from ? ' — ' + from.text : '');
+      head.appendChild(a);
+    }
     const def = location(summary.definition);
     if (def) {
       const a = document.createElement('a');
       a.href = def.href;
-      a.textContent = 'definition: ' + def.text;
+      a.textContent = (origin ? 'generated declaration: ' : 'definition: ') + def.text;
       head.appendChild(a);
     }
     pane.appendChild(head);
@@ -438,15 +460,20 @@
     body.textContent = 'loading…';
     let refs;
     try {
-      refs = await getJson(`/api/refs/${id}?limit=200`);
+      refs = await getJson(`/api/refs/${id}?limit=200&expand=generated`);
     } catch (e) {
       body.textContent = e.message;
       return;
     }
     body.textContent = '';
+    // With generated symbols in the listing, each line says which one it is
+    // (`set_size`), and a line of the symbol itself says nothing.
+    const generated = new Map((refs.symbols || []).map((s) => [s.id, s]));
     const title = document.createElement('div');
     title.className = 'section';
-    title.textContent = `${refs.total || 0} occurrence(s)` + (refs.truncated ? ' (first 200)' : '');
+    title.textContent = `${refs.total || 0} occurrence(s)` +
+        (generated.size ? `, with those of the ${generated.size} symbol(s) generated from it` : '') +
+        (refs.truncated ? ' (first 200)' : '');
     body.appendChild(title);
     for (const file of refs.files || []) {
       const fileEl = document.createElement('div');
@@ -461,9 +488,19 @@
         a.href = '#' + file.path + (loc.line ? ':' + loc.line : '');
         a.textContent = loc.line ? String(loc.line) : String(loc.begin || 0);
         li.appendChild(a);
+        const via = ref.symbol !== undefined && generated.get(ref.symbol);
+        if (via) {
+          const name = document.createElement('span');
+          name.className = 'via';
+          name.textContent = ' ' + via.name;
+          name.title = via.qualified_name || via.name;
+          li.appendChild(name);
+        }
         const roles = document.createElement('span');
         roles.className = 'roles';
-        roles.textContent = ' ' + roleNames(ref.roles || 0);
+        // A call of the setter is a write of the field it was generated from.
+        roles.textContent = ' ' + roleNames(ref.roles || 0) +
+            (via && via.modifies_origin ? ' — writes it' : '');
         li.appendChild(roles);
         if (ref.line_text) {
           const text = document.createElement('code');
@@ -507,19 +544,19 @@
     };
     add('definitions', info.definitions);
     add('declarations', info.declarations);
-    const related = info.related || [];
-    if (related.length) {
+    const symbols = (label, relations, prefix) => {
+      if (!relations.length) return;
       const title = document.createElement('div');
       title.className = 'section';
-      title.textContent = 'related';
+      title.textContent = label;
       body.appendChild(title);
       const list = document.createElement('ul');
-      for (const r of related) {
+      for (const r of relations) {
         const li = document.createElement('li');
-        const label = document.createElement('span');
-        label.className = 'roles';
-        label.textContent = (r.reverse ? '← ' : '→ ') + (r.kind || '').toLowerCase().replace(/_/g, ' ') + ' ';
-        li.appendChild(label);
+        const tag = document.createElement('span');
+        tag.className = 'roles';
+        tag.textContent = prefix(r);
+        li.appendChild(tag);
         const def = location(r.symbol && r.symbol.definition);
         const a = document.createElement('a');
         a.href = def ? def.href : '#';
@@ -528,12 +565,23 @@
         list.appendChild(li);
       }
       body.appendChild(list);
-    }
+    };
+    // Provenance first and by name: it is the one relation that crosses
+    // languages, and what a reader of generated code is after.
+    const all = info.related || [];
+    const provenance = (r) => r.kind === 'GENERATED_FROM';
+    symbols('generated from', all.filter((r) => provenance(r) && !r.reverse),
+            (r) => kindLabel(r.symbol) + ' ');
+    symbols('generated from it', all.filter((r) => provenance(r) && r.reverse),
+            (r) => kindLabel(r.symbol) + ' ');
+    symbols('related', all.filter((r) => !provenance(r)),
+            (r) => (r.reverse ? '← ' : '→ ') + (r.kind || '').toLowerCase().replace(/_/g, ' ') + ' ');
     const c = info.counts || {};
     const counts = document.createElement('div');
     counts.className = 'section';
     counts.textContent = `${c.total || 0} occurrences in ${c.files || 0} file(s): ` +
-        `${c.definitions || 0} definitions, ${c.declarations || 0} declarations, ${c.references || 0} references`;
+        `${c.definitions || 0} definitions, ${c.declarations || 0} declarations, ${c.references || 0} references` +
+        (c.generated ? `; ${c.generated} more of the symbols generated from it` : '');
     body.appendChild(counts);
     if (info.symbol && info.symbol.usr) {
       const usr = document.createElement('div');
@@ -553,16 +601,36 @@
   function openSymbolPanel(tok) {
     const ids = (tok.dataset.s || '').split(',').filter(Boolean).map(Number);
     if (!ids.length) return;
-    openPanel(ids.map((id) => {
-      const summary = state.symbols.get(id) || { id, name: '?', kind: 'unknown' };
-      return {
-        label: summary.name || summary.qualified_name || '?',
-        kind: summary.kind || 'unknown',
-        build: (pane) => symbolPane(summary, pane),
-        onSelect: () => selectSymbol(id),
-      };
-    }));
+    const tab = (summary) => ({
+      label: summary.name || summary.qualified_name || '?',
+      kind: summary.kind || 'unknown',
+      language: summary.language,
+      build: (pane) => symbolPane(summary, pane),
+      onSelect: () => selectSymbol(summary.id),
+    });
+    // Each symbol the token names, then what those were generated from: the
+    // proto field next to `set_size`, a click away.
+    const tabs = [];
+    const seen = new Set();
+    const summaries = ids.map((id) => state.symbols.get(id) || { id, name: '?', kind: 'unknown' });
+    for (const summary of summaries.concat(summaries.map((s) => s.origin).filter(Boolean))) {
+      if (seen.has(summary.id)) continue;
+      seen.add(summary.id);
+      tabs.push(tab(summary));
+    }
+    openPanel(tabs);
     keepVisible(tok);
+  }
+
+  // Where ctrl-click goes: the definition -- for generated code, of what it
+  // was generated from.
+  function definitionOf(tok) {
+    for (const id of (tok.dataset.s || '').split(',').filter(Boolean).map(Number)) {
+      const summary = state.symbols.get(id);
+      const target = summary && location((summary.origin || summary).definition);
+      if (target) return target.href;
+    }
+    return null;
   }
 
   function openIncludePanel(el) {
@@ -596,13 +664,14 @@
     }
     for (const hit of hits) {
       const s = hit.symbol || {};
-      const def = location(s.definition);
+      // Generated code is found under its own name and read at its origin.
+      const def = location((s.origin || s).definition);
       const a = document.createElement('a');
       a.className = 'hit';
       a.href = def ? def.href : '#';
       const kind = document.createElement('span');
       kind.className = 'kind k-' + (s.kind || 'unknown').toLowerCase();
-      kind.textContent = kindShort(s.kind);
+      kind.textContent = kindLabel(s);
       a.appendChild(kind);
       const name = document.createElement('span');
       name.className = 'qname';
@@ -677,6 +746,11 @@
       const tok = ev.target.closest('.tok');
       if (!tok) return;
       ev.preventDefault();
+      const target = (ev.ctrlKey || ev.metaKey) && definitionOf(tok);
+      if (target) {
+        window.location.hash = target;
+        return;
+      }
       openSymbolPanel(tok);
     });
     $('panel-close').addEventListener('click', closePanel);

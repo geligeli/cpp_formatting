@@ -68,6 +68,16 @@ message SymbolSummary {
   string type = 8;
   Location definition = 9;  // the definition, else the first declaration,
                             // else the canonical location; absent if none
+  cpp_index.Language language = 10;
+  // What this symbol was generated from (its GENERATED_FROM relation): for
+  // `set_size` of a `.pb.h`, the field `size` of the `.proto`.  That is where
+  // a reader wants to go, so it rides along with every summary; it has no
+  // origin of its own.
+  SymbolSummary origin = 11;
+  // With `origin`: the generator says this symbol modifies what it was
+  // generated from -- a setter, a `mutable_` accessor (the WRITE on its
+  // GENERATES anchor).  A use of it is a write of the origin.
+  bool modifies_origin = 12;
 }
 
 message Span {
@@ -121,12 +131,17 @@ message Related {
   SymbolSummary symbol = 3;
 }
 
+// Occurrences of the symbol itself.  A GENERATES anchor (index.proto) is not
+// one: it marks generated text, and is counted nowhere.
 message RefCounts {
   uint32 total = 1;
   uint32 definitions = 2;
   uint32 declarations = 3;
   uint32 references = 4;
   uint32 files = 5;
+  // Occurrences of the symbols generated from this one (`set_size()` calls,
+  // for the proto field `size`): what `/api/refs?expand=generated` adds.
+  uint32 generated = 6;
 }
 
 message SymbolInfo {
@@ -144,6 +159,9 @@ message Reference {
   string role_names = 3;
   cpp_index.MacroContext macro = 4;
   string line_text = 5;  // the whole line, when the file is available
+  // With `expand=generated`: which symbol this is an occurrence of, when it
+  // is not the one asked for (an id into References.symbols).
+  int32 symbol = 6;
 }
 
 message FileReferences {
@@ -160,6 +178,9 @@ message References {
   uint32 limit = 4;
   repeated FileReferences files = 5;
   bool truncated = 6;
+  // With `expand=generated`: the symbols generated from `symbol`, whose
+  // occurrences are listed along with its own.
+  repeated SymbolSummary symbols = 7;
 }
 
 message SearchHit {

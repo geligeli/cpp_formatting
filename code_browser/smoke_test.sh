@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # End to end over the demo index (//bazel/testdata:index.pb): import it,
-# serve a copy of the demo sources, and hit every endpoint with http_get.
+# serve a copy of the demo sources, and hit every endpoint with http_get --
+# then the same over the two-language index (//bazel/testdata:inventory_index.pb),
+# for the link between a .proto and the C++ generated from it.
 # Runs from the runfiles tree; the checkout is a *copy* of the demo files,
 # since runfiles are symlinks out of the tree and the server refuses those.
 set -euo pipefail
@@ -106,5 +108,64 @@ fi
 # 6. Shutdown on SIGINT.
 kill -INT "$server"
 wait "$server" || fail "server exited non-zero on SIGINT"
+trap - EXIT
+
+# 7. Two languages.  //bazel/testdata:inventory_index.pb is the C++ aspect's
+#    units for inventory_user.cpp merged with the proto aspect's for the two
+#    .proto files -- real protoc annotations, real Clang ranges, linked by the
+#    merge.  The server answers the link from both ends.
+inventory="$here/bazel/testdata/inventory_index.pb"
+[[ -f "$inventory" ]] || fail "missing runfile: $inventory"
+mkdir -p "$work/inventory/bazel/testdata/proto"
+cp -L bazel/testdata/inventory_user.cpp "$work/inventory/bazel/testdata/"
+cp -L bazel/testdata/proto/inventory.proto bazel/testdata/proto/unit.proto \
+  "$work/inventory/bazel/testdata/proto/"
+"$browser" --index="$inventory" --import-to="$work/inventory.sqlite" 2> "$work/inventory.err" \
+  || { cat "$work/inventory.err"; fail "importing the two-language index"; }
+rm -f "$work/port"
+"$browser" --db="$work/inventory.sqlite" --root="$work/inventory" --port=0 \
+  --port-file="$work/port" --log-requests=false > "$work/inventory.log" 2>&1 &
+server=$!
+trap 'kill "$server" 2>/dev/null || true' EXIT
+for _ in $(seq 1 100); do [[ -s "$work/port" ]] && break; sleep 0.1; done
+[[ -s "$work/port" ]] || { cat "$work/inventory.log"; fail "second server did not start"; }
+url="http://127.0.0.1:$(cat "$work/port")"
+
+# The .proto files are in the tree under their real paths (unit.proto is
+# imported as "proto/unit.proto" and reaches protoc as a symlink).
+"$get" "$url/api/files?prefix=bazel/testdata/proto" > "$work/protos.json"
+grep -q '"path": *"bazel/testdata/proto/unit.proto"' "$work/protos.json" \
+  || { cat "$work/protos.json"; fail "unit.proto is not in the tree"; }
+# ... and the import is a link to it.
+"$get" "$url/api/includes?path=bazel/testdata/proto/inventory.proto" > "$work/imports.json"
+grep -q '"path": *"bazel/testdata/proto/unit.proto"' "$work/imports.json" \
+  || { cat "$work/imports.json"; fail "the import of proto/unit.proto does not resolve"; }
+
+# proto -> C++: the field lists its accessors, and its references are theirs.
+"$get" "$url/api/symbol?usr=proto:demo.inventory.Inventory.Slot.count" > "$work/count.json"
+grep -q '"language": *"PROTO"' "$work/count.json" || { cat "$work/count.json"; fail "the field's language"; }
+grep -q '"qualified_name": *"demo::inventory::Inventory_Slot::set_count"' "$work/count.json" \
+  || { cat "$work/count.json"; fail "set_count is not generated from the field"; }
+count_id="$(grep -o '"id": *[0-9]*' "$work/count.json" | head -1 | grep -o '[0-9]*$')"
+"$get" "$url/api/refs/$count_id?expand=generated" > "$work/count_refs.json"
+# (`>` is \u003e in the JSON, so the line is matched from `set_count` on.)
+grep -q 'set_count(3);"' "$work/count_refs.json" \
+  || { cat "$work/count_refs.json"; fail "the call of set_count is not a reference of the field"; }
+grep -q '"modifies_origin": *true' "$work/count_refs.json" \
+  || { cat "$work/count_refs.json"; fail "the setter is not marked as writing the field"; }
+
+# C++ -> proto: what the user's tokens are annotated with names the field, in
+# the .proto.
+"$get" "$url/api/annotations?path=bazel/testdata/inventory_user.cpp" > "$work/user_ann.json"
+grep -q '"usr": *"proto:demo.inventory.Inventory.Slot.count"' "$work/user_ann.json" \
+  || fail "the accessors in inventory_user.cpp carry no origin"
+grep -q '"path": *"bazel/testdata/proto/inventory.proto"' "$work/user_ann.json" \
+  || fail "the origin is not located in the .proto"
+# The enumerator of the file with the stripped import prefix.
+grep -q '"usr": *"proto:demo.inventory.PIECE"' "$work/user_ann.json" \
+  || fail "PIECE does not lead to its enumerator"
+
+kill -INT "$server"
+wait "$server" || fail "second server exited non-zero on SIGINT"
 trap - EXIT
 echo "smoke test passed"

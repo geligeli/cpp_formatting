@@ -33,6 +33,10 @@ auto Trim(std::string_view s) -> std::string_view {
   return s;
 }
 
+// The two numbers of index.proto that the SQL below spells out.
+static_assert(cpp_index::GENERATED_FROM == 100);
+static_assert(cpp_index::GENERATES == 8192);
+
 // The statements a connection keeps prepared, by role.
 enum Query {
   kFileIdOf,
@@ -50,6 +54,8 @@ enum Query {
   kSymbolByUsr,
   kSymbolOccurrences,
   kCountSymbolOccurrences,
+  kGeneratedOccurrences,
+  kCountGeneratedOccurrences,
   kCountSymbolFiles,
   kRelatedForward,
   kRelatedReverse,
@@ -99,8 +105,24 @@ constexpr const char* kSql[kNumQueries] = {
     "SELECT COUNT(*) FROM occurrences "
     "WHERE symbol = ?1 AND (?2 = 0 OR (roles & ?2) != 0) AND (roles & ?3) = 0 "
     "AND (?4 < 0 OR file = ?4)",
+    // The same two over the symbol and everything generated from it
+    // (RelationKind.GENERATED_FROM = 100), through symrel_by_target.
+    /*kGeneratedOccurrences*/
+    "SELECT id, file, begin, end, symbol, roles, macro FROM occurrences "
+    "WHERE symbol IN (SELECT ?1 UNION SELECT symbol FROM symbol_relations "
+    "WHERE target = ?1 AND kind = 100) "
+    "AND (?2 = 0 OR (roles & ?2) != 0) AND (roles & ?3) = 0 "
+    "AND (?4 < 0 OR file = ?4) ORDER BY file, begin, end LIMIT ?5 OFFSET ?6",
+    /*kCountGeneratedOccurrences*/
+    "SELECT COUNT(*) FROM occurrences "
+    "WHERE symbol IN (SELECT ?1 UNION SELECT symbol FROM symbol_relations "
+    "WHERE target = ?1 AND kind = 100) "
+    "AND (?2 = 0 OR (roles & ?2) != 0) AND (roles & ?3) = 0 "
+    "AND (?4 < 0 OR file = ?4)",
     /*kCountSymbolFiles*/
-    "SELECT COUNT(DISTINCT file) FROM occurrences WHERE symbol = ?",
+    // Role.GENERATES = 8192: an anchor is not an occurrence of the symbol.
+    "SELECT COUNT(DISTINCT file) FROM occurrences WHERE symbol = ? "
+    "AND (roles & 8192) = 0",
     /*kRelatedForward*/
     "SELECT kind, target FROM symbol_relations WHERE symbol = ? "
     "ORDER BY kind, target",
@@ -455,7 +477,8 @@ auto IndexDb::SymbolOccurrences(int32_t symbol, const RefQuery& q) const
   std::vector<OccRow> out;
   Lease c = Acquire();
   if (!c.ok()) return out;
-  Statement& s = c->Stmt(kSymbolOccurrences);
+  Statement& s =
+      c->Stmt(q.with_generated ? kGeneratedOccurrences : kSymbolOccurrences);
   s.BindInt(1, symbol);
   s.BindInt(2, q.role_mask);
   s.BindInt(3, q.exclude_mask);
@@ -470,7 +493,8 @@ auto IndexDb::CountSymbolOccurrences(int32_t symbol, const RefQuery& q) const
     -> uint32_t {
   Lease c = Acquire();
   if (!c.ok()) return 0;
-  Statement& s = c->Stmt(kCountSymbolOccurrences);
+  Statement& s = c->Stmt(q.with_generated ? kCountGeneratedOccurrences
+                                          : kCountSymbolOccurrences);
   s.BindInt(1, symbol);
   s.BindInt(2, q.role_mask);
   s.BindInt(3, q.exclude_mask);
@@ -506,13 +530,17 @@ auto IndexDb::Search(std::string_view query, const SearchOptions& opts) const
   SearchResult result;
   const std::string q = Lower(Trim(query));
   if (q.empty() || opts.limit == 0) return result;
-  // `ns::Name` matches qualified names; the last component drives the
-  // candidate search.
+  // `ns::Name`, or `pkg.Message` as a .proto spells it, matches qualified
+  // names; the last component drives the candidate search.
   std::string name_part = q;
   std::string qualified_part;
-  if (const size_t sep = q.rfind("::"); sep != std::string::npos) {
+  const size_t colons = q.rfind("::");
+  const size_t dot = q.rfind('.');
+  if (colons != std::string::npos || dot != std::string::npos) {
+    const bool by_dot = colons == std::string::npos ||
+                        (dot != std::string::npos && dot > colons);
     qualified_part = q;
-    name_part = q.substr(sep + 2);
+    name_part = q.substr(by_dot ? dot + 1 : colons + 2);
     if (name_part.empty()) return result;
   }
   // More candidates than hits: the ranking below decides which survive.

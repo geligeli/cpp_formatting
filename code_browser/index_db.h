@@ -80,6 +80,10 @@ struct RefQuery {
   std::optional<int32_t> file;
   uint32_t offset = 0;
   uint32_t limit = 500;
+  // Also the occurrences of every symbol generated from this one (its
+  // reverse GENERATED_FROM relations): the `set_size()` calls, for the proto
+  // field `size`.
+  bool with_generated = false;
 };
 
 struct SearchOptions {
@@ -155,14 +159,16 @@ class IndexDb {
       -> std::vector<OccRow>;
   auto CountSymbolOccurrences(int32_t symbol, const RefQuery& q) const
       -> uint32_t;
-  // How many files the symbol occurs in.
+  // How many files the symbol occurs in (a GENERATES anchor is not an
+  // occurrence of it).
   auto CountSymbolFiles(int32_t symbol) const -> uint32_t;
   // The symbol's own relations (reverse=false: kind, target) or the
   // relations naming it (reverse=true: kind, source) -- members of a class,
   // classes derived from it, functions overriding it.
   auto Related(int32_t symbol, bool reverse) const -> std::vector<RelationRow>;
   // Name search: a prefix of the name, a substring of it (3+ characters), or
-  // a `::`-qualified spelling matched against qualified_name.  Ranked: exact
+  // a qualified spelling (`ns::Name`, or `pkg.Message` as a .proto says it)
+  // matched against qualified_name.  Ranked: exact
   // name, then prefix, then substring; shorter qualified names first.
   auto Search(std::string_view query, const SearchOptions& opts) const
       -> SearchResult;

@@ -178,14 +178,17 @@ a.inc:hover { text-decoration-color: currentColor; }
 .tok.macro-body { border-bottom: 1px dotted var(--muted); }
 .tok.unresolved { border-bottom: 1px dashed var(--error); }
 .tok.k-struct, .tok.k-class, .tok.k-union, .tok.k-enum, .tok.k-type_alias,
-.tok.k-template_type_parm, .tok.k-concept { color: var(--type); }
+.tok.k-template_type_parm, .tok.k-concept, .tok.k-message, .tok.k-oneof,
+.tok.k-service { color: var(--type); }
 .tok.k-function, .tok.k-instance_method, .tok.k-static_method,
 .tok.k-class_method, .tok.k-constructor, .tok.k-destructor,
-.tok.k-conversion_function { color: var(--func); }
+.tok.k-conversion_function, .tok.k-rpc { color: var(--func); }
 .tok.k-variable, .tok.k-field, .tok.k-parameter, .tok.k-enum_constant,
 .tok.k-non_type_template_parm { color: var(--var); }
 .tok.k-macro { color: var(--macro); }
-.tok.k-namespace, .tok.k-namespace_alias, .tok.k-using { color: var(--ns); }
+.tok.k-namespace, .tok.k-namespace_alias, .tok.k-using, .tok.k-package { color: var(--ns); }
+/* an anchor: generated text, a way back to what it was generated from */
+.tok.r-generates { border-bottom: 1px dotted var(--accent); }
 
 /* panel: below the code, one tab per thing the click named */
 #panel {
@@ -245,6 +248,8 @@ a.inc:hover { text-decoration-color: currentColor; }
 #panel .section { margin-top: 6px; font-weight: 600; }
 #panel .ref-file { margin-top: 6px; font-family: ui-monospace, monospace; color: var(--muted); }
 #panel .roles { color: var(--muted); font-size: 11px; }
+#panel .via { color: var(--func); }
+#panel .pane-head a.origin { font-weight: 600; }
 #panel .usr { font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); margin-top: 6px; word-break: break-all; }
 
 .kind {
@@ -255,9 +260,10 @@ a.inc:hover { text-decoration-color: currentColor; }
   color: var(--muted);
   white-space: nowrap;
 }
-.kind.k-struct, .kind.k-class, .kind.k-union, .kind.k-enum, .kind.k-type_alias { color: var(--type); }
+.kind.k-struct, .kind.k-class, .kind.k-union, .kind.k-enum, .kind.k-type_alias,
+.kind.k-message, .kind.k-oneof, .kind.k-service { color: var(--type); }
 .kind.k-function, .kind.k-instance_method, .kind.k-static_method, .kind.k-class_method,
-.kind.k-constructor, .kind.k-destructor { color: var(--func); }
+.kind.k-constructor, .kind.k-destructor, .kind.k-rpc { color: var(--func); }
 .kind.k-variable, .kind.k-field, .kind.k-parameter, .kind.k-enum_constant { color: var(--var); }
 .kind.k-macro { color: var(--macro); }
 

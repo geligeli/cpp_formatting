@@ -244,8 +244,25 @@ class FileResolver {
   std::map<int32_t, Entry> entries_;
 };
 
+// `with_origin`: also what the symbol was generated from, one level up.
 void FillSummary(const IndexDb& db, FileResolver& files, const SymbolRow& s,
-                 api::SymbolSummary* out) {
+                 api::SymbolSummary* out, bool with_origin = true) {
+  if (with_origin)
+    for (const RelationRow& r : db.Related(s.id, /*reverse=*/false)) {
+      if (r.kind != cpp_index::GENERATED_FROM) continue;
+      if (const std::optional<SymbolRow> origin = db.Symbol(r.symbol))
+        FillSummary(db, files, *origin, out->mutable_origin(),
+                    /*with_origin=*/false);
+      // The anchor that made the link sits on this symbol's declaration.
+      if (s.has_canonical)
+        for (const OccRow& o :
+             db.OccurrencesAt(s.canonical_file, s.canonical_begin))
+          if (o.symbol == r.symbol && o.begin == s.canonical_begin &&
+              o.end == s.canonical_end && (o.roles & cpp_index::GENERATES) &&
+              (o.roles & cpp_index::WRITE))
+            out->set_modifies_origin(true);
+      break;
+    }
   out->set_id(s.id);
   out->set_usr(s.usr);
   out->set_name(s.name);
@@ -254,6 +271,7 @@ void FillSummary(const IndexDb& db, FileResolver& files, const SymbolRow& s,
   out->set_sub_kind(s.sub_kind);
   out->set_properties(s.properties);
   out->set_type(s.type);
+  out->set_language(s.language);
   if (s.definition_occ != 0) {
     if (const std::optional<OccRow> o = db.Occurrence(s.definition_occ)) {
       files.Fill(out->mutable_definition(), o->file, o->begin, o->end);
@@ -307,6 +325,9 @@ struct IncludeDirective {
   uint32_t end = 0;
   std::string spelling;
   bool angled = false;
+  // The spelling is a path from some root and never relative to the file
+  // that says it: a .proto's `import`.
+  bool rooted = false;
 };
 
 // Line by line, with no preprocessor: a directive inside a comment or a
@@ -352,6 +373,49 @@ auto ScanIncludes(std::string_view text) -> std::vector<IncludeDirective> {
   return out;
 }
 
+// A .proto's imports: `import "a/b.proto";`, `import public ...`, `import
+// weak ...`.  As line-based as the scanner above, and for the same reason.
+auto ScanProtoImports(std::string_view text) -> std::vector<IncludeDirective> {
+  std::vector<IncludeDirective> out;
+  const auto blank = [](char c) { return c == ' ' || c == '\t'; };
+  size_t line = 0;
+  while (line < text.size()) {
+    size_t eol = text.find('\n', line);
+    if (eol == std::string_view::npos) eol = text.size();
+    size_t i = line;
+    line = eol + 1;
+    while (i < eol && blank(text[i])) ++i;
+    const auto word = [&](std::string_view w) {
+      if (text.substr(i, eol - i).rfind(w, 0) != 0) return false;
+      const size_t after = i + w.size();
+      if (after < eol && !blank(text[after]) && text[after] != '"')
+        return false;
+      i = after;
+      while (i < eol && blank(text[i])) ++i;
+      return true;
+    };
+    if (!word("import")) continue;
+    if (!word("public")) word("weak");
+    if (i == eol || text[i] != '"') continue;
+    const size_t begin = i + 1;
+    const size_t close = text.find('"', begin);
+    if (close == std::string_view::npos || close >= eol || close == begin)
+      continue;
+    IncludeDirective d;
+    d.begin = static_cast<uint32_t>(begin);
+    d.end = static_cast<uint32_t>(close);
+    d.spelling = std::string(text.substr(begin, close - begin));
+    d.rooted = true;
+    out.push_back(std::move(d));
+  }
+  return out;
+}
+
+auto EndsWith(std::string_view s, std::string_view suffix) -> bool {
+  return s.size() >= suffix.size() &&
+         s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
 // The indexed files `d` can name from `includer`, best first: the file next
 // to the includer (quoted form), the spelling as a path from the root, then
 // the paths ending in it -- first-party ones first, then the fewest
@@ -371,9 +435,9 @@ auto ResolveInclude(const IndexDb& db, std::string_view includer,
                                   .generic_string();
   const bool suffixable = spelling.rfind("../", 0) != 0 && spelling[0] != '/';
   const auto rank = [&](const FileRow& row) -> int {
-    if (!d.angled && row.path == sibling) return 0;
+    if (!d.angled && !d.rooted && row.path == sibling) return 0;
     if (row.path == spelling) return 1;
-    if (row.path == sibling) return 2;
+    if (!d.rooted && row.path == sibling) return 2;
     if (suffixable && row.path.size() > spelling.size() &&
         row.path.compare(row.path.size() - spelling.size(), spelling.size(),
                          spelling) == 0 &&
@@ -542,7 +606,11 @@ auto ApiHandler::Includes(const ApiRequest& request) const -> ApiResponse {
   if (!bytes) return ErrorResponse(404, "no such file in the checkout");
   api::Includes out;
   out.set_path(f->path);
-  for (const IncludeDirective& d : ScanIncludes(bytes->data)) {
+  // What a file includes is a matter of its language.
+  const std::vector<IncludeDirective> directives =
+      EndsWith(f->path, ".proto") ? ScanProtoImports(bytes->data)
+                                  : ScanIncludes(bytes->data);
+  for (const IncludeDirective& d : directives) {
     api::Include* inc = out.add_includes();
     inc->set_begin(d.begin);
     inc->set_end(d.end);
@@ -601,13 +669,18 @@ auto ApiHandler::SymbolInfo(const ApiRequest& request,
       FillSummary(db_, files, *other, rel->mutable_symbol());
     }
   api::RefCounts* counts = info.mutable_counts();
-  counts->set_total(db_.CountSymbolOccurrences(sym->id, RefQuery{}));
+  RefQuery all;
+  all.exclude_mask = cpp_index::GENERATES;
+  counts->set_total(db_.CountSymbolOccurrences(sym->id, all));
   counts->set_definitions(db_.CountSymbolOccurrences(sym->id, defs));
   counts->set_declarations(db_.CountSymbolOccurrences(sym->id, decls));
   RefQuery refs;
   refs.role_mask = cpp_index::REFERENCE;
   counts->set_references(db_.CountSymbolOccurrences(sym->id, refs));
   counts->set_files(db_.CountSymbolFiles(sym->id));
+  all.with_generated = true;
+  counts->set_generated(db_.CountSymbolOccurrences(sym->id, all) -
+                        counts->total());
   return WithEtag(Json(info), db_.etag(), request);
 }
 
@@ -644,12 +717,26 @@ auto ApiHandler::References(const ApiRequest& request,
       return ErrorResponse(400, "bad limit");
     q.limit = std::min(q.limit, kMaxRefLimit);
   }
+  if (const std::optional<std::string> expand = params.Get("expand")) {
+    if (*expand != "generated") return ErrorResponse(400, "bad expand");
+    q.with_generated = true;
+  }
+  // An anchor marks generated text; it is listed only when asked for by role.
+  if (!(q.role_mask & cpp_index::GENERATES))
+    q.exclude_mask |= cpp_index::GENERATES;
   api::References out;
   out.set_symbol(id);
   out.set_offset(q.offset);
   out.set_limit(q.limit);
   out.set_total(db_.CountSymbolOccurrences(id, q));
   FileResolver files(db_, repo_, files_);
+  if (q.with_generated)
+    for (const RelationRow& r : db_.Related(id, /*reverse=*/true)) {
+      if (r.kind != cpp_index::GENERATED_FROM) continue;
+      // With their origin: that is where `modifies_origin` comes from.
+      if (const std::optional<SymbolRow> generated = db_.Symbol(r.symbol))
+        FillSummary(db_, files, *generated, out.add_symbols());
+    }
   api::FileReferences* group = nullptr;
   uint32_t returned = 0;
   for (const OccRow& o : db_.SymbolOccurrences(id, q)) {
@@ -667,6 +754,7 @@ auto ApiHandler::References(const ApiRequest& request,
     ref->set_roles(o.roles);
     ref->set_role_names(roleNames(o.roles));
     ref->set_macro(o.macro);
+    if (o.symbol != id) ref->set_symbol(o.symbol);
     if (const FileResolver::Entry* e = files.Get(o.file); e && e->bytes)
       ref->set_line_text(
           std::string(e->bytes->LineText(ref->location().line())));
