@@ -39,3 +39,14 @@ cc_test(
     srcs = ["shapes_test.cpp"],
     deps = [":geometry"],
 )
+
+# A target no platform can build.  `bazel build //...` skips it; the script
+# names its targets one by one, where Bazel refuses an incompatible target
+# ("... but was explicitly requested"), so it has to leave this one out -- for
+# formatting, the index and the compilation database alike.  The source would
+# not compile either, which is how a run that did not skip it shows up.
+cc_library(
+    name = "other_platform",
+    srcs = ["other_platform.cpp"],
+    target_compatible_with = ["@platforms//:incompatible"],
+)

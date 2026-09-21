@@ -209,6 +209,11 @@ check_consumer() {  # <flavor>
     || { tail -30 "$log" >&2; fail "[$flavor] cpp_format.sh browse --check failed"; }
   grep -Eq "index\.pb\.sqlite: [1-9][0-9]* files, [1-9][0-9]* symbols" "$log" \
     || { tail -20 "$log" >&2; fail "[$flavor] --check did not print the database stats"; }
+  # The fixture has a target no platform can build.  The script names every
+  # target explicitly, and Bazel refuses an explicitly requested incompatible
+  # one, so "the whole repository" has to mean "what can be built here".
+  grep -q "cpp_format: skipping //mini:other_platform (incompatible" "$log" \
+    || { tail -20 "$log" >&2; fail "[$flavor] the incompatible target was not skipped"; }
   grep -q "cpp_format: wrote $ws/index.pb" "$log" || fail "[$flavor] the index was not written"
   grep -q "code_browser: importing" "$log" || fail "[$flavor] the first run did not import the index"
   # What the user is told before the server starts: which binary, the exact

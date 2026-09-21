@@ -174,6 +174,41 @@ if [[ ${#targets[@]} -eq 0 ]]; then
   exit 0
 fi
 
+# ... and of those, only the ones this platform can build.  A pattern on the
+# command line skips a target whose `target_compatible_with` rules it out, but
+# the labels are listed here one by one, and an explicitly requested
+# incompatible target is an error ("... is incompatible and cannot be built,
+# but was explicitly requested").  They are dropped from `targets` rather than
+# passed with --skip_incompatible_explicit_targets so that step 3 does not
+# read the manifest such a target left behind under another configuration.
+# If the cquery itself fails, the list stays as it is and the build below
+# reports why.
+query_file="$(mktemp)"
+{ echo 'set('; printf '"%s"\n' "${targets[@]}"; echo ')'; } > "$query_file"
+if compatible="$("$BAZEL" cquery --query_file="$query_file" --output=starlark \
+    --starlark:expr='"" if "IncompatiblePlatformProvider" in providers(target) else str(target.label)' \
+    2>/dev/null)"; then
+  declare -A is_compatible=()
+  while IFS= read -r label; do
+    # `@@//pkg:name` (or `@//pkg:name`) -> `//pkg:name`, as query printed it.
+    [[ -n "$label" ]] && is_compatible["//${label#*//}"]=1
+  done <<< "$compatible"
+  kept=()
+  for t in "${targets[@]}"; do
+    if [[ -n "${is_compatible[$t]:-}" ]]; then
+      kept+=("$t")
+    else
+      echo "cpp_format: skipping $t (incompatible with this platform)" >&2
+    fi
+  done
+  targets=("${kept[@]}")
+fi
+rm -f "$query_file"
+if [[ ${#targets[@]} -eq 0 ]]; then
+  echo "cpp_format: no cc targets under $pattern can be built for this platform" >&2
+  exit 0
+fi
+
 bazel_bin="$("$BAZEL" info bazel-bin)"
 workspace="$("$BAZEL" info workspace)"
 exec_root="$("$BAZEL" info execution_root)"

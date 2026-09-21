@@ -100,7 +100,9 @@ source file emits that file's edit records — parallel, cached, and incremental
 per file, like compilation), and merges every record into one repository-wide
 change — deduping, resolving template-dependent member tokens across
 translation units, and flagging genuine conflicts. Tag a target
-`no-cpp-format` to exclude it.
+`no-cpp-format` to exclude it. A target that cannot be built for this platform
+(`target_compatible_with`) is skipped with a note, in every mode, as `bazel
+build //...` would skip it.
 
 There is deliberately no BUILD-file macro for any of this. What to format or
 index is a *pattern* — `//...` — and a pattern exists only on the command line:
