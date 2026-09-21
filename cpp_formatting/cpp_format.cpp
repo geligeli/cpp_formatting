@@ -251,7 +251,8 @@ auto runAggregate(int argc, const char** argv) -> int {
 }
 
 // Index modes: `--merge-index` unions per-TU index units (from --emit-index)
-// into one repository index; `--dump-index` prints a unit or an index, or
+// into one repository index (on every CPU unless --jobs says otherwise, with
+// a progress line on a terminal); `--dump-index` prints a unit or an index, or
 // answers a (file, offset) lookup against it.  Like --aggregate, neither
 // parses any C++, so both are dispatched before CommonOptionsParser and parse
 // their own small flag sets by hand.

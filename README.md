@@ -123,8 +123,12 @@ tools/cpp_format.sh browse --check          # index, print the stats, exit
 
 It builds the symbol index (see [Symbol index](#symbol-index)) into `index.pb`
 in the workspace root — add `index.pb*` to your `.gitignore` — and serves *your
-checkout* with every indexed token annotated: click an identifier for its
-definition and references. Before the server starts it prints the browser
+checkout* with every indexed token annotated: click an identifier and a panel
+below the code shows its definition, relations and references (it stays open
+while you follow them; a token that names several symbols gets a tab each), and
+every `#include` is a link to the file it names. A target that does not build
+does not stop it: the rest is indexed, and the script says how many translation
+units are missing. Before the server starts it prints the browser
 binary it resolved and the exact command line it runs, so you can restart the
 server by hand. **The index is a snapshot**, read once at start: after editing
 sources, stop the server and run `browse` again. Only the translation units

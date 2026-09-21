@@ -22,9 +22,11 @@
 #                      workspace root (a cpp_index.Index protobuf; read it with
 #                      `cpp_format --dump-index [--lookup=<file>:<offset>]`)
 #     browse           `index`, then serve the workspace in the code browser
-#                      over it (it prints its URL; --port=N picks the port): every indexed token
-#                      annotated, click through to definitions and references.
-#                      Prints the browser binary and its command line first.
+#                      over it, on a free port (it prints its URL; --port=N
+#                      picks one): every indexed token annotated -- a click
+#                      opens a panel with the symbol's definition, relations
+#                      and references -- and every #include a link.  Prints
+#                      the browser binary and its command line first.
 #
 #   target-pattern defaults to //... (the whole repo). Any argument starting
 #   with `-` is passed through: to `cpp_format --aggregate` by check/diff/fix --
@@ -44,6 +46,12 @@
 #   Tag a target `no-cpp-format` to exclude it from formatting (it still gets
 #   compile_commands entries and is indexed); `no-cpp-index` excludes it from
 #   the index.  COMPILE_COMMANDS_OUT and INDEX_OUT override the output paths.
+#
+#   A target this platform cannot build (target_compatible_with) is skipped,
+#   with a note, in every mode.  Every build is --keep_going: index, browse and
+#   compile_commands go on without the targets that fail (and say what is
+#   missing); check, diff and fix report every failure and stop, because a
+#   rename has to see every reference.
 #
 #   The index is a snapshot: the server reads it once, at start.  After editing
 #   sources, stop the server and run `browse` again -- only the translation
