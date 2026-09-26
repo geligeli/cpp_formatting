@@ -19,7 +19,7 @@ target *pattern* (`//...`), and a pattern is a command-line notion: a rule's
 it queries the cc_* targets under a pattern, builds the aspect's output group
 over them and merges the result outside Bazel, which is also the only place a
 fix can happen (an action cannot mutate workspace sources): `check`, `diff`,
-`fix`, `compile_commands`, `index` and `browse`.  `--config=lint` and
+`fix`, `compile_commands`, `index`, `browse` and `coverage`.  `--config=lint` and
 `--config=index` in .bazelrc build the per-file outputs alone.
 
 The compile command the aspect derives for a target is also what an editor
@@ -34,7 +34,8 @@ A second aspect, `cpp_index_aspect`, builds the symbol index the same way: one
 plus every owned header it includes.  `cpp_format.sh index` merges the units of
 a target pattern into one `Index` with `cpp_format --merge-index` and writes
 `index.pb` into the workspace; `cpp_format.sh browse` then serves the workspace
-in //code_browser over it.
+in //code_browser over it, and `cpp_format.sh coverage` with the tests' line
+coverage overlaid.
 
 The providers are public so that a rule of your own can consume the aspects'
 outputs; bazel/testdata/aspect_outputs.bzl does, for this repository's tests.

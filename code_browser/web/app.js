@@ -54,6 +54,10 @@
     text: null,           // {q, caseSensitive} of the results on the page
     caseSensitive: true,  // the last full-text search's choice
     scroll: {},           // view -> scrollTop while it is hidden
+    indexStale: false,    // the open file changed after the index was built
+    coverage: null,       // the open file's FileCoverage, when there is one
+    covStops: [],         // the first line of each run of missed lines
+    stepEl: null,         // the occurrence n/p last went to
   };
 
   // ---- API -------------------------------------------------------------
@@ -88,6 +92,135 @@
     el.classList.toggle('error', !!isError);
   }
 
+  // ---- coverage --------------------------------------------------------
+
+  // Whether coverage is shown, kept per browser (default on).  The server
+  // has coverage only when it was started with --coverage.
+  const COVERAGE_KEY = 'code_browser.coverage';
+  const hasCoverage = () => !!(state.repo && state.repo.coverage);
+  function coverageWanted() {
+    try { return window.localStorage.getItem(COVERAGE_KEY) !== 'off'; } catch (e) { return true; }
+  }
+  // Rounded down, so that a file with one line missed never reads 100%.
+  function pct(hit, found) {
+    if (!found) return '–';
+    return (Math.floor((hit || 0) * 1000 / found) / 10).toFixed(1) + '%';
+  }
+  function formatHits(h) {
+    if (h >= 4294967295) return '4.3G+';  // the API caps counts there
+    if (h < 1000) return String(h);
+    for (const [div, unit] of [[1e9, 'G'], [1e6, 'M'], [1e3, 'k']])
+      if (h >= div) return (h / div).toFixed(h < div * 10 ? 1 : 0) + unit;
+    return String(h);
+  }
+  function coverageSummary(t) {
+    let s = `${t.lines_hit || 0}/${t.lines_found || 0} lines (${pct(t.lines_hit, t.lines_found)})`;
+    if (t.branches_found) s += `, ${t.branches_hit || 0}/${t.branches_found} branches (${pct(t.branches_hit, t.branches_found)})`;
+    return s;
+  }
+  function coverageBadge(t) {
+    const el = document.createElement('span');
+    const ratio = (t.lines_hit || 0) / t.lines_found;
+    el.className = 'cov-pct ' + (ratio < 0.5 ? 'cov-lo' : ratio < 0.8 ? 'cov-mid' : 'cov-hi');
+    el.textContent = pct(t.lines_hit, t.lines_found);
+    el.title = coverageSummary(t) + (t.files > 1 ? ` in ${t.files} files` : '');
+    return el;
+  }
+
+  function setCoverageOn(on) {
+    document.body.classList.toggle('cov-on', on);
+    $('coverage-toggle').setAttribute('aria-pressed', on ? 'true' : 'false');
+    try { window.localStorage.setItem(COVERAGE_KEY, on ? 'on' : 'off'); } catch (e) { /* private mode */ }
+    updateBanner();
+  }
+
+  function initCoverage() {
+    const info = state.repo.coverage;
+    const t = info.totals || {};
+    const button = $('coverage-toggle');
+    button.hidden = false;
+    button.textContent = 'coverage ' + pct(t.lines_hit, t.lines_found);
+    button.title = `${coverageSummary(t)} in ${t.files || 0} files\n` +
+        `from ${info.path}` + (info.collected_at ? `, collected ${info.collected_at}` : '') +
+        '\nu / U: next / previous uncovered lines';
+    button.addEventListener('click', () => setCoverageOn(!document.body.classList.contains('cov-on')));
+    setCoverageOn(coverageWanted());
+  }
+
+  // Marks every instrumented line of the open file: hit, missed, or partial
+  // (ran, but a branch on it never went one of its ways).  Toggling coverage
+  // is CSS alone; nothing here runs again.
+  function applyCoverage(cov) {
+    state.coverage = cov;
+    state.covStops = [];
+    $('code').classList.toggle('has-cov', !!cov);
+    if (!cov) return;
+    const lines = cov.lines || [], hits = cov.hits || [];
+    const branches = new Map();
+    (cov.branch_lines || []).forEach((ln, i) =>
+        branches.set(ln, [(cov.branches || [])[i] || 0, (cov.branches_taken || [])[i] || 0]));
+    let inMiss = false;
+    for (let i = 0; i < lines.length; i++) {
+      const ln = lines[i], h = hits[i] || 0, br = branches.get(ln);
+      const el = $('L' + ln);
+      if (!el) continue;  // past the end: the file changed since
+      const cls = h === 0 ? 'cov-miss' : br && br[1] < br[0] ? 'cov-partial' : 'cov-hit';
+      el.classList.add(cls);
+      el.dataset.hits = formatHits(h);
+      el.querySelector('.ln').title = `hit ${h} time${h === 1 ? '' : 's'}` +
+          (br ? `; ${br[1]} of ${br[0]} branches taken` : '');
+      // Lines with no code in between do not break a run of missed lines.
+      if (cls === 'cov-miss' && !inMiss) state.covStops.push(ln);
+      inMiss = cls === 'cov-miss';
+    }
+  }
+
+  // The banner over the code: why its annotations or its coverage may be off.
+  function updateBanner() {
+    const banner = $('banner');
+    const lines = [];
+    if (state.indexStale) lines.push('This file changed after the index was built; annotations may be shifted.');
+    if (state.coverage && state.coverage.stale && document.body.classList.contains('cov-on'))
+      lines.push('This file changed after the coverage was collected; hit counts may be on the wrong lines.');
+    banner.textContent = lines.join(' ');
+    if (lines.length) banner.dataset.stale = '1';
+    else delete banner.dataset.stale;
+    if (state.view === 'code' && state.path) banner.hidden = !lines.length;
+  }
+
+  // u / U: the next / previous run of missed lines, from the marked line or
+  // the middle of the view.
+  function stepUncovered(direction) {
+    if (!hasCoverage()) { status('no coverage loaded (run cpp_format.sh coverage)'); return; }
+    if (!document.body.classList.contains('cov-on')) { status('coverage is off (the coverage button turns it on)'); return; }
+    if (!state.coverage) { status(`${state.path || 'this file'}: no coverage data`); return; }
+    const stops = state.covStops;
+    if (!stops.length) { status(`${state.path}: no uncovered lines`); return; }
+    let from = 0;
+    const marked = $('code').querySelector('.line.mark');
+    const view = $('code').getBoundingClientRect();
+    if (marked) {
+      const r = marked.getBoundingClientRect();
+      if (r.bottom >= view.top && r.top <= view.bottom) from = +marked.id.slice(1);
+    }
+    if (!from) {
+      const hit = document.elementFromPoint(view.left + view.width / 2, (view.top + view.bottom) / 2);
+      const line = hit && hit.closest('.line');
+      if (line) from = +line.id.slice(1);
+    }
+    let index;
+    if (direction > 0) {
+      index = stops.findIndex((ln) => ln > from);
+      if (index < 0) index = 0;
+    } else {
+      index = -1;
+      for (let i = stops.length - 1; i >= 0; i--) if (stops[i] < from) { index = i; break; }
+      if (index < 0) index = stops.length - 1;
+    }
+    goToLine(stops[index]);
+    status(`${state.path}: uncovered block ${index + 1} of ${stops.length} (line ${stops[index]})`);
+  }
+
   // ---- tree ------------------------------------------------------------
 
   async function loadDir(prefix, container) {
@@ -104,6 +237,7 @@
         const details = document.createElement('details');
         const summary = document.createElement('summary');
         summary.textContent = entry.name;
+        if (entry.coverage && entry.coverage.lines_found) summary.appendChild(coverageBadge(entry.coverage));
         details.appendChild(summary);
         const children = document.createElement('div');
         children.className = 'children';
@@ -124,6 +258,7 @@
           a.title = 'not present in this checkout';
         }
         a.textContent = entry.name;
+        if (entry.coverage && entry.coverage.lines_found) a.appendChild(coverageBadge(entry.coverage));
         a.href = '#' + entry.path;
         a.dataset.path = entry.path;
         container.appendChild(a);
@@ -139,7 +274,7 @@
     for (let i = 0; i < parts.length - 1; i++) {
       prefix = prefix ? prefix + '/' + parts[i] : parts[i];
       const details = [...container.querySelectorAll(':scope > details')]
-          .find((d) => d.querySelector(':scope > summary').textContent === parts[i]);
+          .find((d) => d.querySelector(':scope > summary').firstChild.textContent === parts[i]);
       if (!details) return;
       if (!details.open) {
         details.open = true;
@@ -402,9 +537,9 @@
       return;
     }
     status(`loading ${path}…`);
-    let file, ann, includes;
+    let file, ann, includes, cov;
     try {
-      [file, ann, includes] = await Promise.all([
+      [file, ann, includes, cov] = await Promise.all([
         getBytes(fileUrl(path)),
         getJson(`/api/annotations?path=${encodeURIComponent(path)}`).catch((e) => {
           if (String(e.message).startsWith('404')) return { spans: [], symbols: [] };
@@ -412,6 +547,10 @@
         }),
         // Links only: a file without them is still a file.
         getJson(`/api/includes?path=${encodeURIComponent(path)}`).catch(() => ({})),
+        // Coverage is an overlay: a file the tracefile does not name has none.
+        hasCoverage()
+          ? getJson(`/api/coverage?path=${encodeURIComponent(path)}`).catch(() => null)
+          : null,
       ]);
     } catch (e) {
       status(e.message, true);
@@ -420,21 +559,22 @@
     state.path = path;
     state.bytes = file.bytes;
     $('file-title').textContent = path;
-    const banner = $('banner');
-    if (file.headers.get('X-Newer-Than-Index')) {
-      banner.textContent = 'This file changed after the index was built; annotations may be shifted.';
-      banner.dataset.stale = '1';
-    } else {
-      delete banner.dataset.stale;
-    }
+    state.indexStale = !!file.headers.get('X-Newer-Than-Index');
+    state.coverage = cov;
+    updateBanner();
     state.scroll.code = 0;  // a new file starts at the top (or at `line`)
+    state.stepEl = null;
     showView('code');
     render(file.bytes, ann, includes.includes);
+    applyCoverage(cov);
     // The panel outlives the file (that is how a reference list is walked):
     // what it selected is highlighted here as well.
     if (state.selected !== null) selectSymbol(state.selected);
     document.title = path.split('/').pop() + ' – code browser';
-    status(`${path} — ${(ann.spans || []).length} annotated tokens`);
+    let line2 = `${path} — ${(ann.spans || []).length} annotated tokens`;
+    if (hasCoverage())
+      line2 += cov ? ` · coverage ${coverageSummary(cov.totals || {})}` : ' · no coverage data';
+    status(line2);
     revealInTree(path);
     goToLine(line);
   }
@@ -1034,17 +1174,39 @@
     openFile(target.path, target.line);
   }
 
+  // n / p: the next / previous occurrence of the selected symbol -- after
+  // the one n/p last went to while that is still in view, else after the
+  // middle of the view.  (Measuring from the middle every time made p find
+  // the occurrence it had just centred, and never get past it.)
   function stepHighlighted(direction) {
     if (state.selected === null) return;
     const els = state.tokens.get(state.selected) || [];
     if (!els.length) return;
     const view = $('code').getBoundingClientRect();
-    const y = (view.top + view.bottom) / 2;
-    let index = els.findIndex((el) => el.getBoundingClientRect().top > y);
-    if (direction < 0) index = (index < 0 ? els.length : index) - 1;
-    else if (index < 0) index = 0;
-    while (index < 0) index += els.length;
-    els[index % els.length].scrollIntoView({ block: 'center' });
+    let index = els.indexOf(state.stepEl);
+    if (index >= 0) {
+      const r = state.stepEl.getBoundingClientRect();
+      if (r.bottom < view.top || r.top > view.bottom) index = -1;
+    }
+    if (index >= 0) {
+      index += direction;
+    } else {
+      const y = (view.top + view.bottom) / 2;
+      if (direction > 0) {
+        index = els.findIndex((el) => el.getBoundingClientRect().top > y);
+        if (index < 0) index = 0;
+      } else {
+        for (let i = els.length - 1; i >= 0 && index < 0; i--)
+          if (els[i].getBoundingClientRect().bottom < y) index = i;
+        if (index < 0) index = els.length - 1;
+      }
+    }
+    index = (index + els.length) % els.length;
+    if (state.stepEl) state.stepEl.classList.remove('cur');
+    state.stepEl = els[index];
+    state.stepEl.classList.add('cur');
+    els[index].scrollIntoView({ block: 'center' });
+    status(`occurrence ${index + 1} of ${els.length}`);
   }
 
   // ---- init ------------------------------------------------------------
@@ -1056,7 +1218,12 @@
       const head = state.repo.head_commit ? state.repo.head_commit.slice(0, 12) : '';
       $('repo-head').textContent = [state.repo.head_ref ? state.repo.head_ref.replace(/^refs\/heads\//, '') : '', head].filter(Boolean).join(' @ ');
       const st = state.repo.stats || {};
-      status(`${st.files || 0} files, ${st.symbols || 0} symbols, ${st.occurrences || 0} occurrences (indexed ${st.imported_at || '?'})`);
+      let line = `${st.files || 0} files, ${st.symbols || 0} symbols, ${st.occurrences || 0} occurrences (indexed ${st.imported_at || '?'})`;
+      if (hasCoverage()) {
+        initCoverage();
+        line += ` · coverage ${coverageSummary(state.repo.coverage.totals || {})}`;
+      }
+      status(line);
     } catch (e) {
       status(e.message, true);
     }
@@ -1117,10 +1284,16 @@
         $('search').select();
       } else if (ev.key === 'Escape') {
         closePanel();
+      } else if (ev.ctrlKey || ev.metaKey || ev.altKey) {
+        // leave the browser's own shortcuts alone
       } else if (ev.key === 'n') {
         stepHighlighted(+1);
       } else if (ev.key === 'p') {
         stepHighlighted(-1);
+      } else if (ev.key === 'u') {
+        stepUncovered(+1);
+      } else if (ev.key === 'U') {
+        stepUncovered(-1);
       }
     });
   }

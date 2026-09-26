@@ -2,12 +2,14 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string>
 
 #include "code_browser/api.pb.h"
+#include "code_browser/coverage.h"
 #include "code_browser/file_cache.h"
 #include "code_browser/index_db.h"
 #include "code_browser/index_schema.h"
@@ -504,6 +506,94 @@ TEST_F(ApiTest, TextSearch) {
   EXPECT_EQ(Get("/api/text", "q=a&limit=5000").status, 400);
   EXPECT_EQ(Get("/api/text", "q=a&offset=x").status, 400);
   fs::remove(dir_.string() + ".fts");
+}
+
+TEST_F(ApiTest, Coverage) {
+  EXPECT_EQ(Get("/api/coverage", "path=widget.cpp").status, 503);
+  EXPECT_FALSE(Parse<api::RepoInfo>(Get("/api/repo")).has_coverage());
+  const auto plain = Parse<api::FileList>(Get("/api/files"));
+  for (const api::TreeEntry& e : plain.entries())
+    EXPECT_FALSE(e.has_coverage()) << e.path();
+
+  // widget.cpp spelled as a path under the root, as a report collected
+  // outside a sandbox has it; sub/other.cc is covered but not indexed.
+  const std::string lcov_path = dir_.string() + ".lcov";
+  std::ofstream(lcov_path, std::ios::binary)
+      << "SF:" << (dir_ / "widget.cpp").string() << "\n"
+      << "DA:1,0\nDA:2,5000000000\nBRDA:2,0,0,1\nBRDA:2,0,1,0\n"
+         "end_of_record\n"
+         "SF:sub/util.h\nDA:1,2\nend_of_record\n"
+         "SF:sub/other.cc\nDA:4,0\nend_of_record\n";
+  CoverageOptions opts;
+  opts.strip_prefixes = {repo_->root()};
+  std::string error;
+  const std::unique_ptr<Coverage> coverage =
+      Coverage::Load(lcov_path, opts, &error);
+  ASSERT_TRUE(coverage) << error;
+  handler_ = std::make_unique<ApiHandler>(*db_, *repo_, *files_, nullptr,
+                                          coverage.get());
+
+  const api::RepoInfo info = Parse<api::RepoInfo>(Get("/api/repo"));
+  EXPECT_EQ(info.coverage().path(), lcov_path);
+  EXPECT_FALSE(info.coverage().collected_at().empty());
+  EXPECT_EQ(info.coverage().totals().files(), 3u);
+  EXPECT_EQ(info.coverage().totals().lines_found(), 4u);
+  EXPECT_EQ(info.coverage().totals().lines_hit(), 2u);
+  EXPECT_EQ(info.coverage().totals().branches_found(), 2u);
+  EXPECT_EQ(info.coverage().totals().branches_hit(), 1u);
+
+  const ApiResponse first = Get("/api/coverage", "path=widget.cpp");
+  const auto fc = Parse<api::FileCoverage>(first);
+  EXPECT_EQ(fc.path(), "widget.cpp");
+  ASSERT_EQ(fc.lines_size(), 2);
+  EXPECT_EQ(fc.lines(0), 1u);
+  EXPECT_EQ(fc.hits(0), 0u);
+  EXPECT_EQ(fc.lines(1), 2u);
+  EXPECT_EQ(fc.hits(1), 4294967295u);  // capped
+  ASSERT_EQ(fc.branch_lines_size(), 1);
+  EXPECT_EQ(fc.branch_lines(0), 2u);
+  EXPECT_EQ(fc.branches(0), 2u);
+  EXPECT_EQ(fc.branches_taken(0), 1u);
+  EXPECT_EQ(fc.totals().lines_found(), 2u);
+  EXPECT_EQ(fc.totals().lines_hit(), 1u);
+  EXPECT_FALSE(fc.stale());
+  // A zero inside a repeated field is still written, so the arrays line up.
+  EXPECT_NE(first.body.find("\"hits\":[0,4294967295]"), std::string::npos)
+      << first.body;
+  ASSERT_FALSE(first.etag.empty());
+  EXPECT_EQ(Get("/api/coverage", "path=widget.cpp", first.etag).status, 304);
+
+  // Edited after the tracefile was written: stale, and a new ETag.
+  fs::last_write_time(dir_ / "widget.cpp",
+                      fs::last_write_time(lcov_path) + std::chrono::hours(1));
+  const ApiResponse edited = Get("/api/coverage", "path=widget.cpp");
+  EXPECT_TRUE(Parse<api::FileCoverage>(edited).stale());
+  EXPECT_NE(edited.etag, first.etag);
+
+  EXPECT_EQ(Get("/api/coverage", "path=widget.h").status, 404);
+  EXPECT_EQ(Get("/api/coverage").status, 400);
+  EXPECT_EQ(Get("/api/coverage", "path=../x").status, 400);
+
+  // The tree: a file's own totals, a directory's everything under it --
+  // sub/other.cc included, though the index does not list it.
+  const auto root = Parse<api::FileList>(Get("/api/files"));
+  bool saw_sub = false, saw_widget_cpp = false, saw_widget_h = false;
+  for (const api::TreeEntry& e : root.entries()) {
+    if (e.path() == "sub") {
+      saw_sub = true;
+      EXPECT_EQ(e.coverage().files(), 2u);
+      EXPECT_EQ(e.coverage().lines_found(), 2u);
+      EXPECT_EQ(e.coverage().lines_hit(), 1u);
+    } else if (e.path() == "widget.cpp") {
+      saw_widget_cpp = true;
+      EXPECT_EQ(e.coverage().lines_found(), 2u);
+    } else if (e.path() == "widget.h") {
+      saw_widget_h = true;
+      EXPECT_FALSE(e.has_coverage());
+    }
+  }
+  EXPECT_TRUE(saw_sub && saw_widget_cpp && saw_widget_h);
+  fs::remove(lcov_path);
 }
 
 }  // namespace

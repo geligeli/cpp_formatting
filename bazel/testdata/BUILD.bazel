@@ -281,3 +281,14 @@ sh_test(
     # not there; run in the real one.
     tags = ["local"],
 )
+
+# The `bazel coverage` flags `cpp_format.sh coverage` derives from the
+# workspace's C++ toolchain, from the script's helpers (sourced, like
+# compile_commands_test does).
+sh_test(
+    name = "coverage_flags_test",
+    size = "small",
+    srcs = ["coverage_flags_test.sh"],
+    args = ["$(location //bazel/integration:cpp_format.sh)"],
+    data = ["//bazel/integration:cpp_format.sh"],
+)

@@ -22,11 +22,23 @@ about the symbol on the right, uses in test code last -- the files of
 testonly Bazel targets, as the index aspect recorded them) are resizable; the
 sizes are kept per browser.
 
+With the tests' coverage (`--coverage=<lcov>`, or `cpp_format.sh coverage`,
+which runs the tests and starts the server with it), every instrumented line
+is tinted -- green hit, red missed, orange ran but left a branch untaken --
+with its hit count in a column after the line number; the file tree shows
+each file's and directory's line coverage, the status bar the open file's,
+and `u` / `U` step through the runs of missed lines. The **coverage** button
+in the header (it shows the report's overall percentage) turns all of it off
+and on, remembered per browser.
+
 ```sh
 # One command: indexes the whole repository (or a target pattern), prints the
 # browser's binary and command line, and serves the workspace on the index.
 # Run it again after editing: only the changed translation units are re-parsed.
 tools/cpp_format.sh browse                         # [pattern] [--port=N] [--check]
+# The same, after running the tests under the pattern with `bazel coverage`,
+# with their line coverage overlaid (the report is copied to index.pb.lcov):
+tools/cpp_format.sh coverage                       # [pattern] [--port=N] [--check]
 
 # Or by hand:
 # 1. An index of the repository:
@@ -39,10 +51,11 @@ bazel run //code_browser -- --index=$PWD/index.pb --root=$PWD
 
 `index_import index.pb [--out=x.sqlite] [--force]` does the import on its
 own. `code_browser --check` opens the database (and the full-text index,
-building it if it is stale), prints their stats and exits.
+building it if it is stale, and the coverage), prints their stats and exits.
 `--text-search=false` turns full-text search off; `--text-index=<path>`
 moves its file (default `<index>.fts`, or `<db>.fts`); `--text-max-file-kb`
-(4096) leaves larger files out.
+(4096) leaves larger files out. `--coverage=<lcov>` overlays an LCOV
+tracefile; see "Coverage".
 
 ## Layers
 
@@ -51,12 +64,13 @@ moves its file (default `<index>.fts`, or `<db>.fts`); `--text-max-file-kb`
 | storage | `index_schema.*` (writer), `index_db.*` (reader), `sqlite_util.*` | SQLite, the proto |
 | checkout | `repo.*`, `file_cache.*` | the filesystem, `.git`, the exec root |
 | full text | `text_index.*`, `suffix_array.*` | the files under the root, libsais; nothing about the symbol index |
+| coverage | `coverage.*` | an LCOV tracefile; nothing about the index but its path spelling |
 | API | `api.proto`, `api.*` | requests and JSON; nothing about sockets |
 | HTTP | `http_server.*`, `static_assets.*` | Boost.Beast/Asio; nothing about the index |
 | page | `web/index.html`, `web/app.js`, `web/app.css` | `/api/*` only |
 
 Each layer has its own test (`index_db_test`, `repo_test`, `text_index_test`
-and `suffix_array_test`, `api_test`, `http_server_test`);
+and `suffix_array_test`, `coverage_test`, `api_test`, `http_server_test`);
 `cross_language_test` is the API over an index of two languages, merged and
 linked as `--merge-index` does it; `smoke_test` runs the
 binaries end to end over the demo index in `//bazel/testdata`, and then over
@@ -70,8 +84,8 @@ fields as declared, defaults omitted).
 
 | route | returns |
 |---|---|
-| `/api/repo` | `RepoInfo`: root, exec root, HEAD, database, stats |
-| `/api/files?prefix=<dir>` | `FileList`: one level of the tree the index spans (`""` is the root; absolute SYSTEM paths sit under `/`) |
+| `/api/repo` | `RepoInfo`: root, exec root, HEAD, database, stats; with `--coverage`, `coverage`: the tracefile, when it was written, its ETag and its totals |
+| `/api/files?prefix=<dir>` | `FileList`: one level of the tree the index spans (`""` is the root; absolute SYSTEM paths sit under `/`). With `--coverage`, an entry has `coverage`: a file's totals, or a directory's everything under it (covered files the index does not list included) |
 | `/api/file?path=<p>` | the bytes (`text/plain`), with `ETag`, `Last-Modified`, `X-File-Id`, `X-File-Kind`, and `X-Newer-Than-Index: 1` when the file changed after the index was built |
 | `/api/annotations?path=<p>` | `Annotations`: every occurrence as a byte-range `Span`, plus a `SymbolSummary` for every symbol they name. A summary has the symbol's `language` and, for generated code, its `origin` -- the summary of what it was generated from (`set_size` -> the proto field `size`), with `modifies_origin` when the generator marked it a setter -- so the page knows where a click should lead without asking again |
 | `/api/includes?path=<p>` | `Includes`: every `#include` line's spelling as a byte range, with the indexed files it can name, best first. The index records no include edges and no include paths, so this is a resolution by path: the includer's sibling (quoted form), the spelling from the root, then the indexed paths ending in it — first-party first, then the fewest directories in front of the spelling. One candidate is a link; several open the panel to choose from. In a `.proto` the directives are its `import`s, whose spelling is a path from an import root and never relative to the file |
@@ -80,11 +94,12 @@ fields as declared, defaults omitted).
 | `/api/search?q=&limit=&kind=&locals=1` | `SearchResults`: name prefix, substring (3+ chars, via trigrams) or a qualified name, `ns::Name` or `pkg.Message` |
 | `/api/at?path=<p>&offset=<n>` | `OccurrencesAt`: what `cpp_format --dump-index --lookup` says |
 | `/api/text?q=&case=sensitive\|insensitive&offset=&limit=` | `TextSearchResults`: the lines that contain `q` exactly (the default) or ignoring ASCII case, by path then line, `limit` (≤ 2000, default 200) lines from `offset`; each line with its 1-based number, its text (clipped around the first match when long, from byte column `text_offset`) and the matches as byte spans into it. A file the symbol index knows carries its `file_id` and `kind`, others `file_id: -1`. More than 100 000 matches set `truncated`: the counts and lines then cover a subset. 503 when the server runs with `--text-search=false`; the ETag is the text index's and the symbol index's |
+| `/api/coverage?path=<p>` | `FileCoverage`: the file's instrumented lines and their hit counts, as parallel arrays (`lines[i]` ran `hits[i]` times, capped at 2³²−1), the lines with branches likewise (`branch_lines`, `branches`, `branches_taken`), the file's totals, and `stale` when the file changed after the tracefile was written. 404 for a file the tracefile does not name, 503 without `--coverage`; the ETag is the tracefile's and the file's |
 
-Errors are `Error{status, message}` with 400/404/405/414. Responses that
-depend only on the index carry its ETag and answer `If-None-Match` with 304
-(`/api/includes` reads the file too, so its ETag is the index's and the
-file's).
+Errors are `Error{status, message}` with 400/404/405/414, and 503 for a
+feature the server was started without. Responses that depend only on the
+index carry its ETag and answer `If-None-Match` with 304 (`/api/includes`
+reads the file too, so its ETag is the index's and the file's).
 
 ## Files the index names
 
@@ -137,6 +152,40 @@ takes milliseconds (a single letter over 340 MB, 90 ms). The suffix array is
 bounds-checked as it is read rather than when the file is opened, which would
 read all of it. With 32-bit offsets the text is at most 2 GiB (the build says
 so and suggests `--text-max-file-kb`).
+
+## Coverage
+
+`coverage.*` reads an LCOV tracefile once, at startup -- what `bazel coverage
+--combined_report=lcov` writes to `bazel-out/_coverage/_coverage_report.dat`,
+and what `cpp_format.sh coverage` copies next to the index as
+`index.pb.lcov`. The parser is strict: a record it does not know, a count
+that is not an unsigned number (a negative one is a coverage bug, not data),
+or a record outside `SF`…`end_of_record` stops the server with the file and
+line (`index.pb.lcov:17: DA: expected <line>,<count>, got 'DA:x,1'`) rather
+than drawing a wrong overlay. Function records are read past, and
+`LF`/`LH`/`BRF`/`BRH` recomputed from the `DA`/`BRDA` data, so that two
+records of one file -- one per test binary, in a report nobody merged -- add
+up line by line and branch by branch (counts saturate). A `BRDA` count of `-`
+is a branch that was never evaluated: found, not taken.
+
+`SF` paths are spelled as the index spells them: `/proc/self/cwd/` and `./`
+dropped, the root or the exec root (each canonical and as given) cut off,
+and, failing that, whatever follows a sandbox's `/execroot/<workspace>/`.
+The startup line says how many of the covered files the index knows
+(`coverage index.pb.lcov: 48 files (48 in the index), lines ...`), and warns
+when it knows none -- a report from another checkout. The full-text index
+leaves the tracefile out.
+
+The page marks lines by class alone (`cov-hit`, `cov-miss`, `cov-partial`,
+and the count in `data-hits`), so the header's toggle is a CSS switch and
+re-renders nothing. A file edited after the tracefile was written gets a
+banner, since its counts may sit on the wrong lines.
+
+## Keys
+
+`/` search · `Esc` close the panel · `n` / `p` the next / previous occurrence
+of the selected symbol (outlined) · `u` / `U` the next / previous run of
+lines no test ran.
 
 ## Building
 

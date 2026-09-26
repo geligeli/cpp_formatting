@@ -24,7 +24,7 @@ target *pattern* (`//...`), and a pattern is a command-line notion: a rule's
 targets under a pattern, builds the aspect's output group over them and merges
 the result outside Bazel, which is also the only place a fix can happen (an
 action cannot mutate workspace sources): `check`, `diff`, `fix`,
-`compile_commands`, `index` and `browse`.
+`compile_commands`, `index`, `browse` and `coverage`.
 
 The compile command the aspect derives for a target is also what an editor
 wants, so the aspect writes it out as a `<name>.compile_commands.jsonl`
@@ -40,7 +40,9 @@ repository) -- the TU's own file plus every owned header it includes.
 with `cpp_format --merge-index` and writes `index.pb` into the workspace;
 `cpp_format.sh browse` then serves the workspace over it in the release's
 prebuilt code browser (`@code_browser_bin`, fetched the first time it is
-needed -- a consumer who only formats never downloads it).
+needed -- a consumer who only formats never downloads it).  `cpp_format.sh
+coverage` runs the tests under the pattern with `bazel coverage` first and
+overlays their line coverage in the browser.
 """
 
 load("@rules_cc//cc:action_names.bzl", "CPP_COMPILE_ACTION_NAME")
@@ -622,7 +624,7 @@ def _install_impl(ctx):
             'cp -f "$src" "$ws/$dest"\n' +
             'chmod 755 "$ws/$dest"\n' +
             'echo "cpp_format: installed wrapper -> $dest"\n' +
-            'echo "run it with: $dest check | diff | fix | compile_commands | index | browse [pattern]"\n'
+            'echo "run it with: $dest check | diff | fix | compile_commands | index | browse | coverage [pattern]"\n'
         ),
     )
     runfiles = ctx.runfiles(files = [placed])

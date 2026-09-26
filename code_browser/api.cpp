@@ -5,6 +5,7 @@
 #include <ctime>
 #include <filesystem>
 #include <initializer_list>
+#include <limits>
 #include <map>
 #include <memory>
 #include <system_error>
@@ -293,6 +294,14 @@ void FillSpan(const OccRow& o, api::Span* span) {
   span->set_macro(o.macro);
 }
 
+void FillTotals(const CoverageTotals& t, api::CoverageTotals* out) {
+  out->set_files(t.files);
+  out->set_lines_found(t.lines_found);
+  out->set_lines_hit(t.lines_hit);
+  out->set_branches_found(t.branches_found);
+  out->set_branches_hit(t.branches_hit);
+}
+
 // The `path` parameter, normalised, with what the index knows about it.
 struct RequestedFile {
   std::string path;
@@ -487,6 +496,7 @@ auto ApiHandler::Handle(const ApiRequest& request) const -> ApiResponse {
   if (path == "/api/search") return Search(request);
   if (path == "/api/at") return At(request);
   if (path == "/api/text") return TextSearch(request);
+  if (path == "/api/coverage") return CoverageOfFile(request);
   if (path == "/api/symbol") return SymbolInfo(request, "");
   if (path.rfind("/api/symbol/", 0) == 0)
     return SymbolInfo(request, path.substr(12));
@@ -522,6 +532,13 @@ auto ApiHandler::RepoInfo() const -> ApiResponse {
     t->set_file_bytes(text_->file_bytes());
     t->set_built_at(text_->built_at());
   }
+  if (coverage_ != nullptr) {
+    api::CoverageInfo* c = info.mutable_coverage();
+    c->set_path(coverage_->path());
+    c->set_collected_at(coverage_->collected_at());
+    c->set_etag(coverage_->etag());
+    FillTotals(coverage_->totals(), c->mutable_totals());
+  }
   return Json(info);
 }
 
@@ -543,6 +560,15 @@ auto ApiHandler::Files(const ApiRequest& request) const -> ApiResponse {
       t->set_kind(e.kind);
       t->set_file_id(e.file_id);
       t->set_available(repo_.Resolve(e.path, e.kind).has_value());
+    }
+    if (coverage_ != nullptr) {
+      const CoverageTotals* totals = nullptr;
+      if (e.is_dir) {
+        totals = coverage_->Dir(e.path);
+      } else if (const FileCoverage* fc = coverage_->File(e.path)) {
+        totals = &fc->totals;
+      }
+      if (totals != nullptr) FillTotals(*totals, t->mutable_coverage());
     }
   }
   return Json(list);
@@ -902,6 +928,44 @@ auto ApiHandler::TextSearch(const ApiRequest& request) const -> ApiResponse {
     }
   }
   return WithEtag(Json(out), text_->etag() + "-" + db_.etag(), request);
+}
+
+auto ApiHandler::CoverageOfFile(const ApiRequest& request) const
+    -> ApiResponse {
+  ApiResponse error;
+  const Params params(request.query);
+  const std::optional<RequestedFile> f = RequestedFileOf(db_, params, &error);
+  if (!f) return error;
+  if (coverage_ == nullptr)
+    return ErrorResponse(
+        503, "no coverage loaded (start the server with --coverage=<lcov>)");
+  const FileCoverage* fc = coverage_->File(f->path);
+  if (fc == nullptr) return ErrorResponse(404, "no coverage for this file");
+  api::FileCoverage out;
+  out.set_path(fc->path);
+  for (const LineCoverage& l : fc->lines) {
+    out.add_lines(l.line);
+    out.add_hits(static_cast<uint32_t>(
+        std::min<uint64_t>(l.hits, std::numeric_limits<uint32_t>::max())));
+    if (l.branches > 0) {
+      out.add_branch_lines(l.line);
+      out.add_branches(l.branches);
+      out.add_branches_taken(l.branches_taken);
+    }
+  }
+  FillTotals(fc->totals, out.mutable_totals());
+  // Depends on the file too: edited after the tracefile, its counts may sit
+  // on the wrong lines, which the page says.
+  std::string file_etag = "-";
+  if (const std::optional<std::filesystem::path> resolved =
+          repo_.Resolve(f->path, f->kind()))
+    if (const auto stat = repo_.Stat(*resolved)) {
+      out.set_stale(coverage_->mtime_ns() != 0 &&
+                    stat->first > coverage_->mtime_ns());
+      file_etag =
+          std::to_string(stat->first) + "-" + std::to_string(stat->second);
+    }
+  return WithEtag(Json(out), coverage_->etag() + "-" + file_etag, request);
 }
 
 }  // namespace code_browser

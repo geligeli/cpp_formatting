@@ -15,6 +15,10 @@
 // Full-text search reads <index>.fts (--text-index), a suffix array over
 // every text file under --root.  It is rebuilt at startup whenever a file
 // was added, removed or changed since; --text-search=false turns it off.
+//
+// --coverage=<lcov> overlays line coverage from an LCOV tracefile (what
+// `bazel coverage --combined_report=lcov` writes, and `cpp_format.sh
+// coverage` copies next to the index) on the sources.
 #include <chrono>
 #include <compare>
 #include <cstdint>
@@ -28,6 +32,7 @@
 #include <vector>
 
 #include "code_browser/api.h"
+#include "code_browser/coverage.h"
 #include "code_browser/file_cache.h"
 #include "code_browser/http_server.h"
 #include "code_browser/index_db.h"
@@ -89,7 +94,7 @@ cl::opt<bool> LogRequests("log-requests", cl::desc("Log every request"),
 cl::opt<bool> Check(
     "check",
     cl::desc("Open the index (and the full-text index, building it if it is "
-             "stale), print their stats, and exit"),
+             "stale, and the coverage), print their stats, and exit"),
     cl::cat(Category));
 cl::opt<bool> TextSearch("text-search",
                          cl::desc("Full-text search over the files under "
@@ -104,6 +109,11 @@ cl::opt<unsigned> TextMaxFileKb(
     "text-max-file-kb",
     cl::desc("Leave files larger than this out of the full-text index"),
     cl::init(4096), cl::cat(Category));
+cl::opt<std::string> CoveragePath(
+    "coverage",
+    cl::desc("An LCOV tracefile (bazel coverage's _coverage_report.dat) to "
+             "overlay on the sources"),
+    cl::cat(Category));
 
 auto Mtime(const fs::path& p) -> std::optional<fs::file_time_type> {
   std::error_code ec;
@@ -173,6 +183,7 @@ auto OpenTextIndex(const fs::path& root, const std::string& db_path,
   // and each one its -journal / .tmp.
   opts.exclude = {path, db_path};
   if (!IndexPath.empty()) opts.exclude.emplace_back(IndexPath.getValue());
+  if (!CoveragePath.empty()) opts.exclude.emplace_back(CoveragePath.getValue());
   code_browser::TextBuildStats stats;
   std::unique_ptr<code_browser::TextIndex> text =
       code_browser::OpenOrBuildTextIndex(root, path, opts, &stats, error);
@@ -185,6 +196,45 @@ auto OpenTextIndex(const fs::path& root, const std::string& db_path,
   else
     llvm::errs() << ", up to date (built " << text->built_at() << ")\n";
   return text;
+}
+
+auto Percent(uint32_t hit, uint32_t found) -> std::string {
+  if (found == 0) return "-";
+  char buf[16];
+  // Rounded down: 99.99% is not 100%.
+  std::snprintf(
+      buf, sizeof buf, "%.1f%%",
+      static_cast<double>(static_cast<uint64_t>(hit) * 1000 / found) / 10.0);
+  return buf;
+}
+
+// The tracefile, its paths spelled as the index spells them.
+auto OpenCoverage(const code_browser::Repo& repo,
+                  const code_browser::IndexDb& db, std::string* error)
+    -> std::unique_ptr<code_browser::Coverage> {
+  code_browser::CoverageOptions opts;
+  opts.strip_prefixes = {repo.root(), fs::absolute(Root.getValue())};
+  if (repo.exec_root()) opts.strip_prefixes.push_back(*repo.exec_root());
+  if (!ExecRoot.empty())
+    opts.strip_prefixes.push_back(fs::absolute(ExecRoot.getValue()));
+  std::unique_ptr<code_browser::Coverage> coverage =
+      code_browser::Coverage::Load(CoveragePath.getValue(), opts, error);
+  if (!coverage) return nullptr;
+  uint32_t indexed = 0;
+  for (const code_browser::FileCoverage& f : coverage->files())
+    if (db.FileIdOf(f.path)) ++indexed;
+  const code_browser::CoverageTotals& t = coverage->totals();
+  llvm::errs() << "code_browser: coverage " << coverage->path() << ": "
+               << t.files << " files (" << indexed << " in the index), lines "
+               << t.lines_hit << "/" << t.lines_found << " ("
+               << Percent(t.lines_hit, t.lines_found) << "), branches "
+               << t.branches_hit << "/" << t.branches_found << " ("
+               << Percent(t.branches_hit, t.branches_found) << "), collected "
+               << coverage->collected_at() << "\n";
+  if (indexed == 0 && t.files > 0)
+    llvm::errs() << "code_browser: warning: no file the coverage names is in "
+                    "the index; were they collected in another checkout?\n";
+  return coverage;
 }
 
 }  // namespace
@@ -246,6 +296,15 @@ int main(int argc, char** argv) {
     llvm::errs() << ", exec root " << repo->exec_root()->string();
   llvm::errs() << "\n";
 
+  std::unique_ptr<code_browser::Coverage> coverage;
+  if (!CoveragePath.empty()) {
+    coverage = OpenCoverage(*repo, *db, &error);
+    if (!coverage) {
+      llvm::errs() << "code_browser: " << error << "\n";
+      return 2;
+    }
+  }
+
   std::unique_ptr<code_browser::TextIndex> text;
   if (TextSearch) {
     text = OpenTextIndex(repo->root(), db_path, &error);
@@ -257,7 +316,8 @@ int main(int argc, char** argv) {
   if (Check) return 0;
 
   code_browser::FileCache files(static_cast<size_t>(FileCacheMb) << 20);
-  const code_browser::ApiHandler api(*db, *repo, files, text.get());
+  const code_browser::ApiHandler api(*db, *repo, files, text.get(),
+                                     coverage.get());
   const code_browser::StaticAssets assets =
       AssetsDir.empty()
           ? code_browser::StaticAssets::FromEmbedded()

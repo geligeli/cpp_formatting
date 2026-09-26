@@ -4,6 +4,7 @@ compile_commands.json
 /index.pb
 /index.pb.sqlite*
 /index.pb.fts*
+/index.pb.lcov*
 **/.nfs*
 .bazelrc.local
 .claude/settings.local.json

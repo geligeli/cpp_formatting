@@ -45,8 +45,30 @@ stats() { sed -n 's/.*: \([0-9]* files, [0-9]* symbols, [0-9]* occurrences\).*/\
   || { cat "$work/kit.check" "$work/import.check"; fail "--import-to and index_import disagree"; }
 if "$browser" --import-to="$work/none.sqlite" 2>/dev/null; then fail "--import-to without --index must fail"; fi
 
-# 2. Serve.
+# 2. Serve, with coverage.  The tracefile sits under the root, as
+#    `cpp_format.sh coverage` puts it next to the index: the full-text index
+#    must leave it out (the 6 files below), and one of its paths is absolute,
+#    as a report collected outside a sandbox spells it.
+cat > "$work/repo/coverage.lcov" <<LCOV
+SF:bazel/testdata/demo.cpp
+DA:1,3
+DA:2,0
+BRDA:1,0,0,1
+BRDA:1,0,1,0
+end_of_record
+SF:$work/repo/bazel/testdata/demo_main.cpp
+DA:3,1
+DA:4,0
+end_of_record
+LCOV
+printf 'SF:a.cc\nDA:1\nend_of_record\n' > "$work/bad.lcov"
+if "$browser" --db="$work/index.sqlite" --root="$work/repo" --coverage="$work/bad.lcov" \
+    --check 2> "$work/bad.err"; then
+  fail "a malformed tracefile was accepted"
+fi
+grep -q "bad.lcov:2: DA: expected" "$work/bad.err" || { cat "$work/bad.err"; fail "the LCOV error names no line"; }
 "$browser" --db="$work/index.sqlite" --root="$work/repo" --port=0 \
+  --coverage="$work/repo/coverage.lcov" \
   --port-file="$work/port" --log-requests=false > "$work/server.log" 2>&1 &
 server=$!
 trap 'kill "$server" 2>/dev/null || true' EXIT
@@ -107,6 +129,20 @@ grep -q '"text": *"  w.item_count_ = 4;"' "$work/text.json" || { cat "$work/text
 grep -q '"name": *"demo_main.cpp"' "$work/files.json" || fail "file list"
 grep -q '"available": *true' "$work/files.json" || fail "files should be available"
 
+# Coverage: the stats line, the report's totals, a file's lines, the tree.
+grep -q "coverage $work/repo/coverage.lcov: 2 files (2 in the index), lines 2/4 (50.0%), branches 1/2 (50.0%)" \
+  "$work/server.log" || { cat "$work/server.log"; fail "coverage stats line"; }
+grep -q '"coverage": *{[^}]*"path": *"'"$work"'/repo/coverage.lcov"' "$work/repo.json" \
+  || { cat "$work/repo.json"; fail "repo coverage info"; }
+"$get" "$url/api/coverage?path=bazel/testdata/demo.cpp" > "$work/cov.json"
+grep -q '"lines": *\[1, *2\]' "$work/cov.json" || { cat "$work/cov.json"; fail "coverage lines"; }
+grep -q '"hits": *\[3, *0\]' "$work/cov.json" || { cat "$work/cov.json"; fail "coverage hits"; }
+"$get" "$url/api/coverage?path=bazel/testdata/demo_main.cpp" | grep -q '"lines_hit": *1' \
+  || fail "the absolute SF path did not reach demo_main.cpp"
+"$get" "$url/api/coverage?path=bazel/testdata/demo.h" > /dev/null 2>&1 \
+  && fail "coverage for a file the tracefile does not name"
+grep -q '"coverage": *{' "$work/files.json" || { cat "$work/files.json"; fail "no coverage in the tree"; }
+
 # 4. /api/at agrees with cpp_format --dump-index --lookup.
 off=$(grep -bo -m1 'item_count_ = 4' bazel/testdata/demo_main.cpp | cut -d: -f1)
 "$get" "$url/api/at?path=bazel/testdata/demo_main.cpp&offset=$off" > "$work/at.json"
@@ -151,6 +187,10 @@ url="http://127.0.0.1:$(cat "$work/port")"
 
 # The .proto files are in the tree under their real paths (unit.proto is
 # imported as "proto/unit.proto" and reaches protoc as a symlink).
+# No --coverage here: the route says so.
+[[ $("$get" "$url/api/coverage?path=bazel/testdata/inventory_user.cpp" 2>&1; echo "rc=$?") == *"503"*"rc=22"* ]] \
+  || fail "/api/coverage without coverage is not a 503"
+
 "$get" "$url/api/files?prefix=bazel/testdata/proto" > "$work/protos.json"
 grep -q '"path": *"bazel/testdata/proto/unit.proto"' "$work/protos.json" \
   || { cat "$work/protos.json"; fail "unit.proto is not in the tree"; }

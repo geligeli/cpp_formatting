@@ -160,6 +160,24 @@ cc_test(
 )
 
 cc_library(
+    name = "coverage",
+    srcs = ["coverage.cpp"],
+    hdrs = ["coverage.h"],
+    copts = CODE_BROWSER_COPTS,
+)
+
+cc_test(
+    name = "coverage_test",
+    size = "small",
+    srcs = ["coverage_test.cpp"],
+    copts = TEST_COPTS,
+    deps = [
+        ":coverage",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "api",
     srcs = ["api.cpp"],
     hdrs = ["api.h"],
@@ -170,6 +188,7 @@ cc_library(
         "//cpp_formatting:index_cc_proto",
     ],
     deps = [
+        ":coverage",
         ":file_cache",
         ":index_db",
         ":repo",
@@ -186,6 +205,7 @@ cc_test(
     deps = [
         ":api",
         ":api_cc_proto",
+        ":coverage",
         ":file_cache",
         ":index_db",
         ":index_schema",
@@ -272,6 +292,7 @@ cc_binary(
     visibility = ["//visibility:public"],
     deps = [
         ":api",
+        ":coverage",
         ":file_cache",
         ":http_server",
         ":index_db",

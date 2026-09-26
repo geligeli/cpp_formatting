@@ -41,6 +41,13 @@
 #     aspect in a file of its own, the only one in the kit that loads
 #     @protobuf -- a repository the vendored consumer does not have -- and the
 #     script names it only when the repository has a proto_library;
+#   * `cpp_format.sh coverage` (import flavor) runs the consumer's tests under
+#     `bazel coverage` -- on the consumer's own toolchain, autodetected g++
+#     here, so Bazel's gcov coverage and none of the Clang flags -- copies the
+#     report next to the index, writable, and serves it: the stats line counts
+#     the files the index knows, /api/coverage answers for a source of the
+#     library under test, and the tree carries percentages.  A failing test is
+#     reported as costing its coverage, and the rest is still served;
 #   * a release without the browser asset fails with a message that says so;
 #   * with no release() tag at all, `bazel mod deps` still works, and the first
 #     thing that needs the binary says which line to add.
@@ -316,6 +323,77 @@ for flavor in import vendor; do
   make_consumer "$flavor" "$VERSION"
   check_consumer "$flavor"
 done
+
+# ---------------------------------------------------------------------------
+# 2a. Coverage, in the import consumer: its own toolchain decides.
+# ---------------------------------------------------------------------------
+# Starts `cpp_format.sh coverage` as a server and waits for its port; the first
+# run fetches the Java runtime Bazel's LCOV merger needs, so allow for it.
+start_coverage() {  # <flavor> <log>
+  local ws="$WORK/$1" port="$WORK/$1.cov.port"
+  rm -f "$port"
+  (cd "$ws" && BAZEL="$WORK/bazel" "$(consumer_script "$1" "$1")" coverage --port=0 \
+      --port-file="$port" --log-requests=false) >"$2" 2>&1 &
+  server=$!
+  for _ in $(seq 1 6000); do
+    [[ -s "$port" ]] && break
+    kill -0 "$server" 2>/dev/null || break
+    sleep 0.1
+  done
+  [[ -s "$port" ]] || { tail -40 "$2" >&2; fail "[$1] the coverage server did not start"; }
+  cov_url="http://127.0.0.1:$(cat "$port")"
+}
+stop_server() {  # <flavor> <log>
+  local child signalled=0 rc=0
+  for child in $(children_of "$server"); do
+    kill -INT "$child" 2>/dev/null && signalled=1
+  done
+  [[ "$signalled" -eq 1 ]] || kill -INT "$server" 2>/dev/null || true
+  wait "$server" || rc=$?
+  server=""
+  [[ "$rc" -eq 0 ]] || { tail -20 "$2" >&2; fail "[$1] the server exited $rc on SIGINT"; }
+}
+
+check_coverage() {  # <flavor>
+  local flavor="$1" ws="$WORK/$1" log="$WORK/$1.coverage.log"
+  note "[$flavor] cpp_format.sh coverage runs the tests and overlays their coverage"
+  start_coverage "$flavor" "$log"
+  grep -q "cpp_format: coverage: the C++ toolchain has no llvm-cov and llvm-profdata" "$log" \
+    || { tail -30 "$log" >&2; fail "[$flavor] g++ was not recognised as a toolchain without Clang's tools"; }
+  grep -q -- "--combined_report=lcov" "$log" || { tail -30 "$log" >&2; fail "[$flavor] the bazel coverage command was not printed"; }
+  if grep -q -- "--experimental_use_llvm_covmap\|--per_file_copt" "$log"; then
+    fail "[$flavor] Clang coverage flags given to a g++ toolchain"
+  fi
+  grep -Eq "cpp_format: wrote $ws/index\.pb\.lcov \([1-9][0-9]* files\)" "$log" \
+    || { tail -30 "$log" >&2; fail "[$flavor] the report was not copied next to the index"; }
+  [[ -w "$ws/index.pb.lcov" ]] || fail "[$flavor] index.pb.lcov is read-only (copied as Bazel left it)"
+  grep -q '^SF:mini/shapes.cpp$' "$ws/index.pb.lcov" \
+    || { head -20 "$ws/index.pb.lcov" >&2; fail "[$flavor] the report does not cover mini/shapes.cpp"; }
+  grep -Eq "code_browser: coverage $ws/index\.pb\.lcov: [1-9][0-9]* files \([1-9][0-9]* in the index\)" "$log" \
+    || { tail -30 "$log" >&2; fail "[$flavor] the coverage stats line"; }
+  grep -q -- "--coverage=$ws/index.pb.lcov" "$log" \
+    || { tail -30 "$log" >&2; fail "[$flavor] the printed command line lacks --coverage"; }
+  curl -fsS "$cov_url/api/coverage?path=mini/shapes.cpp" > "$WORK/$flavor.cov.json" \
+    || fail "[$flavor] /api/coverage"
+  grep -q '"lines"' "$WORK/$flavor.cov.json" || { cat "$WORK/$flavor.cov.json" >&2; fail "[$flavor] no lines in the coverage"; }
+  grep -q '"lines_hit": *[1-9]' "$WORK/$flavor.cov.json" \
+    || { cat "$WORK/$flavor.cov.json" >&2; fail "[$flavor] shapes_test ran nothing of shapes.cpp"; }
+  curl -fsS "$cov_url/api/files?prefix=mini" | grep -q '"coverage"' \
+    || fail "[$flavor] the tree carries no coverage"
+  stop_server "$flavor" "$log"
+
+  note "[$flavor] a failing test costs its coverage and nothing else"
+  cat > "$ws/mini/fails_test.cpp" <<'CPP'
+int main() { return 1; }
+CPP
+  printf '\ncc_test(\n    name = "fails_test",\n    srcs = ["fails_test.cpp"],\n)\n' >> "$ws/mini/BUILD.bazel"
+  start_coverage "$flavor" "$log"
+  grep -q "cpp_format: some tests failed.  A failing test contributes no coverage" "$log" \
+    || { tail -30 "$log" >&2; fail "[$flavor] the failing test was not reported"; }
+  grep -q '^SF:mini/shapes.cpp$' "$ws/index.pb.lcov" || fail "[$flavor] the passing test's coverage is gone"
+  stop_server "$flavor" "$log"
+}
+check_coverage import
 
 # ---------------------------------------------------------------------------
 # 2b. A consumer with a .proto: the second producer, and the link.

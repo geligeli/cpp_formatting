@@ -2,7 +2,7 @@
 # copy this directory into your repo, then
 #   bazel run @cpp_formatting//bazel/integration:install
 # drops cpp_format.sh into your workspace (default tools/cpp_format.sh); run that
-# script: check | diff | fix | compile_commands | index | browse.
+# script: check | diff | fix | compile_commands | index | browse | coverage.
 # See the README quick start.
 load(":cpp_format.bzl", "cpp_format_install")
 

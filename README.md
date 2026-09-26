@@ -92,6 +92,7 @@ tools/cpp_format.sh fix //app/...  # scope to a package tree
 tools/cpp_format.sh compile_commands   # write compile_commands.json for clangd
 tools/cpp_format.sh index          # write index.pb, the repo's symbol index
 tools/cpp_format.sh browse         # ... and serve the repo in the code browser
+tools/cpp_format.sh coverage       # ... with the tests' line coverage overlaid
 ```
 
 Commit the placed script (it's a normal, editable file). It queries the
@@ -146,6 +147,38 @@ first time you browse — a repository that only formats never downloads it. The
 installed script names it by its canonical label, so your `use_repo(...)` does
 not have to list it. If you **vendored** the kit, the script's default labels
 resolve in your own module: add `"code_browser_bin"` to your `use_repo(...)`.
+
+**Coverage in the browser.** `coverage` is `browse` with the line coverage of
+your tests on the source:
+
+```sh
+tools/cpp_format.sh coverage                # every test under //...
+tools/cpp_format.sh coverage //app/...      # one package tree's tests (and index)
+tools/cpp_format.sh coverage --check        # ... print the stats and exit
+```
+
+It runs the tests under the pattern with `bazel coverage`, copies the LCOV
+report next to the index (`index.pb.lcov`, covered by the same `index.pb*`
+ignore rule), and starts the browser with it: every instrumented line is
+green, red, or orange when it ran but left a branch untaken, with its hit
+count beside the line number; the file tree shows each file's and directory's
+percentage; `u` / `U` jump to the next / previous lines no test ran; the
+**coverage** button in the header turns the overlay off and on. A file edited
+since the tests ran says so, since its counts may be on the wrong lines.
+
+The script works out the instrumentation from the C++ toolchain your
+workspace resolves: a Clang toolchain that ships `llvm-cov` and
+`llvm-profdata` (hermetic-llvm, toolchains_llvm, ...) gets Clang's
+source-based coverage of your own sources, with atomic counters and the tool
+paths that Bazel 8's `cc_test` cannot find in a rules-based toolchain;
+anything else gets Bazel's own coverage (gcov). The exact `bazel coverage`
+command is printed. `CPP_FORMAT_COVERAGE_AUTO=0` leaves the flags to the
+`coverage` lines of your `.bazelrc` instead, `CPP_FORMAT_COVERAGE_FLAGS` adds
+some (`"--test_tag_filters=-slow --test_timeout=900"`), and `COVERAGE_OUT`
+moves the report. A failing test contributes **no** coverage (Bazel collects
+none for a failed test) -- the run still serves what the others covered, and
+says so -- and test sources themselves are not instrumented. Running it again
+re-runs only the tests whose inputs changed.
 
 **A `compile_commands.json` for free.** The aspect already derives every
 target's compile command, so the script can also write it out as a
@@ -903,7 +936,8 @@ declined. Because the aspect and the wrapper rely on flags of the
 binary (`--owned-files`, `--aggregate --records-from`), the kit and the
 published binary are versioned together (see the release pin in
 `MODULE.bazel`). `compile_commands`, `index` and `browse` are the same
-query-and-build with a different output group and a different merge. There is
+query-and-build with a different output group and a different merge;
+`coverage` adds one `bazel coverage` of the pattern. There is
 no rule that does this inside the build graph: a rule's `deps` cannot be a
 pattern, and a fix cannot be an action (Bazel actions cannot mutate sources).
 
@@ -1014,7 +1048,9 @@ when that is missing or older), so nothing is loaded up front.
 `tools/cpp_format.sh browse` is the one command: it indexes the repository,
 prints the browser's binary and command line, and serves the workspace on a
 free port of `127.0.0.1`, printing the URL (`--port=N` picks the port); run
-it again to update the index. See [code_browser/README.md](code_browser/README.md) for the routes. In
+it again to update the index. `tools/cpp_format.sh coverage` runs the tests
+first and overlays their line coverage (`--coverage=<lcov>` on the server).
+See [code_browser/README.md](code_browser/README.md) for the routes. In
 this repository `tools/cpp_format.sh` builds everything from source; a consumer
 of the prebuilt kit gets the same command from a release asset, with nothing to
 build.

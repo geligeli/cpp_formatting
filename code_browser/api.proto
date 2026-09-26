@@ -33,6 +33,40 @@ message RepoInfo {
   string index_etag = 6;
   IndexStats stats = 7;
   TextIndexInfo text_index = 8;  // absent when full-text search is off
+  CoverageInfo coverage = 9;     // absent without --coverage
+}
+
+// Line coverage (see /api/coverage), from the LCOV tracefile the server was
+// started with.  Counts are uint32 so that they arrive in JSON as numbers.
+message CoverageTotals {
+  uint32 files = 1;
+  uint32 lines_found = 2;  // instrumented lines
+  uint32 lines_hit = 3;    // ... executed at least once
+  uint32 branches_found = 4;
+  uint32 branches_hit = 5;  // taken at least once
+}
+
+message CoverageInfo {
+  string path = 1;          // the tracefile
+  string collected_at = 2;  // RFC 3339 UTC: when it was written
+  string etag = 3;
+  CoverageTotals totals = 4;
+}
+
+// One file's coverage, as parallel arrays (a large file stays small): line
+// lines[i] ran hits[i] times; branch_lines[j] has branches[j] branches, of
+// which branches_taken[j] were taken.
+message FileCoverage {
+  string path = 1;
+  repeated uint32 lines = 2;  // ascending
+  repeated uint32 hits = 3;   // capped at 4294967295
+  repeated uint32 branch_lines = 4;
+  repeated uint32 branches = 5;
+  repeated uint32 branches_taken = 6;
+  CoverageTotals totals = 7;
+  // The file changed after the tracefile was written: its counts may be on
+  // the wrong lines.
+  bool stale = 8;
 }
 
 // The full-text index (see /api/text): every text file under the root.
@@ -52,6 +86,10 @@ message TreeEntry {
   cpp_index.FileKind kind = 4;  // files only
   int32 file_id = 5;            // files only
   bool available = 6;           // files only: present in the checkout
+  // With --coverage: the file's totals, or everything under the directory
+  // (files the index does not list included); absent when none of it was
+  // instrumented.
+  CoverageTotals coverage = 7;
 }
 
 message FileList {

@@ -6,6 +6,7 @@
 //   /api/files?prefix=<dir>                FileList (one level; "" = root)
 //   /api/file?path=<p>                     the bytes, text/plain
 //   /api/annotations?path=<p>              Annotations
+//   /api/includes?path=<p>                 Includes
 //   /api/symbol/<id>, /api/symbol?usr=<u>  SymbolInfo
 //   /api/refs/<id>?role=&exclude=&file=&offset=&limit=   References
 //   /api/search?q=&limit=&kind=&locals=1   SearchResults
@@ -13,6 +14,9 @@
 //   /api/text?q=&case=sensitive|insensitive&offset=&limit=
 //                                          TextSearchResults (503 when the
 //                                          server has no full-text index)
+//   /api/coverage?path=<p>                 FileCoverage (503 when the server
+//                                          has no coverage, 404 for a file
+//                                          the tracefile does not name)
 // Errors are an Error message with the matching status.  Responses that
 // depend only on the index carry its ETag; a matching If-None-Match gets a
 // 304 with no body.
@@ -26,6 +30,7 @@
 #include <utility>
 #include <vector>
 
+#include "code_browser/coverage.h"
 #include "code_browser/file_cache.h"
 #include "code_browser/index_db.h"
 #include "code_browser/repo.h"
@@ -52,10 +57,12 @@ struct ApiResponse {
 
 class ApiHandler {
  public:
-  // `text` may be null: /api/text then answers 503.
+  // `text` may be null: /api/text then answers 503.  `coverage` likewise
+  // (/api/coverage), and then nothing else mentions coverage.
   ApiHandler(const IndexDb& db, const Repo& repo, FileCache& files,
-             const TextIndex* text = nullptr)
-      : db_(db), repo_(repo), files_(files), text_(text) {}
+             const TextIndex* text = nullptr,
+             const Coverage* coverage = nullptr)
+      : db_(db), repo_(repo), files_(files), text_(text), coverage_(coverage) {}
 
   // Never throws; unknown /api/* paths are 404, other paths too.
   auto Handle(const ApiRequest& request) const -> ApiResponse;
@@ -73,11 +80,13 @@ class ApiHandler {
   auto Search(const ApiRequest&) const -> ApiResponse;
   auto At(const ApiRequest&) const -> ApiResponse;
   auto TextSearch(const ApiRequest&) const -> ApiResponse;
+  auto CoverageOfFile(const ApiRequest&) const -> ApiResponse;
 
   const IndexDb& db_;
   const Repo& repo_;
   FileCache& files_;
   const TextIndex* text_;
+  const Coverage* coverage_;
 };
 
 // application/x-www-form-urlencoded-ish: `a=1&b=x%20y&c` -> [(a,1),(b,x y),

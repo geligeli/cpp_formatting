@@ -4,6 +4,7 @@
 #
 #   tools/cpp_format.sh browse            # index the whole repo and browse it
 #   tools/cpp_format.sh browse --check    # ... stop after the index's stats
+#   tools/cpp_format.sh coverage          # ... with the tests' coverage overlaid
 #   tools/cpp_format.sh <check|diff|fix|compile_commands|index> [pattern] [flags]
 #
 # The kit's script is written for a consumer of the prebuilt release -- its
@@ -22,5 +23,9 @@ export CPP_FORMAT_BIN_LABEL="${CPP_FORMAT_BIN_LABEL:-//cpp_formatting:cpp_format
 export CODE_BROWSER_LABEL="${CODE_BROWSER_LABEL:-//code_browser:code_browser}"
 # What the script calls itself in the instructions it prints.
 export CPP_FORMAT_SH_NAME="${CPP_FORMAT_SH_NAME:-$0}"
+# `coverage`: .bazelrc's own `coverage` lines instrument this repository (its
+# two packages, not their test helpers), so the kit's toolchain-derived flags
+# stay out of the way.  CPP_FORMAT_COVERAGE_AUTO=1 tries the kit's instead.
+export CPP_FORMAT_COVERAGE_AUTO="${CPP_FORMAT_COVERAGE_AUTO:-0}"
 cd "$here/.."
 exec bazel/integration/cpp_format.sh "$@"

@@ -14,6 +14,14 @@
   --macro: #953800;
   --ns: #57606a;
   --error: #cf222e;
+  --banner-fg: #3b2f00;
+  /* coverage: a faint tint on the code, a strong one in the hits gutter */
+  --cov-hit: #e6ffec;
+  --cov-hit-strong: #ccffd8;
+  --cov-miss: #ffebe9;
+  --cov-miss-strong: #ffd7d5;
+  --cov-partial: #fff1e5;
+  --cov-partial-strong: #ffd8b5;
   color-scheme: light dark;
 }
 @media (prefers-color-scheme: dark) {
@@ -33,6 +41,13 @@
     --macro: #ffa657;
     --ns: #a5b1bd;
     --error: #ff7b72;
+    --banner-fg: #f0e2b0;
+    --cov-hit: rgba(46, 160, 67, 0.15);
+    --cov-hit-strong: rgba(46, 160, 67, 0.4);
+    --cov-miss: rgba(248, 81, 73, 0.15);
+    --cov-miss-strong: rgba(248, 81, 73, 0.4);
+    --cov-partial: rgba(219, 109, 40, 0.18);
+    --cov-partial-strong: rgba(219, 109, 40, 0.45);
   }
 }
 
@@ -72,6 +87,8 @@ button:hover { border-color: var(--accent); }
 }
 #repo-name { font-weight: 600; }
 #repo-head { color: var(--muted); font-family: ui-monospace, monospace; font-size: 12px; }
+#coverage-toggle { font-size: 12px; color: var(--muted); }
+#coverage-toggle[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
 #search {
   margin-left: auto;
   width: min(480px, 45vw);
@@ -137,6 +154,18 @@ body.resizing.horizontal { cursor: row-resize; }
 #tree a.file.current { background: var(--mark); }
 #tree a.file.k-generated, #tree a.file.k-external, #tree a.file.k-system { color: var(--muted); }
 #tree a.file.unavailable { text-decoration: line-through; }
+/* coverage in the tree: shown only while coverage is on */
+#tree .cov-pct {
+  display: none;
+  float: right;
+  margin-left: 8px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+body.cov-on #tree .cov-pct { display: inline; }
+#tree .cov-pct.cov-lo { color: var(--error); }
+#tree .cov-pct.cov-mid { color: var(--macro); }
+#tree .cov-pct.cov-hi { color: var(--def); }
 
 /* A column: the title, the code (which scrolls), and the panel below it. */
 #source { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
@@ -151,7 +180,7 @@ body.resizing.horizontal { cursor: row-resize; }
 #banner {
   flex: none;
   background: var(--hl);
-  color: #3b2f00;
+  color: var(--banner-fg);
   padding: 4px 12px;
   font-size: 12px;
 }
@@ -176,6 +205,29 @@ body.resizing.horizontal { cursor: row-resize; }
 }
 .line .ln:hover { text-decoration: none; color: var(--accent); }
 .line .text { flex: 1; }
+
+/* coverage: a hits column after the line number, and the line tinted */
+body.cov-on #code.has-cov .line::before {
+  content: attr(data-hits);
+  order: 1;
+  flex: 0 0 4.5em;
+  text-align: right;
+  padding-right: 0.6em;
+  color: var(--muted);
+  user-select: none;
+}
+body.cov-on #code.has-cov .line .text { order: 2; }
+body.cov-on #code .line.cov-hit::before { background: var(--cov-hit-strong); }
+body.cov-on #code .line.cov-hit .text { background: var(--cov-hit); }
+body.cov-on #code .line.cov-miss::before { background: var(--cov-miss-strong); }
+body.cov-on #code .line.cov-miss .text { background: var(--cov-miss); }
+body.cov-on #code .line.cov-partial::before { background: var(--cov-partial-strong); }
+body.cov-on #code .line.cov-partial .text { background: var(--cov-partial); }
+/* the line a link or u/U went to stays visible over its coverage */
+body.cov-on #code .line.mark .text { background: var(--mark); }
+
+/* the occurrence n / p went to */
+.tok.cur { outline: 1px solid var(--accent); outline-offset: 1px; border-radius: 2px; }
 
 a.inc { text-decoration: underline; text-decoration-color: var(--line); }
 a.inc:hover { text-decoration-color: currentColor; }
