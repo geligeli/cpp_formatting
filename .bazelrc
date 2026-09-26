@@ -193,6 +193,61 @@ build:ubsan --test_env=UBSAN_OPTIONS=print_stacktrace=1
 # -- but the hermetic toolchain builds one (--@llvm//config:msan); it has just
 # not been tried here.
 
+# Code coverage: `bazel coverage //...`, report in
+# bazel-out/_coverage/_coverage_report.dat (LCOV).  See docs/build.md.
+#
+# Clang's source-based coverage, not the gcov format Bazel picks by default
+# (the toolchain has no gcov to read that back with), turned into LCOV by
+# llvm-cov inside each test action.
+coverage --experimental_use_llvm_covmap
+coverage --experimental_generate_llvm_lcov
+coverage --combined_report=lcov
+# Our code only.  The default filter is derived from the test targets named on
+# the command line, so `//...` would also take in //bazel/testdata and //tools.
+# The two `tools` packages are test helpers (http_get, apply_patch).
+coverage --instrumentation_filter=^//(cpp_formatting|code_browser)[/:],-^//(cpp_formatting|code_browser)/tools[/:]
+# The filter decides what is *reported*, not what is compiled instrumented: the
+# toolchain's llvm_coverage_map_format feature puts -fprofile-instr-generate
+# -fcoverage-mapping on every compile in the configuration (only the gcov
+# format is gated per target), so LLVM, protobuf, zlib, Boost and sqlite all
+# carried counters -- LLVM's bumped non-atomically from the TU driver's worker
+# threads.  Nor can a per-file copt take them off again: the toolchain appends
+# feature flags after the source file, behind every copt.  So the feature is
+# off, and the flags are given per file to the two packages instead.  A
+# per-file regex is tried against the source's label as well as its path;
+# `(//)?` and `[/:]` spell both.  -fprofile-update=atomic: the worker threads
+# and the browser's io_context race on the counters too, and llvm-cov, which
+# derives many line counts by subtracting one counter from another, then
+# reported negative ones ("invalid number on DA line
+# DA:281,18446744073709551577").  The link needs the flag for the profile
+# runtime.
+#
+# -fprofile-continuous + LLVM_PROFILE_CONTINUOUS_MODE: the counters live in
+# the mmapped .profraw file itself rather than being written out by an atexit
+# handler, so a process that never reaches exit() -- SIGKILLed, crashed, or
+# leaving through _exit() as a gtest death test's child does -- still counts.
+# The shell tests run our binaries as subprocesses (one .profraw each, merged
+# with every binary in the test's data as an llvm-cov object); without this, a
+# server a test kills with SIGKILL contributes nothing (tried: 0 files, against
+# 135 lines of http_server.cpp with it).  bazel_tools' collector appends the
+# %c the mode needs to LLVM_PROFILE_FILE when the variable is set.
+coverage --features=-llvm_coverage_map_format
+coverage --per_file_copt=^(//)?(cpp_formatting|code_browser)[/:],-^(//)?(cpp_formatting|code_browser)/tools[/:]@-fprofile-instr-generate,-fcoverage-mapping,-fprofile-update=atomic,-fprofile-continuous
+coverage --linkopt=-fprofile-instr-generate
+coverage --test_env=LLVM_PROFILE_CONTINUOUS_MODE=1
+# Bazel 8's built-in cc_test takes the paths of llvm-profdata and llvm-cov only
+# from a toolchain's legacy `tool_paths`, which a rules-based toolchain like
+# hermetic-llvm leaves empty -- so collect_cc_coverage.sh fails with
+# "COVERAGE_GCOV_PATH: unbound variable" and every test reports nothing.  Hand
+# them over directly: the collector runs in the exec root, where the
+# toolchain's coverage_files put both binaries.  COVERAGE_GCOV_PATH is the
+# *profdata* tool here -- that is what bazel_tools' collector merges the
+# .profraw files with.  The repository name carries no version (an LLVM bump
+# keeps it) but does carry the exec CPU: x86_64 only, like CI and the RBE
+# workers.
+coverage --test_env=COVERAGE_GCOV_PATH=external/llvm++llvm_toolchain_minimal+llvm-toolchain-minimal-linux-amd64/bin/llvm-profdata
+coverage --test_env=LLVM_COV=external/llvm++llvm_toolchain_minimal+llvm-toolchain-minimal-linux-amd64/bin/llvm-cov
+
 # cpp_format lint: run the aspect over the build graph and materialise each
 # target's edit-record JSON (see bazel/cpp_format.bzl).  The failing lint gate
 # is `tools/cpp_format.sh check [pattern]`; this config just builds the records
