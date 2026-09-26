@@ -3,11 +3,13 @@
 # Arguments (all Bazel $(location ...) expansions):
 #   $1   const_placement binary
 #   $2   cpp_format binary
+#   $3   tools/apply_patch binary (a strict `git apply`)
 
 set -euo pipefail
 
 const_placement="$(realpath "$1")"
 cpp_format="$(realpath "$2")"
+apply_patch="$(realpath "$3")"
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
@@ -146,8 +148,8 @@ grep -q '"uri": "lint.cpp"' <<<"$out" \
   expect_violations "$const_placement" --style=east --format=diff lint.cpp \
     -- -std=c++17
 ) >"$tmpdir/east.patch"
-(cd "$tmpdir" && git apply east.patch) \
-  || fail "diff lint: emitted patch does not apply with git apply"
+(cd "$tmpdir" && "$apply_patch" east.patch) \
+  || fail "diff lint: emitted patch does not apply"
 diff -u "$tmpdir/east.cpp" "$tmpdir/lint.cpp" \
   || fail "diff lint: patched file differs from the --in-place result"
 echo "PASS: lint text/SARIF/diff agree with the in-place rewrite"

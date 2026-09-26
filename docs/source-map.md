@@ -123,12 +123,13 @@ All four binaries link the Clang built-in headers (`stddef.h`, `__stddef_max_ali
 - [cpp_formatting/lint_integration_test.sh](../cpp_formatting/lint_integration_test.sh) — Shell integration tests for `--lint`/`--format` across `normalize_variables`, `trailing_return_types` and `cpp_format` (`const_placement`'s lint modes are covered by its own integration test):
   1. Text lint — diagnostics on stdout, exit 1, file byte-identical.
   2. SARIF lint — valid 2.1.0 log with rule id and cwd-relative URI.
-  3. Diff lint — emitted patch applies with `git apply` and matches the `--in-place` result.
+  3. Diff lint — emitted patch applies (with `tools/apply_patch`, below) and matches the `--in-place` result.
   4. Clean file — exit 0, no diagnostics.
   5. `trailing_return_types` lint — text and diff round-trip.
   6. `cpp_format` lint — multi-pass run aggregates both rule ids into one SARIF report.
   7. Macro veto — a rename vetoed by a macro-body reference produces no diagnostic, and the re-run that makes the veto order-independent leaves no duplicates from the discarded first pass; text, SARIF and diff output are byte-identical with `--jobs=1` and `--jobs=4` (and `cpp_format`'s SARIF likewise, in test 6).
-  7. `--reverse` lint — `leading_return_types` diagnostics, a diff that `git apply`s to the expected leading form, a second pass that reports nothing (fixpoint), the same direction through `cpp_format --return-types=leading`, and the error when both directions are requested at once.
+  7. `--reverse` lint — `leading_return_types` diagnostics, a diff that applies to the expected leading form, a second pass that reports nothing (fixpoint), the same direction through `cpp_format --return-types=leading`, and the error when both directions are requested at once.
+- [cpp_formatting/tools/apply_patch.cpp](../cpp_formatting/tools/apply_patch.cpp) — A strict `git apply` for the shell tests that check `--format=diff` (`lint_integration_test`, `const_placement_integration_test`), which used to call the host's git and so failed on any remote worker (the image has no git). Stricter than git, never looser: each hunk must match at exactly the line its header names, the `@@` counts must be right, both paths need `a/`/`b/` and must agree, and nothing is written unless every hunk of every file applies. `\ No newline at end of file` is honoured. Checked against git on real and deliberately broken patches.
 - [cpp_formatting/aggregate_integration_test.sh](../cpp_formatting/aggregate_integration_test.sh) — Shell integration tests for the per-TU emit + aggregate pipeline (`cpp_format --emit-edits` then `cpp_format --aggregate`), on a two-file fixture whose header holds a template-dependent member token resolved from the instantiating `.cpp`:
   0. `--emit-edits` records are byte-identical with `--jobs=1` and `--jobs=4` (Emit mode seeds no cross-TU state into a TU, so every TU's records are independent of what ran before it).
   1. `--aggregate` diff is byte-identical to the standalone `aggregate_edits` binary and rewrites both the member decl and the cross-TU dependent token.

@@ -8,6 +8,7 @@
 #   $5   testdata/normalize_shadow_expected.cpp
 #   $6   testdata/input.cpp
 #   $7   testdata/expected.cpp
+#   $8   tools/apply_patch binary (a strict `git apply`)
 
 set -euo pipefail
 
@@ -18,6 +19,7 @@ shadow_in="$4"
 shadow_exp="$5"
 trailing_in="$6"
 trailing_exp="$7"
+apply_patch="$(realpath "$8")"
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
@@ -72,7 +74,7 @@ diff -u "$shadow_in" "$tmpdir/shadow.cpp" \
 echo "PASS: SARIF lint emits valid 2.1.0 log with rule id and relative URI"
 
 # ---------------------------------------------------------------------------
-# Test 3 — diff lint: the emitted patch applies cleanly with git apply
+# Test 3 — diff lint: the emitted patch applies cleanly (tools/apply_patch)
 # ---------------------------------------------------------------------------
 cp "$shadow_in" "$tmpdir/shadow.cpp"
 
@@ -80,12 +82,12 @@ cp "$shadow_in" "$tmpdir/shadow.cpp"
   cd "$tmpdir"
   expect_violations "$normalize" --lint --format=diff \
     --style=snake_case --scope=global shadow.cpp -- -std=c++17 > patch.diff
-  git apply patch.diff || fail "diff lint: git apply rejected the patch"
+  "$apply_patch" patch.diff || fail "diff lint: apply_patch rejected the patch"
 )
 
 diff -u "$shadow_exp" "$tmpdir/shadow.cpp" \
   || fail "diff lint: patched file does not match expected"
-echo "PASS: diff lint patch applies with git apply and matches --in-place output"
+echo "PASS: diff lint patch applies and matches --in-place output"
 
 # ---------------------------------------------------------------------------
 # Test 4 — clean file: exit 0, no diagnostics
@@ -113,8 +115,8 @@ out="$(
   cd "$tmpdir"
   expect_violations "$trailing" --lint --format=diff trailing.cpp \
     -- -std=c++17 > trailing_patch.diff
-  git apply trailing_patch.diff \
-    || fail "trailing lint: git apply rejected the patch"
+  "$apply_patch" trailing_patch.diff \
+    || fail "trailing lint: apply_patch rejected the patch"
 )
 diff -u "$trailing_exp" "$tmpdir/trailing.cpp" \
   || fail "trailing lint: patched file does not match expected"
@@ -168,8 +170,8 @@ out="$(
   cd "$tmpdir"
   expect_violations "$trailing" --reverse --lint --format=diff leading.cpp \
     -- -std=c++17 > leading_patch.diff
-  git apply leading_patch.diff \
-    || fail "reverse lint: git apply rejected the patch"
+  "$apply_patch" leading_patch.diff \
+    || fail "reverse lint: apply_patch rejected the patch"
 )
 
 # Everything that can move is back in leading position; `deduced()` has no
@@ -240,7 +242,7 @@ cp "$tmpdir/subsume.cpp" "$tmpdir/subsume_orig.cpp"
 (
   cd "$tmpdir"
   expect_violations "$cpp_format" --return-types=leading     --normalize-variables-scope=member --normalize-variables-style=m_prefix     --lint --format=diff subsume.cpp -- -std=c++20 > subsume.diff
-  git apply subsume.diff || fail "subsume: git apply rejected the patch"
+  "$apply_patch" subsume.diff || fail "subsume: apply_patch rejected the patch"
 )
 
 cat > "$tmpdir/subsume_expected.cpp" <<'EOF'
@@ -333,7 +335,7 @@ diff -u "$macrodir/counter.h.orig" "$macrodir/counter.h" \
   expect_violations "$normalize" --style=snake_case --scope=member \
     --format=diff counter.cpp main.cpp counter.h \
     -- -std=c++17 -xc++ -Wno-pragma-once-outside-header -I. > macro.diff 2>/dev/null
-  git apply macro.diff || fail "macro lint: git apply rejected the patch"
+  "$apply_patch" macro.diff || fail "macro lint: apply_patch rejected the patch"
 )
 grep -q "int other_count;" "$macrodir/counter.h" \
   || fail "macro lint: diff did not rename the unaffected member"

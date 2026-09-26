@@ -1153,6 +1153,7 @@ cpp_formatting/
   lint_lib.cpp                            # implementation (JSON via llvm/Support/JSON.h)
   lint_lib_test.cpp                       # gtest unit tests
   lint_integration_test.sh                # shell integration tests for --lint/--format
+  tools/apply_patch.cpp                   # a strict `git apply` for the shell tests (no host git)
 
   # Symbol index (--emit-index / --merge-index / --dump-index)
   index.proto                             # the schema: IndexUnit (per TU) and Index (merged)

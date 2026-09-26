@@ -231,10 +231,12 @@ sh_test(
     args = [
         "$(location //cpp_formatting:const_placement)",
         "$(location //cpp_formatting:cpp_format)",
+        "$(location //cpp_formatting/tools:apply_patch)",
     ],
     data = [
         "//cpp_formatting:const_placement",
         "//cpp_formatting:cpp_format",
+        "//cpp_formatting/tools:apply_patch",
     ],
 )
 
@@ -348,6 +350,7 @@ sh_test(
         "$(location testdata/normalize_shadow_expected.cpp)",
         "$(location testdata/input.cpp)",
         "$(location testdata/expected.cpp)",
+        "$(location //cpp_formatting/tools:apply_patch)",
     ],
     data = [
         "testdata/expected.cpp",
@@ -357,6 +360,7 @@ sh_test(
         "//cpp_formatting:cpp_format",
         "//cpp_formatting:normalize_variables",
         "//cpp_formatting:trailing_return_types",
+        "//cpp_formatting/tools:apply_patch",
     ],
 )
 
