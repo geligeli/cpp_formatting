@@ -11,6 +11,10 @@
 //
 // The pages are embedded; --assets-dir=code_browser/web serves them from
 // disk instead while they are being developed.
+//
+// Full-text search reads <index>.fts (--text-index), a suffix array over
+// every text file under --root.  It is rebuilt at startup whenever a file
+// was added, removed or changed since; --text-search=false turns it off.
 #include <chrono>
 #include <compare>
 #include <cstdint>
@@ -21,6 +25,7 @@
 #include <optional>
 #include <string>
 #include <system_error>
+#include <vector>
 
 #include "code_browser/api.h"
 #include "code_browser/file_cache.h"
@@ -29,6 +34,7 @@
 #include "code_browser/index_schema.h"
 #include "code_browser/repo.h"
 #include "code_browser/static_assets.h"
+#include "code_browser/text_index.h"
 #include "cpp_formatting/cpp_index_merge.h"
 #include "cpp_formatting/index.pb.h"
 #include "llvm/ADT/StringRef.h"
@@ -80,9 +86,24 @@ cl::opt<bool> ServeSystemFiles(
     cl::cat(Category));
 cl::opt<bool> LogRequests("log-requests", cl::desc("Log every request"),
                           cl::init(true), cl::cat(Category));
-cl::opt<bool> Check("check",
-                    cl::desc("Open the index, print its stats, and exit"),
-                    cl::cat(Category));
+cl::opt<bool> Check(
+    "check",
+    cl::desc("Open the index (and the full-text index, building it if it is "
+             "stale), print their stats, and exit"),
+    cl::cat(Category));
+cl::opt<bool> TextSearch("text-search",
+                         cl::desc("Full-text search over the files under "
+                                  "--root"),
+                         cl::init(true), cl::cat(Category));
+cl::opt<std::string> TextIndexPath(
+    "text-index",
+    cl::desc("The full-text index (default: <index>.fts, or <db>.fts); "
+             "rebuilt when the checkout changed"),
+    cl::cat(Category));
+cl::opt<unsigned> TextMaxFileKb(
+    "text-max-file-kb",
+    cl::desc("Leave files larger than this out of the full-text index"),
+    cl::init(4096), cl::cat(Category));
 
 auto Mtime(const fs::path& p) -> std::optional<fs::file_time_type> {
   std::error_code ec;
@@ -138,6 +159,34 @@ auto ResolveDatabase(std::string* error) -> std::string {
   return ImportIndexFile(IndexPath.getValue(), db, error) ? db : "";
 }
 
+// The full-text index for the checkout at `root`, built when it is missing
+// or stale.  Never indexes the files this server reads or writes itself.
+auto OpenTextIndex(const fs::path& root, const std::string& db_path,
+                   std::string* error)
+    -> std::unique_ptr<code_browser::TextIndex> {
+  const std::string path = !TextIndexPath.empty() ? TextIndexPath.getValue()
+                           : !IndexPath.empty() ? IndexPath.getValue() + ".fts"
+                                                : db_path + ".fts";
+  code_browser::TextIndexOptions opts;
+  opts.max_file_bytes = static_cast<uint64_t>(TextMaxFileKb) << 10;
+  // Prefixes: `index.pb` also keeps out index.pb.sqlite and index.pb.fts,
+  // and each one its -journal / .tmp.
+  opts.exclude = {path, db_path};
+  if (!IndexPath.empty()) opts.exclude.emplace_back(IndexPath.getValue());
+  code_browser::TextBuildStats stats;
+  std::unique_ptr<code_browser::TextIndex> text =
+      code_browser::OpenOrBuildTextIndex(root, path, opts, &stats, error);
+  if (!text) return nullptr;
+  llvm::errs() << "code_browser: text index " << path << ": " << text->files()
+               << " files (" << text->skipped() << " binary), "
+               << (text->corpus_bytes() >> 10) << " KiB of text";
+  if (stats.rebuilt)
+    llvm::errs() << ", built in " << stats.elapsed_ms << " ms\n";
+  else
+    llvm::errs() << ", up to date (built " << text->built_at() << ")\n";
+  return text;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -162,8 +211,16 @@ int main(int argc, char** argv) {
     llvm::errs() << "code_browser: " << error << "\n";
     return 2;
   }
-  const std::unique_ptr<code_browser::IndexDb> db =
+  std::unique_ptr<code_browser::IndexDb> db =
       code_browser::IndexDb::Open(db_path, &error);
+  // A database this server cannot read (another schema version: an older
+  // browser wrote it) is imported afresh when the index is at hand.
+  if (!db && DbPath.empty() && !IndexPath.empty()) {
+    llvm::errs() << "code_browser: " << error << "; importing again\n";
+    error.clear();
+    if (ImportIndexFile(IndexPath.getValue(), db_path, &error))
+      db = code_browser::IndexDb::Open(db_path, &error);
+  }
   if (!db) {
     llvm::errs() << "code_browser: " << error << "\n";
     return 2;
@@ -173,7 +230,6 @@ int main(int argc, char** argv) {
                << " files, " << stats.symbols << " symbols, "
                << stats.occurrences << " occurrences (imported "
                << stats.imported_at << " from " << stats.source_path << ")\n";
-  if (Check) return 0;
 
   code_browser::RepoOptions ropts;
   ropts.root = Root.getValue();
@@ -190,8 +246,18 @@ int main(int argc, char** argv) {
     llvm::errs() << ", exec root " << repo->exec_root()->string();
   llvm::errs() << "\n";
 
+  std::unique_ptr<code_browser::TextIndex> text;
+  if (TextSearch) {
+    text = OpenTextIndex(repo->root(), db_path, &error);
+    if (!text) {
+      llvm::errs() << "code_browser: " << error << "\n";
+      return 2;
+    }
+  }
+  if (Check) return 0;
+
   code_browser::FileCache files(static_cast<size_t>(FileCacheMb) << 20);
-  const code_browser::ApiHandler api(*db, *repo, files);
+  const code_browser::ApiHandler api(*db, *repo, files, text.get());
   const code_browser::StaticAssets assets =
       AssetsDir.empty()
           ? code_browser::StaticAssets::FromEmbedded()

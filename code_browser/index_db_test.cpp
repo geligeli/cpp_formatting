@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <initializer_list>
 #include <memory>
 #include <string>
 #include <utility>
@@ -329,6 +330,49 @@ TEST(IndexDb, SymbolOccurrencesWithFiltersAndPaging) {
   ASSERT_EQ(page.size(), 1u);
   // Files are sorted by path, so widget.h comes last.
   EXPECT_EQ(page[0].file, f.widget_h);
+}
+
+// A file of a testonly Bazel target (the aspect's `testonly` attribute) is
+// test code: FileRow says so, and a symbol's occurrences list those files after
+// all the others -- on every page, since the order is the database's.
+TEST(IndexDb, TestFilesComeLast) {
+  IndexUnit u;
+  u.set_producer("test");
+  const int32_t a = AddFile(u, "a.h", cpp_index::SOURCE);
+  const int32_t b = AddFile(u, "b_test.cpp", cpp_index::SOURCE);
+  const int32_t c = AddFile(u, "c.cpp", cpp_index::SOURCE);
+  cpp_index::Attribute* attr = u.mutable_files(b)->add_attributes();
+  attr->set_key("testonly");
+  attr->set_value("cc_test");
+  const int32_t x =
+      AddSymbol(u, "c:@S@X", "X", "X", cpp_index::STRUCT, a, 0, 1);
+  for (const int32_t file : {a, b, c})
+    for (const uint32_t at : {0u, 10u})
+      AddOcc(u, file, at, at + 1, x, cpp_index::REFERENCE);
+  normalizeUnit(u);
+  ImportOptions opts;
+  std::string error;
+  const std::unique_ptr<IndexDb> db =
+      IndexDb::FromIndex(buildIndex(u), opts, &error);
+  ASSERT_TRUE(db) << error;
+  const int32_t a_id = *db->FileIdOf("a.h");
+  const int32_t b_id = *db->FileIdOf("b_test.cpp");
+  const int32_t c_id = *db->FileIdOf("c.cpp");
+  EXPECT_FALSE(db->File(a_id)->test);
+  EXPECT_TRUE(db->File(b_id)->test);
+  ASSERT_EQ(db->FilesNamed("b_test.cpp").size(), 1u);
+  EXPECT_TRUE(db->FilesNamed("b_test.cpp")[0].test);
+
+  const int32_t sym = db->SymbolByUsr("c:@S@X")->id;
+  RefQuery q;
+  std::vector<int32_t> files;
+  for (const OccRow& o : db->SymbolOccurrences(sym, q)) files.push_back(o.file);
+  EXPECT_EQ(files, (std::vector<int32_t>{a_id, a_id, c_id, c_id, b_id, b_id}));
+  q.limit = 3;
+  q.offset = 3;
+  files.clear();
+  for (const OccRow& o : db->SymbolOccurrences(sym, q)) files.push_back(o.file);
+  EXPECT_EQ(files, (std::vector<int32_t>{c_id, b_id, b_id}));
 }
 
 TEST(IndexDb, RelationsBothWays) {

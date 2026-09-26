@@ -10,6 +10,9 @@
 //   /api/refs/<id>?role=&exclude=&file=&offset=&limit=   References
 //   /api/search?q=&limit=&kind=&locals=1   SearchResults
 //   /api/at?path=<p>&offset=<n>            OccurrencesAt
+//   /api/text?q=&case=sensitive|insensitive&offset=&limit=
+//                                          TextSearchResults (503 when the
+//                                          server has no full-text index)
 // Errors are an Error message with the matching status.  Responses that
 // depend only on the index carry its ETag; a matching If-None-Match gets a
 // 304 with no body.
@@ -26,6 +29,7 @@
 #include "code_browser/file_cache.h"
 #include "code_browser/index_db.h"
 #include "code_browser/repo.h"
+#include "code_browser/text_index.h"
 #include "google/protobuf/message.h"
 
 namespace code_browser {
@@ -48,8 +52,10 @@ struct ApiResponse {
 
 class ApiHandler {
  public:
-  ApiHandler(const IndexDb& db, const Repo& repo, FileCache& files)
-      : db_(db), repo_(repo), files_(files) {}
+  // `text` may be null: /api/text then answers 503.
+  ApiHandler(const IndexDb& db, const Repo& repo, FileCache& files,
+             const TextIndex* text = nullptr)
+      : db_(db), repo_(repo), files_(files), text_(text) {}
 
   // Never throws; unknown /api/* paths are 404, other paths too.
   auto Handle(const ApiRequest& request) const -> ApiResponse;
@@ -66,10 +72,12 @@ class ApiHandler {
       -> ApiResponse;
   auto Search(const ApiRequest&) const -> ApiResponse;
   auto At(const ApiRequest&) const -> ApiResponse;
+  auto TextSearch(const ApiRequest&) const -> ApiResponse;
 
   const IndexDb& db_;
   const Repo& repo_;
   FileCache& files_;
+  const TextIndex* text_;
 };
 
 // application/x-www-form-urlencoded-ish: `a=1&b=x%20y&c` -> [(a,1),(b,x y),

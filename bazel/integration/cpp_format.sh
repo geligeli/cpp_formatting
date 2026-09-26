@@ -385,6 +385,20 @@ read_manifests proto_index.manifest "${proto_targets[@]}"
 if [[ $missing -gt 0 ]]; then
   echo "cpp_format: $missing translation unit(s) are not in the index: they did not build" >&2
 fi
+# The index aspect says which files are test code (Bazel's `testonly`) in units
+# of text form, `.txtpb`, which a cpp_format from before them cannot read --
+# and one unreadable unit fails the whole merge.  Ask the binary once; an old
+# one gets an index without the test marks rather than no index.
+if grep -q '\.txtpb$' "$list"; then
+  probe_dir="$(mktemp -d)"
+  printf 'files { path: "probe" }\n' > "$probe_dir/probe.txtpb"
+  if ! "$bin" --merge-index --output="$probe_dir/probe.pb" "$probe_dir/probe.txtpb" >/dev/null 2>&1; then
+    echo "cpp_format: this cpp_format cannot read the aspect's testonly units, so the index does not say which files are test code (a newer cpp_format.release(version = ...) can)" >&2
+    grep -v '\.txtpb$' "$list" > "$probe_dir/list" || true
+    cat "$probe_dir/list" > "$list"
+  fi
+  rm -rf "$probe_dir"
+fi
 if [[ ! -s "$list" ]]; then
   echo "cpp_format: no records emitted for $pattern" >&2
   exit 0

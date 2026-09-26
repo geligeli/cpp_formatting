@@ -29,6 +29,9 @@ exports_files(["cpp_format.yaml"])
 # dropped without a word, which is what happened to this one.
 # gazelle:resolve cc zlib.h @zlib//:zlib
 #
+# libsais (the browser's full-text index), which no index knows either.
+# gazelle:resolve cc libsais.h @libsais
+#
 # protobuf's public target, for every header of it: the built-in index names
 # internal sub-packages for some (io, json) and knows nothing for others
 # (message.h, text_format.h).

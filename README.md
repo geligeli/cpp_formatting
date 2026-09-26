@@ -1005,7 +1005,10 @@ itself a valid merge input, so it can be extended with further units.
 **Browsing it.** [code_browser/](code_browser/) is an HTTP server that serves
 a checkout with every indexed token annotated: click an identifier and a panel
 below the code shows what it is, its definition and its references; an
-`#include` is a link to the file it names. It reads the index
+`#include` is a link to the file it names. Enter in its search box searches
+the text of every file in the checkout (a suffix array in `index.pb.fts`,
+rebuilt at startup when a file changed) and lists the matching lines in
+place of the code. It reads the index
 from SQLite (`code_browser --index=index.pb` imports it into `index.pb.sqlite`
 when that is missing or older), so nothing is loaded up front.
 `tools/cpp_format.sh browse` is the one command: it indexes the repository,

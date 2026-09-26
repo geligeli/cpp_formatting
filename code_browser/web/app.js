@@ -10,6 +10,7 @@
 
   const $ = (id) => document.getElementById(id);
   const decoder = new TextDecoder('utf-8');
+  const encoder = new TextEncoder();
 
   const ROLE_NAMES = [
     [1, 'declaration'], [2, 'definition'], [4, 'reference'], [8, 'read'],
@@ -49,6 +50,10 @@
     tokens: new Map(),    // symbol id -> [token elements]
     selected: null,       // selected symbol id
     repo: null,
+    view: 'code',         // what the middle shows: 'code' or 'text' (results)
+    text: null,           // {q, caseSensitive} of the results on the page
+    caseSensitive: true,  // the last full-text search's choice
+    scroll: {},           // view -> scrollTop while it is hidden
   };
 
   // ---- API -------------------------------------------------------------
@@ -272,10 +277,127 @@
     return null;
   }
 
+  // ---- resizing ----------------------------------------------------------
+
+  // Sizes the reader dragged, kept per browser; the page works without them.
+  const SIZES_KEY = 'code_browser.sizes';
+  let sizes = {};
+  try { sizes = JSON.parse(window.localStorage.getItem(SIZES_KEY) || '{}') || {}; } catch (e) { sizes = {}; }
+  function setSize(name, value) {
+    if (value === null) {
+      delete sizes[name];
+      document.documentElement.style.removeProperty('--' + name);
+    } else {
+      sizes[name] = value;
+      document.documentElement.style.setProperty('--' + name, value);
+    }
+  }
+  function saveSizes() {
+    try { window.localStorage.setItem(SIZES_KEY, JSON.stringify(sizes)); } catch (e) { /* private mode */ }
+  }
+  for (const [name, value] of Object.entries(sizes))
+    if (typeof value === 'string') document.documentElement.style.setProperty('--' + name, value);
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+  // Drags `el` to set the CSS variable `name`.  `begin()` is called when a
+  // drag (or a key press) starts and returns what the size becomes for a move
+  // of the pointer by `delta` pixels (x for a vertical splitter, y for a
+  // horizontal one).  Arrow keys nudge; a double-click forgets.
+  function makeSplitter(el, name, begin) {
+    const vertical = el.classList.contains('vertical');
+    const coordinate = (ev) => (vertical ? ev.clientX : ev.clientY);
+    el.addEventListener('pointerdown', (ev) => {
+      if (ev.button !== 0) return;
+      ev.preventDefault();
+      el.setPointerCapture(ev.pointerId);
+      el.classList.add('dragging');
+      document.body.classList.add('resizing', vertical ? 'vertical' : 'horizontal');
+      const start = coordinate(ev);
+      const size = begin();
+      const move = (e) => setSize(name, size(coordinate(e) - start));
+      const done = () => {
+        el.removeEventListener('pointermove', move);
+        el.removeEventListener('pointerup', done);
+        el.removeEventListener('pointercancel', done);
+        el.classList.remove('dragging');
+        document.body.classList.remove('resizing', 'vertical', 'horizontal');
+        saveSizes();
+      };
+      el.addEventListener('pointermove', move);
+      el.addEventListener('pointerup', done);
+      el.addEventListener('pointercancel', done);
+    });
+    el.addEventListener('dblclick', () => { setSize(name, null); saveSizes(); });
+    el.addEventListener('keydown', (ev) => {
+      const step = ev.shiftKey ? 64 : 16;
+      const keys = vertical ? { ArrowLeft: -step, ArrowRight: step } : { ArrowUp: -step, ArrowDown: step };
+      if (!(ev.key in keys)) return;
+      ev.preventDefault();
+      setSize(name, begin()(keys[ev.key]));
+      saveSizes();
+    });
+  }
+
+  function initSplitters() {
+    makeSplitter($('tree-splitter'), 'tree-width', () => {
+      const width = $('tree').getBoundingClientRect().width;
+      const room = $('main').getBoundingClientRect().width - 240;
+      return (dx) => clamp(width + dx, 120, room) + 'px';
+    });
+    makeSplitter($('panel-splitter'), 'panel-height', () => {
+      const height = $('panel').getBoundingClientRect().height;
+      const room = $('source').getBoundingClientRect().height - 80;
+      return (dy) => clamp(height - dy, 80, room) + 'px';
+    });
+  }
+
+  // The splitter between a symbol's occurrences and its details: a share of
+  // the pane's width, so that it survives a resize of the window.
+  function columnSplitter(columns) {
+    const el = document.createElement('div');
+    el.className = 'splitter vertical';
+    el.setAttribute('role', 'separator');
+    el.setAttribute('aria-orientation', 'vertical');
+    el.setAttribute('aria-label', 'resize the columns');
+    el.tabIndex = 0;
+    el.title = 'drag to resize (double-click resets)';
+    makeSplitter(el, 'refs-width', () => {
+      const width = columns.firstElementChild.getBoundingClientRect().width;
+      const total = columns.clientWidth;  // what a grid track's % is of
+      return (dx) => clamp((width + dx) / total * 100, 15, 85).toFixed(2) + '%';
+    });
+    return el;
+  }
+
   // ---- files -----------------------------------------------------------
+
+  // The middle of the page: the open file, or full-text results.  Both stay
+  // rendered; switching back and forth keeps each one's scroll position.
+  function showView(view) {
+    // Hidden, an element forgets how far it was scrolled: keep it here.
+    const scrollers = { code: $('code'), text: $('text-results') };
+    if (state.view !== view) {
+      const leaving = scrollers[state.view];
+      state.scroll[state.view] = leaving.scrollTop;
+    }
+    const wasHidden = scrollers[view].hidden;
+    state.view = view;
+    $('code').hidden = view !== 'code';
+    $('file-title').hidden = view !== 'code';
+    $('text-results').hidden = view !== 'text';
+    $('text-title').hidden = view !== 'text';
+    if (view === 'text') {
+      $('banner').hidden = true;
+    } else if (state.path) {
+      $('banner').hidden = !$('banner').dataset.stale;
+      document.title = state.path.split('/').pop() + ' – code browser';
+    }
+    if (wasHidden) scrollers[view].scrollTop = state.scroll[view] || 0;
+  }
 
   async function openFile(path, line) {
     if (state.path === path) {
+      showView('code');
       goToLine(line);
       return;
     }
@@ -301,10 +423,12 @@
     const banner = $('banner');
     if (file.headers.get('X-Newer-Than-Index')) {
       banner.textContent = 'This file changed after the index was built; annotations may be shifted.';
-      banner.hidden = false;
+      banner.dataset.stale = '1';
     } else {
-      banner.hidden = true;
+      delete banner.dataset.stale;
     }
+    state.scroll.code = 0;  // a new file starts at the top (or at `line`)
+    showView('code');
     render(file.bytes, ann, includes.includes);
     // The panel outlives the file (that is how a reference list is walked):
     // what it selected is highlighted here as well.
@@ -423,12 +547,14 @@
       head.appendChild(a);
     }
     pane.appendChild(head);
+    // Where it is used on the left, what it is on the right.
     const columns = document.createElement('div');
     columns.className = 'columns';
-    const details = document.createElement('div');
     const refs = document.createElement('div');
-    columns.appendChild(details);
+    const details = document.createElement('div');
     columns.appendChild(refs);
+    columns.appendChild(columnSplitter(columns));
+    columns.appendChild(details);
     pane.appendChild(columns);
     showDetails(summary.id, details);
     showReferences(summary.id, refs);
@@ -475,7 +601,19 @@
         (generated.size ? `, with those of the ${generated.size} symbol(s) generated from it` : '') +
         (refs.truncated ? ' (first 200)' : '');
     body.appendChild(title);
-    for (const file of refs.files || []) {
+    // Uses in test code (files of testonly Bazel targets) come last -- the
+    // server orders them so -- under a divider of their own.
+    const files = refs.files || [];
+    let inTests = false;
+    for (const file of files) {
+      if (!inTests && file.test) {
+        inTests = true;
+        const tests = document.createElement('div');
+        tests.className = 'tests';
+        const n = files.filter((f) => f.test).reduce((k, f) => k + (f.refs || []).length, 0);
+        tests.textContent = `in tests (${n}${refs.truncated ? '+' : ''})`;
+        body.appendChild(tests);
+      }
       const fileEl = document.createElement('div');
       fileEl.className = 'ref-file';
       fileEl.textContent = file.path;
@@ -641,10 +779,41 @@
 
   // ---- search ----------------------------------------------------------
 
+  // Where a full-text search lives: `#?text=<q>[&case=insensitive]`.  No
+  // path starts with `?`.
+  function textHash(q, caseSensitive) {
+    const params = new URLSearchParams({ text: q });
+    if (!caseSensitive) params.set('case', 'insensitive');
+    return '#?' + params.toString();
+  }
+
+  // The first row of the dropdown: the same words, as text.
+  function textSearchRow(q) {
+    const a = document.createElement('a');
+    a.className = 'hit text-search';
+    a.href = textHash(q, state.caseSensitive);
+    const kind = document.createElement('span');
+    kind.className = 'kind';
+    kind.textContent = 'text';
+    a.appendChild(kind);
+    const name = document.createElement('span');
+    name.className = 'qname';
+    name.textContent = `Search the text for “${q}”`;
+    a.appendChild(name);
+    const where = document.createElement('span');
+    where.className = 'where';
+    where.textContent = 'Enter';
+    a.appendChild(where);
+    a.addEventListener('click', () => { $('search-results').hidden = true; });
+    return a;
+  }
+
   let searchTimer = null;
+  let searchSeq = 0;  // a newer search, or Enter, discards an older answer
   async function runSearch() {
     const q = $('search').value.trim();
     const box = $('search-results');
+    const seq = ++searchSeq;
     if (!q) {
       box.hidden = true;
       return;
@@ -653,14 +822,22 @@
     try {
       result = await getJson(`/api/search?q=${encodeURIComponent(q)}&limit=20`);
     } catch (e) {
-      box.textContent = e.message;
+      if (seq !== searchSeq) return;
+      box.textContent = '';
+      box.appendChild(textSearchRow(q));
+      box.appendChild(document.createTextNode(e.message));
       box.hidden = false;
       return;
     }
+    if (seq !== searchSeq) return;
     box.textContent = '';
+    box.appendChild(textSearchRow(q));
     const hits = result.hits || [];
     if (!hits.length) {
-      box.textContent = 'no symbols';
+      const none = document.createElement('div');
+      none.className = 'hit';
+      none.textContent = 'no symbols';
+      box.appendChild(none);
     }
     for (const hit of hits) {
       const s = hit.symbol || {};
@@ -689,10 +866,158 @@
     box.hidden = false;
   }
 
+  // ---- full-text results ------------------------------------------------
+
+  const TEXT_PAGE = 200;  // lines per request
+  let textSeq = 0;        // a newer search discards an older answer
+
+  // The results of a full-text search, in the middle of the page.  Coming
+  // back to the search on the page (Back from a result) shows it as it was.
+  async function showTextResults(q, caseSensitive) {
+    // The box says what is shown -- unless the reader is typing in it.
+    if (document.activeElement !== $('search')) $('search').value = q;
+    $('search-results').hidden = true;
+    ++searchSeq;
+    state.caseSensitive = caseSensitive;
+    document.title = `“${q}” – code browser`;
+    if (state.text && state.text.q === q && state.text.caseSensitive === caseSensitive) {
+      showView('text');
+      return;
+    }
+    state.text = { q, caseSensitive };
+    const seq = ++textSeq;
+    const title = $('text-title');
+    title.textContent = '';
+    const summary = document.createElement('span');
+    summary.className = 'summary';
+    summary.textContent = `searching for “${q}”…`;
+    title.appendChild(summary);
+    const label = document.createElement('label');
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = caseSensitive;
+    box.addEventListener('change', () => {
+      state.caseSensitive = box.checked;  // before the hashchange: Enter may come first
+      window.location.hash = textHash(q, box.checked);
+    });
+    label.appendChild(box);
+    label.appendChild(document.createTextNode(' match case'));
+    title.appendChild(label);
+    const body = $('text-results');
+    body.textContent = '';
+    state.scroll.text = 0;
+    showView('text');
+    await loadTextPage(q, caseSensitive, 0, { seq, summary, body, last: null });
+  }
+
+  async function loadTextPage(q, caseSensitive, offset, page) {
+    const started = performance.now();
+    let r;
+    try {
+      r = await getJson(`/api/text?q=${encodeURIComponent(q)}` +
+          `&case=${caseSensitive ? 'sensitive' : 'insensitive'}&offset=${offset}&limit=${TEXT_PAGE}`);
+    } catch (e) {
+      if (page.seq !== textSeq) return;
+      state.text = null;  // not cached: try again next time
+      page.summary.textContent = `“${q}”`;
+      const notice = document.createElement('div');
+      notice.className = 'notice';
+      notice.textContent = e.message;
+      page.body.appendChild(notice);
+      status(e.message, true);
+      return;
+    }
+    if (page.seq !== textSeq) return;
+    const ms = Math.round(performance.now() - started);
+    const matches = +(r.total_matches || 0), lines = +(r.total_lines || 0), files = +(r.files_matched || 0);
+    const more = r.truncated ? '+' : '';
+    if (offset === 0) {
+      page.summary.textContent = matches
+        ? `${matches}${more} matches on ${lines}${more} lines in ${files}${more} files for “${q}”`
+        : `no matches for “${q}”`;
+      page.summary.title = page.summary.textContent;
+      status(`full-text search: ${matches}${more} matches (${ms} ms)`);
+      if (r.truncated) {
+        const notice = document.createElement('div');
+        notice.className = 'notice';
+        notice.textContent = 'Too many matches: only some of them were looked at. A longer query narrows them down.';
+        page.body.appendChild(notice);
+      }
+    }
+    for (const file of r.files || []) {
+      if (!page.last || page.last.path !== file.path) {
+        const head = document.createElement('a');
+        head.className = 'text-file';
+        head.href = '#' + file.path;
+        head.textContent = file.path;
+        if ((file.file_id ?? 0) < 0) {  // proto3 JSON leaves out a 0
+          head.classList.add('unindexed');
+          head.title = 'not in the symbol index: opens without annotations';
+        } else {
+          head.classList.add('k-' + (file.kind || 'SOURCE').toLowerCase());
+        }
+        page.body.appendChild(head);
+        page.last = { path: file.path };
+      }
+      for (const hit of file.lines || []) page.body.appendChild(textLine(file.path, hit));
+    }
+    if (r.next_offset) {
+      const button = document.createElement('button');
+      button.className = 'more';
+      button.textContent = `more (${lines - r.next_offset} lines)`;
+      button.addEventListener('click', () => {
+        button.disabled = true;
+        loadTextPage(q, caseSensitive, r.next_offset, page).then(() => button.remove());
+      });
+      page.body.appendChild(button);
+    }
+  }
+
+  // One matching line: its number and its text, the matches marked; the
+  // whole row goes to the line.  Spans are bytes into the UTF-8 text.
+  function textLine(path, hit) {
+    const a = document.createElement('a');
+    a.className = 'text-hit';
+    a.href = '#' + path + ':' + hit.line;
+    const ln = document.createElement('span');
+    ln.className = 'ln';
+    ln.textContent = hit.line;
+    a.appendChild(ln);
+    const text = document.createElement('span');
+    text.className = 'text';
+    const clip = () => {
+      const el = document.createElement('span');
+      el.className = 'clip';
+      el.textContent = '…';
+      return el;
+    };
+    if (hit.text_offset) text.appendChild(clip());
+    const bytes = encoder.encode(hit.text || '');
+    let pos = 0;
+    for (const s of hit.spans || []) {
+      const b = s.begin || 0, e = s.end || 0;
+      if (b < pos || e <= b) continue;
+      if (b > pos) text.appendChild(document.createTextNode(decoder.decode(bytes.subarray(pos, b))));
+      const mark = document.createElement('mark');
+      mark.textContent = decoder.decode(bytes.subarray(b, e));
+      text.appendChild(mark);
+      pos = e;
+    }
+    if (pos < bytes.length) text.appendChild(document.createTextNode(decoder.decode(bytes.subarray(pos))));
+    if (hit.clipped_end) text.appendChild(clip());
+    a.appendChild(text);
+    return a;
+  }
+
   // ---- navigation ------------------------------------------------------
 
   function parseHash() {
-    const h = decodeURIComponent(window.location.hash.slice(1));
+    const raw = window.location.hash.slice(1);
+    if (raw.startsWith('?')) {
+      const params = new URLSearchParams(raw.slice(1));
+      return { text: params.get('text') || '', caseSensitive: params.get('case') !== 'insensitive' };
+    }
+    const h = decodeURIComponent(raw);
     if (!h) return null;
     const m = h.match(/^(.*?)(?::(\d+))?$/);
     return { path: m[1], line: m[2] ? +m[2] : 0 };
@@ -700,7 +1025,12 @@
 
   function onHash() {
     const target = parseHash();
-    if (!target || !target.path) return;
+    if (!target) return;
+    if (target.text !== undefined) {
+      if (target.text) showTextResults(target.text, target.caseSensitive);
+      return;
+    }
+    if (!target.path) return;
     openFile(target.path, target.line);
   }
 
@@ -730,6 +1060,7 @@
     } catch (e) {
       status(e.message, true);
     }
+    initSplitters();
     await loadDir('', $('tree'));
     onHash();
     window.addEventListener('hashchange', onHash);
@@ -764,11 +1095,15 @@
     });
     $('search').addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter') {
-        const first = $('search-results').querySelector('a.hit');
-        if (first) {
-          window.location.hash = first.getAttribute('href').slice(1);
-          $('search-results').hidden = true;
-        }
+        // Enter searches the text; a symbol is a click in the dropdown.
+        const q = $('search').value.trim();
+        clearTimeout(searchTimer);
+        ++searchSeq;
+        $('search-results').hidden = true;
+        if (!q) return;
+        const hash = textHash(q, state.caseSensitive);
+        if (window.location.hash === hash) showTextResults(q, state.caseSensitive);
+        else window.location.hash = hash;
       } else if (ev.key === 'Escape') {
         $('search-results').hidden = true;
         $('search').blur();

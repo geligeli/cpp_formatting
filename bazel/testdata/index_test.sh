@@ -37,6 +37,18 @@ grep -q 'usr: "c:@S@Widget@FI@item_count_"' "$out/index.txt" \
   || fail "Widget::item_count_ not in the index"
 echo "PASS: index lists the demo's files and symbols"
 
+# Test code is what Bazel says it is: the files of a testonly target (the
+# cc_test, and the header-only testonly library it uses) carry a `testonly`
+# attribute valued with the rule's kind; the library under test does not.
+attributes_of() {  # the lines of <path>'s `files` entry
+  awk -v p="path: \"bazel/testdata/$1\"" 'index($0, p) {f = 1} f && /^}/ {exit} f' "$out/index.txt"
+}
+attributes_of demo_test.cpp | grep -q 'value: "cc_test"' || fail "demo_test.cpp not marked testonly"
+attributes_of demo_testing.h | grep -q 'value: "cc_library"' || fail "demo_testing.h not marked testonly"
+attributes_of demo.h | grep -q testonly && fail "demo.h marked testonly"
+attributes_of demo_main.cpp | grep -q testonly && fail "demo_main.cpp marked testonly"
+echo "PASS: test code is marked testonly"
+
 # A token in the binary's source finds the definition in the library's header.
 off_use="$(offset_of "$demo_main" 'item_count_ = 4')"
 off_def="$(offset_of "$demo_h" 'item_count_;')"

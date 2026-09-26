@@ -25,6 +25,8 @@ constexpr uint32_t kMaxRefLimit = 5000;
 constexpr size_t kDefaultSearchLimit = 20;
 constexpr size_t kMaxSearchLimit = 200;
 constexpr size_t kMaxLocations = 50;  // definitions/declarations in SymbolInfo
+constexpr uint32_t kDefaultTextLimit = 200;  // lines
+constexpr uint32_t kMaxTextLimit = 2000;
 
 auto Quote(std::string_view etag) -> std::string {
   return "\"" + std::string(etag) + "\"";
@@ -484,6 +486,7 @@ auto ApiHandler::Handle(const ApiRequest& request) const -> ApiResponse {
   if (path == "/api/includes") return Includes(request);
   if (path == "/api/search") return Search(request);
   if (path == "/api/at") return At(request);
+  if (path == "/api/text") return TextSearch(request);
   if (path == "/api/symbol") return SymbolInfo(request, "");
   if (path.rfind("/api/symbol/", 0) == 0)
     return SymbolInfo(request, path.substr(12));
@@ -510,6 +513,15 @@ auto ApiHandler::RepoInfo() const -> ApiResponse {
   stats->set_db_bytes(s.db_bytes);
   stats->set_imported_at(s.imported_at);
   stats->set_source_path(s.source_path);
+  if (text_ != nullptr) {
+    api::TextIndexInfo* t = info.mutable_text_index();
+    t->set_path(text_->path());
+    t->set_files(text_->files());
+    t->set_skipped(text_->skipped());
+    t->set_corpus_bytes(text_->corpus_bytes());
+    t->set_file_bytes(text_->file_bytes());
+    t->set_built_at(text_->built_at());
+  }
   return Json(info);
 }
 
@@ -747,6 +759,7 @@ auto ApiHandler::References(const ApiRequest& request,
       if (const FileResolver::Entry* e = files.Get(o.file)) {
         group->set_path(e->row.path);
         group->set_kind(e->row.kind);
+        group->set_test(e->row.test);
       }
     }
     api::Reference* ref = group->add_refs();
@@ -823,6 +836,72 @@ auto ApiHandler::At(const ApiRequest& request) const -> ApiResponse {
       t->set_name(u.name);
     }
   return WithEtag(Json(out), db_.etag(), request);
+}
+
+auto ApiHandler::TextSearch(const ApiRequest& request) const -> ApiResponse {
+  const Params params(request.query);
+  const std::optional<std::string> q = params.Get("q");
+  if (!q) return ErrorResponse(400, "missing parameter: q");
+  if (const std::optional<std::string> why = InvalidTextQuery(*q))
+    return ErrorResponse(400, *why);
+  TextSearchOptions opts;
+  opts.limit = kDefaultTextLimit;
+  if (const std::optional<std::string> c = params.Get("case")) {
+    if (*c == "insensitive")
+      opts.case_sensitive = false;
+    else if (*c != "sensitive")
+      return ErrorResponse(400, "case is `sensitive` or `insensitive`");
+  }
+  uint32_t n = 0;
+  if (const std::optional<std::string> v = params.Get("offset")) {
+    if (!ParseUint(*v, n)) return ErrorResponse(400, "bad offset");
+    opts.offset = n;
+  }
+  if (const std::optional<std::string> v = params.Get("limit")) {
+    if (!ParseUint(*v, n) || n == 0 || n > kMaxTextLimit)
+      return ErrorResponse(
+          400, "limit must be in [1, " + std::to_string(kMaxTextLimit) + "]");
+    opts.limit = n;
+  }
+  if (text_ == nullptr)
+    return ErrorResponse(503, "full-text search is off (--text-search)");
+
+  const TextSearchResult result = text_->Search(*q, opts);
+  api::TextSearchResults out;
+  out.set_query(*q);
+  out.set_case_sensitive(opts.case_sensitive);
+  out.set_total_matches(result.total_matches);
+  out.set_total_lines(result.total_lines);
+  out.set_files_matched(result.files_matched);
+  out.set_truncated(result.truncated);
+  out.set_offset(static_cast<uint32_t>(opts.offset));
+  out.set_next_offset(static_cast<uint32_t>(result.next_offset));
+  for (const TextFileHits& file : result.files) {
+    api::TextFile* f = out.add_files();
+    f->set_path(file.path);
+    f->set_file_id(-1);
+    // Whatever the symbol index says about the file: the page greys out what
+    // it has no annotations for.
+    if (const std::optional<int32_t> id = db_.FileIdOf(file.path)) {
+      f->set_file_id(*id);
+      if (const std::optional<FileRow> row = db_.File(*id))
+        f->set_kind(row->kind);
+    }
+    for (const TextLineHit& hit : file.lines) {
+      api::TextLine* l = f->add_lines();
+      l->set_line(hit.line);
+      l->set_column(hit.column);
+      l->set_text(hit.text);
+      l->set_text_offset(hit.text_offset);
+      l->set_clipped_end(hit.clipped_end);
+      for (const TextSpan& s : hit.spans) {
+        api::TextSpan* span = l->add_spans();
+        span->set_begin(s.begin);
+        span->set_end(s.end);
+      }
+    }
+  }
+  return WithEtag(Json(out), text_->etag() + "-" + db_.etag(), request);
 }
 
 }  // namespace code_browser

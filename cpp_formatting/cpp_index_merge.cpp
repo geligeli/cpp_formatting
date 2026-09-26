@@ -494,6 +494,19 @@ auto readUnit(llvm::StringRef Path, IndexUnit& Out) -> bool {
     return false;
   }
   llvm::StringRef Bytes = (*BufOrErr)->getBuffer();
+  // A unit in text form: what a Bazel aspect can write without running a
+  // tool (the index aspect's per-target `testonly` attributes).
+  if (Path.ends_with(".txtpb")) {
+    IndexUnit Unit;
+    if (!google::protobuf::TextFormat::ParseFromString(
+            std::string(Bytes.data(), Bytes.size()), &Unit)) {
+      llvm::errs() << "Cannot parse '" << Path
+                   << "' as a cpp_index unit in text form\n";
+      return false;
+    }
+    Out = std::move(Unit);
+    return true;
+  }
   // The two messages share every field number but one, so parse as a unit
   // first; a file that turns out to carry `per_file` was an index.
   IndexUnit Unit;

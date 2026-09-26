@@ -4,10 +4,12 @@
 
 #include <initializer_list>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/raw_ostream.h"
 
 using cpp_index::File;
 using cpp_index::Index;
@@ -249,6 +251,47 @@ TEST(IndexMerge, ReadUnitAcceptsBothMessages) {
   EXPECT_FALSE(readUnit("/nonexistent/dir/unit.pb", Missing));
   llvm::sys::fs::remove(UnitPath);
   llvm::sys::fs::remove(IndexPath);
+}
+
+// A `.txtpb` is a unit in text form -- what the index aspect writes, with no
+// tool, to say which files a testonly target owns.  Its attributes join the
+// file's entry from the units that indexed it.
+TEST(IndexMerge, ReadUnitInTextFormAndItsAttributesUnion) {
+  llvm::SmallString<128> TextPath;
+  int FD = 0;
+  ASSERT_FALSE(
+      llvm::sys::fs::createTemporaryFile("testonly", "txtpb", FD, TextPath));
+  {
+    llvm::raw_fd_ostream Out(FD, /*shouldClose=*/true);
+    Out << "files { path: \"a_test.cpp\" kind: SOURCE "
+           "attributes { key: \"testonly\" value: \"cc_test\" } }\n";
+  }
+  IndexUnit Text;
+  ASSERT_TRUE(readUnit(TextPath, Text));
+  ASSERT_EQ(Text.files_size(), 1);
+  EXPECT_EQ(Text.files(0).path(), "a_test.cpp");
+  EXPECT_EQ(Text.files(0).kind(), cpp_index::SOURCE);
+
+  IndexUnit Parsed;
+  addFile(Parsed, "a_test.cpp");
+  addSymbol(Parsed, "c:@x");
+  addOcc(Parsed, 0, 1, 2, 0, cpp_index::REFERENCE);
+  const IndexUnit M = mergeUnits({Parsed, Text});
+  ASSERT_EQ(M.files_size(), 1);
+  ASSERT_EQ(M.files(0).attributes_size(), 1);
+  EXPECT_EQ(M.files(0).attributes(0).key(), "testonly");
+  EXPECT_EQ(M.occurrences_size(), 1);
+  EXPECT_EQ(bytes(M), bytes(mergeUnits({Text, Parsed})));
+
+  // Text that is not a unit is an error, as a bad binary unit is.
+  {
+    std::error_code EC;
+    llvm::raw_fd_ostream Out(TextPath, EC);
+    Out << "files { nonsense: 1 }\n";
+  }
+  IndexUnit Bad;
+  EXPECT_FALSE(readUnit(TextPath, Bad));
+  llvm::sys::fs::remove(TextPath);
 }
 
 // The threaded merge is a reduction over contiguous runs of the inputs, and

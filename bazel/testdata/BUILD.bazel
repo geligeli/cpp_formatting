@@ -2,6 +2,7 @@ load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
 load("@protobuf//bazel:proto_library.bzl", "proto_library")
 load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 # Exercises the in-repo, built-from-source aspects (not the prebuilt-binary kit
@@ -50,6 +51,27 @@ cc_binary(
     deps = [":demo"],
 )
 
+# Test code, as far as the index is concerned: a testonly header-only library
+# and a cc_test.  The index aspect marks the files of both `testonly` (see
+# index_test.sh).  Not in _DEMO: the format fixtures stay as they were.
+cc_library(
+    name = "demo_testing",
+    testonly = True,
+    hdrs = ["demo_testing.h"],
+    includes = ["."],
+    deps = [":demo"],
+)
+
+cc_test(
+    name = "demo_test",
+    size = "small",
+    srcs = ["demo_test.cpp"],
+    deps = [
+        ":demo",
+        ":demo_testing",
+    ],
+)
+
 _DEMO = [
     ":budget",
     ":demo",
@@ -84,14 +106,17 @@ sh_test(
 # index` merges them.
 cpp_index_units(
     name = "index_units",
+    testonly = True,  # it depends on demo_test
     deps = [
         ":demo",
         ":demo_main",
+        ":demo_test",
     ],
 )
 
 genrule(
     name = "index",
+    testonly = True,
     srcs = [":index_units"],
     outs = ["index.pb"],
     cmd = "$(execpath //cpp_formatting:cpp_format) --merge-index --output=$@ $(SRCS)",
@@ -106,6 +131,8 @@ exports_files(
         "demo.cpp",
         "demo.h",
         "demo_main.cpp",
+        "demo_test.cpp",
+        "demo_testing.h",
         "inventory_user.cpp",
         "proto/inventory.proto",
         "proto/unit.proto",

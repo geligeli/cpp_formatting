@@ -122,6 +122,44 @@ cc_test(
 )
 
 cc_library(
+    name = "suffix_array",
+    srcs = ["suffix_array.cpp"],
+    hdrs = ["suffix_array.h"],
+    copts = CODE_BROWSER_COPTS,
+    implementation_deps = ["@libsais"],
+)
+
+cc_test(
+    name = "suffix_array_test",
+    size = "small",
+    srcs = ["suffix_array_test.cpp"],
+    copts = TEST_COPTS,
+    deps = [
+        ":suffix_array",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "text_index",
+    srcs = ["text_index.cpp"],
+    hdrs = ["text_index.h"],
+    copts = CODE_BROWSER_COPTS,
+    implementation_deps = [":suffix_array"],
+)
+
+cc_test(
+    name = "text_index_test",
+    size = "small",
+    srcs = ["text_index_test.cpp"],
+    copts = TEST_COPTS,
+    deps = [
+        ":text_index",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "api",
     srcs = ["api.cpp"],
     hdrs = ["api.h"],
@@ -135,6 +173,7 @@ cc_library(
         ":file_cache",
         ":index_db",
         ":repo",
+        ":text_index",
         "@protobuf",
     ],
 )
@@ -151,6 +190,7 @@ cc_test(
         ":index_db",
         ":index_schema",
         ":repo",
+        ":text_index",
         "//cpp_formatting:cpp_index_merge",
         "//cpp_formatting:index_cc_proto",
         "@googletest//:gtest_main",
@@ -238,6 +278,7 @@ cc_binary(
         ":index_schema",
         ":repo",
         ":static_assets",
+        ":text_index",
         "//cpp_formatting:cpp_index_merge",
         "//cpp_formatting:index_cc_proto",
         "@llvm-project//llvm:Support",
@@ -276,6 +317,8 @@ sh_test(
         "//bazel/testdata:demo.cpp",
         "//bazel/testdata:demo.h",
         "//bazel/testdata:demo_main.cpp",
+        "//bazel/testdata:demo_test.cpp",
+        "//bazel/testdata:demo_testing.h",
         "//bazel/testdata:index.pb",
         "//bazel/testdata:inventory_index.pb",
         "//bazel/testdata:inventory_user.cpp",

@@ -30,6 +30,11 @@ bazel_dep(name = "boost.asio", version = "1.90.0.bcr.1")
 bazel_dep(name = "boost.beast", version = "1.90.0.bcr.1")
 bazel_dep(name = "sqlite3", version = "3.53.4")
 
+# The suffix array under the browser's full-text search (code_browser/
+# text_index.cpp): SA-IS, several times faster than a textbook one and with no
+# workspace beyond the array itself.
+bazel_dep(name = "libsais", version = "2.10.4.bcr.2")
+
 # The one zlib every binary links: protobuf's, LLVM's (through the `llvm_zlib`
 # shim in //third_party/llvm:extensions.bzl) and the embedded Clang resource
 # directory's.  The version is the one protobuf resolves the graph to.

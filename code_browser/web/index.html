@@ -10,16 +10,20 @@
 <header id="header">
   <span id="repo-name">code browser</span>
   <span id="repo-head"></span>
-  <input id="search" type="search" placeholder="search symbols (/)" autocomplete="off">
+  <input id="search" type="search" placeholder="search symbols · Enter searches the text (/)" autocomplete="off">
   <div id="search-results" hidden></div>
 </header>
 <main id="main">
   <nav id="tree" aria-label="files"></nav>
+  <div id="tree-splitter" class="splitter vertical" role="separator" aria-orientation="vertical" aria-label="resize the file tree" tabindex="0" title="drag to resize (double-click resets)"></div>
   <section id="source">
     <div id="banner" hidden></div>
     <div id="file-title"></div>
+    <div id="text-title" hidden></div>
     <div id="code"></div>
+    <div id="text-results" hidden></div>
     <div id="panel" hidden>
+      <div id="panel-splitter" class="splitter horizontal" role="separator" aria-orientation="horizontal" aria-label="resize the panel" tabindex="0" title="drag to resize (double-click resets)"></div>
       <div id="panel-bar">
         <div id="panel-tabs" role="tablist"></div>
         <button id="panel-close" title="close (Esc)">×</button>

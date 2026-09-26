@@ -12,6 +12,7 @@
 #include "code_browser/index_db.h"
 #include "code_browser/index_schema.h"
 #include "code_browser/repo.h"
+#include "code_browser/text_index.h"
 #include "cpp_formatting/cpp_index_merge.h"
 #include "cpp_formatting/index.pb.h"
 #include "google/protobuf/json/json.h"
@@ -431,6 +432,78 @@ TEST_F(ApiTest, SearchAndAt) {
           .spans_size(),
       0);
   EXPECT_EQ(Get("/api/at", "path=widget.cpp").status, 400);
+}
+
+TEST_F(ApiTest, TextSearch) {
+  EXPECT_EQ(Get("/api/text", "q=count").status, 503);
+  EXPECT_FALSE(Parse<api::RepoInfo>(Get("/api/repo")).has_text_index());
+
+  Write("notes.md", "the count of widgets\n");
+  std::string error;
+  TextBuildStats stats;
+  const std::unique_ptr<TextIndex> text = OpenOrBuildTextIndex(
+      repo_->root(), dir_.string() + ".fts", {}, &stats, &error);
+  ASSERT_TRUE(text) << error;
+  handler_ = std::make_unique<ApiHandler>(*db_, *repo_, *files_, text.get());
+
+  const api::RepoInfo info = Parse<api::RepoInfo>(Get("/api/repo"));
+  EXPECT_EQ(info.text_index().files(), 4u);
+  EXPECT_EQ(info.text_index().path(), dir_.string() + ".fts");
+
+  const ApiResponse first = Get("/api/text", "q=count");
+  const auto count = Parse<api::TextSearchResults>(first);
+  EXPECT_EQ(count.query(), "count");
+  EXPECT_TRUE(count.case_sensitive());
+  EXPECT_EQ(count.total_matches(), 3u);
+  EXPECT_EQ(count.total_lines(), 3u);
+  EXPECT_EQ(count.files_matched(), 3u);
+  ASSERT_EQ(count.files_size(), 3);
+  // By path; a file the symbol index does not know has no id.
+  EXPECT_EQ(count.files(0).path(), "notes.md");
+  EXPECT_EQ(count.files(0).file_id(), -1);
+  EXPECT_EQ(count.files(0).kind(), cpp_index::FILE_KIND_UNSPECIFIED);
+  EXPECT_EQ(count.files(1).path(), "widget.cpp");
+  EXPECT_GE(count.files(1).file_id(), 0);
+  EXPECT_EQ(count.files(1).kind(), cpp_index::SOURCE);
+  const api::TextLine& line = count.files(1).lines(0);
+  EXPECT_EQ(line.line(), 2u);
+  EXPECT_EQ(line.column(), 27u);
+  EXPECT_EQ(line.text(), "void Widget::Set(int v) { count = v; }");
+  ASSERT_EQ(line.spans_size(), 1);
+  EXPECT_EQ(line.spans(0).begin(), 26u);
+  EXPECT_EQ(line.spans(0).end(), 31u);
+  EXPECT_EQ(count.files(2).path(), "widget.h");
+  EXPECT_EQ(count.files(2).lines(0).line(), 2u);
+
+  // The ETag covers the text index and the symbol index.
+  ASSERT_FALSE(first.etag.empty());
+  EXPECT_EQ(Get("/api/text", "q=count", first.etag).status, 304);
+
+  EXPECT_EQ(Parse<api::TextSearchResults>(Get("/api/text", "q=Widget"))
+                .total_matches(),
+            3u);
+  const auto any = Parse<api::TextSearchResults>(
+      Get("/api/text", "q=widget&case=insensitive&limit=2"));
+  EXPECT_FALSE(any.case_sensitive());
+  EXPECT_EQ(any.total_matches(), 5u);
+  EXPECT_EQ(any.total_lines(), 5u);
+  EXPECT_EQ(any.files_matched(), 4u);
+  EXPECT_EQ(any.next_offset(), 2u);
+  const auto last = Parse<api::TextSearchResults>(
+      Get("/api/text", "q=widget&case=insensitive&limit=2&offset=4"));
+  EXPECT_EQ(last.offset(), 4u);
+  EXPECT_EQ(last.next_offset(), 0u);
+  ASSERT_EQ(last.files_size(), 1);
+  EXPECT_EQ(last.files(0).path(), "widget.h");
+
+  EXPECT_EQ(Get("/api/text").status, 400);
+  EXPECT_EQ(Get("/api/text", "q=").status, 400);
+  EXPECT_EQ(Get("/api/text", "q=a%0Ab").status, 400);
+  EXPECT_EQ(Get("/api/text", "q=a&case=maybe").status, 400);
+  EXPECT_EQ(Get("/api/text", "q=a&limit=0").status, 400);
+  EXPECT_EQ(Get("/api/text", "q=a&limit=5000").status, 400);
+  EXPECT_EQ(Get("/api/text", "q=a&offset=x").status, 400);
+  fs::remove(dir_.string() + ".fts");
 }
 
 }  // namespace

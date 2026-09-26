@@ -211,6 +211,10 @@ message Attribute {
 message File {
   string path = 1;
   FileKind kind = 2;
+  // `testonly`: the file belongs to a testonly Bazel target -- a *_test rule,
+  // or a library only tests may depend on; the value is the rule's kind
+  // (`cc_test`).  Set by the index aspect, from a unit in text form
+  // (`<target>.cpp_index/testonly.txtpb`), never by a producer that parses.
   repeated Attribute attributes = 10;
 }
 

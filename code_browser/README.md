@@ -13,6 +13,15 @@ the token, and where ctrl-click goes). The index is the one `cpp_format
 [cpp_formatting/index.proto](../cpp_formatting/index.proto)), imported once
 into SQLite.
 
+The search box finds symbols as you type; Enter searches the *text* of the
+checkout instead -- every text file under the root, indexed or not (BUILD
+files, docs, scripts) -- and shows the matching lines, grouped by file, in the
+middle of the page (`#?text=<q>`, so Back returns to them). The file tree, the
+panel and the panel's two columns (occurrences on the left, everything else
+about the symbol on the right, uses in test code last -- the files of
+testonly Bazel targets, as the index aspect recorded them) are resizable; the
+sizes are kept per browser.
+
 ```sh
 # One command: indexes the whole repository (or a target pattern), prints the
 # browser's binary and command line, and serves the workspace on the index.
@@ -29,7 +38,11 @@ bazel run //code_browser -- --index=$PWD/index.pb --root=$PWD
 ```
 
 `index_import index.pb [--out=x.sqlite] [--force]` does the import on its
-own. `code_browser --check` opens the database, prints its stats and exits.
+own. `code_browser --check` opens the database (and the full-text index,
+building it if it is stale), prints their stats and exits.
+`--text-search=false` turns full-text search off; `--text-index=<path>`
+moves its file (default `<index>.fts`, or `<db>.fts`); `--text-max-file-kb`
+(4096) leaves larger files out.
 
 ## Layers
 
@@ -37,13 +50,15 @@ own. `code_browser --check` opens the database, prints its stats and exits.
 |---|---|---|
 | storage | `index_schema.*` (writer), `index_db.*` (reader), `sqlite_util.*` | SQLite, the proto |
 | checkout | `repo.*`, `file_cache.*` | the filesystem, `.git`, the exec root |
+| full text | `text_index.*`, `suffix_array.*` | the files under the root, libsais; nothing about the symbol index |
 | API | `api.proto`, `api.*` | requests and JSON; nothing about sockets |
 | HTTP | `http_server.*`, `static_assets.*` | Boost.Beast/Asio; nothing about the index |
 | page | `web/index.html`, `web/app.js`, `web/app.css` | `/api/*` only |
 
-Each layer has its own test (`index_db_test`, `repo_test`, `api_test`,
-`http_server_test`); `cross_language_test` is the API over an index of two
-languages, merged and linked as `--merge-index` does it; `smoke_test` runs the
+Each layer has its own test (`index_db_test`, `repo_test`, `text_index_test`
+and `suffix_array_test`, `api_test`, `http_server_test`);
+`cross_language_test` is the API over an index of two languages, merged and
+linked as `--merge-index` does it; `smoke_test` runs the
 binaries end to end over the demo index in `//bazel/testdata`, and then over
 the two-language one (`inventory_index.pb`: real protoc annotations, real Clang
 ranges) for the link between a `.proto` and the C++ generated from it.
@@ -61,9 +76,10 @@ fields as declared, defaults omitted).
 | `/api/annotations?path=<p>` | `Annotations`: every occurrence as a byte-range `Span`, plus a `SymbolSummary` for every symbol they name. A summary has the symbol's `language` and, for generated code, its `origin` -- the summary of what it was generated from (`set_size` -> the proto field `size`), with `modifies_origin` when the generator marked it a setter -- so the page knows where a click should lead without asking again |
 | `/api/includes?path=<p>` | `Includes`: every `#include` line's spelling as a byte range, with the indexed files it can name, best first. The index records no include edges and no include paths, so this is a resolution by path: the includer's sibling (quoted form), the spelling from the root, then the indexed paths ending in it — first-party first, then the fewest directories in front of the spelling. One candidate is a link; several open the panel to choose from. In a `.proto` the directives are its `import`s, whose spelling is a path from an import root and never relative to the file |
 | `/api/symbol/<id>`, `/api/symbol?usr=<u>` | `SymbolInfo`: definitions, declarations, relations both ways (`GENERATED_FROM` among them: forward on generated code, reverse on what it came from), counts -- `generated` being the occurrences of the symbols generated from this one |
-| `/api/refs/<id>?role=&exclude=&file=&offset=&limit=&expand=generated` | `References`, grouped per file with line text; `role`/`exclude` take a bitmask or `DEFINITION\|CALL`; `limit` ≤ 5000. `expand=generated` lists the occurrences of everything generated from the symbol along with its own -- one listing, filtered and paged as one -- with `symbols` summarising those symbols and each `Reference.symbol` saying which it is. `GENERATES` anchors (generated text, not uses) are left out unless `role` asks for them |
+| `/api/refs/<id>?role=&exclude=&file=&offset=&limit=&expand=generated` | `References`, grouped per file with line text, the files of tests (`test`: a testonly Bazel target's, from the index's `testonly` attribute) after all the others; `role`/`exclude` take a bitmask or `DEFINITION\|CALL`; `limit` ≤ 5000. `expand=generated` lists the occurrences of everything generated from the symbol along with its own -- one listing, filtered and paged as one -- with `symbols` summarising those symbols and each `Reference.symbol` saying which it is. `GENERATES` anchors (generated text, not uses) are left out unless `role` asks for them |
 | `/api/search?q=&limit=&kind=&locals=1` | `SearchResults`: name prefix, substring (3+ chars, via trigrams) or a qualified name, `ns::Name` or `pkg.Message` |
 | `/api/at?path=<p>&offset=<n>` | `OccurrencesAt`: what `cpp_format --dump-index --lookup` says |
+| `/api/text?q=&case=sensitive\|insensitive&offset=&limit=` | `TextSearchResults`: the lines that contain `q` exactly (the default) or ignoring ASCII case, by path then line, `limit` (≤ 2000, default 200) lines from `offset`; each line with its 1-based number, its text (clipped around the first match when long, from byte column `text_offset`) and the matches as byte spans into it. A file the symbol index knows carries its `file_id` and `kind`, others `file_id: -1`. More than 100 000 matches set `truncated`: the counts and lines then cover a subset. 503 when the server runs with `--text-search=false`; the ETag is the text index's and the symbol index's |
 
 Errors are `Error{status, message}` with 400/404/405/414. Responses that
 depend only on the index carry its ETag and answer `If-None-Match` with 304
@@ -83,7 +99,8 @@ unless `--serve-system-files=false`.
 
 ## Storage
 
-`index_import` writes one transaction: `files`/`dirs` (the tree),
+`index_import` writes one transaction: `files`/`dirs` (the tree; `files.test`
+is the index's `testonly` attribute),
 `symbols` (with each symbol's definition occurrence precomputed and a lower-
 cased name), `occurrences` indexed by `(file, begin, end)` and
 `(symbol, file, begin)`, the relations both ways, `unresolved`, and
@@ -94,6 +111,32 @@ in the index includes -- is left out: no symbol is declared there and nothing
 in it is a use, so it would be a dead entry in the tree. The server opens it read-only with one
 connection per in-flight query (a small pool), `mmap`ed; every query is an
 index lookup, and nothing is loaded up front.
+
+## Full-text search
+
+`text_index.*` walks `--root` at startup: every regular file, except symlinks
+(so `bazel-out`, `bazel-bin`, `bazel-<workspace>` and `external/` through
+them are never followed), `bazel-*` and `external/` at the root even when
+real directories, dot-files and dot-directories (`.git`), files over
+`--text-max-file-kb`, the server's own files (`index.pb*`, the database, the
+text index), and -- once read -- binary files (a NUL byte). The walk only
+stats; when every path, size and mtime matches what the text index was built
+from, the server maps it and starts (0.13 s over Clang's 30 000 files).
+Otherwise it rebuilds first: 14 s and 1.7 GB peak for those 340 MB of text,
+0.2 s for this repository.
+
+The file (`<index>.fts`) is one mapping: a header, the manifest (path, size,
+mtime of every walked file, binary ones flagged), the corpus (each indexed
+file followed by a NUL, so no match crosses into the next file), and a suffix
+array over it -- libsais over the ASCII-lowercased corpus, the separators
+left out. A query is one binary search for its range; a case-insensitive
+search is the range, a case-sensitive one the range filtered against the
+original bytes (folding ASCII only keeps every offset). The matches are then
+sorted by offset, which is by path and line, and grouped into lines. A query
+takes milliseconds (a single letter over 340 MB, 90 ms). The suffix array is
+bounds-checked as it is read rather than when the file is opened, which would
+read all of it. With 32-bit offsets the text is at most 2 GiB (the build says
+so and suggests `--text-max-file-kb`).
 
 ## Building
 

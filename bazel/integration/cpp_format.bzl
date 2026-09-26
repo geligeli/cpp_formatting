@@ -426,6 +426,31 @@ def _index_owned(ctx):
                 out.append(f)
     return out
 
+# Test code as Bazel knows it: a *_test rule, or anything only tests may depend
+# on (`testonly`, which every test rule has implicitly).  Each file such a
+# target owns gets a `testonly` attribute in the index, valued with the rule's
+# kind -- from one unit in text form (the merge reads `.txtpb`), written here
+# with no tool: the attribute joins the file's entry from whichever units
+# indexed it, so a header-only testonly library is covered like any other.
+def _testonly_units(ctx):
+    if not getattr(ctx.rule.attr, "testonly", False):
+        return []
+    files = _index_owned(ctx)
+    if not files:
+        return []
+    unit = ctx.actions.declare_file(ctx.label.name + ".cpp_index/testonly.txtpb")
+    kind = _text_string(ctx.rule.kind)
+    ctx.actions.write(unit, "".join([
+        "files { path: %s kind: SOURCE attributes { key: \"testonly\" value: %s } }\n" %
+        (_text_string(f.path), kind)
+        for f in files
+    ]))
+    return [unit]
+
+# A string literal of the protobuf text format.
+def _text_string(s):
+    return "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
 def _index_aspect_impl(target, ctx):
     dep_infos = [
         d[CppIndexInfo]
@@ -444,12 +469,15 @@ def _index_aspect_impl(target, ctx):
         return [CppIndexInfo(units = transitive, headers = dep_headers)]
     mine_headers = depset(direct = _owned_headers(ctx), transitive = [dep_headers])
 
-    # A header-only target has no translation unit and emits nothing; its
-    # headers are indexed by the TUs that include them (see
+    # A header-only target has no translation unit and emits nothing (unless it
+    # is testonly); its headers are indexed by the TUs that include them (see
     # _own_translation_units), which is what the propagated set is for.
     tus = _own_translation_units(ctx)
-    if not tus:
+    testonly = _testonly_units(ctx)
+    if not tus and not testonly:
         return [CppIndexInfo(units = transitive, headers = mine_headers)]
+    if not tus:
+        return _index_outputs(ctx, testonly, transitive, mine_headers)
 
     cc_toolchain = find_cc_toolchain(ctx)
     cc_ctx = _compilation_context(target, ctx)
@@ -474,7 +502,7 @@ def _index_aspect_impl(target, ctx):
     # parsed once, cached per file, and every occurrence in this file and in
     # every owned header it includes recorded against paths relative to the
     # exec root (so the unit is usable from a remote cache on another machine).
-    units = []
+    units = list(testonly)
     for src in tus:
         unit = ctx.actions.declare_file(_index_unit_path(ctx, src))
         args = ctx.actions.args()
@@ -494,7 +522,9 @@ def _index_aspect_impl(target, ctx):
             progress_message = "cpp_format: indexing " + src.short_path,
         )
         units.append(unit)
+    return _index_outputs(ctx, units, transitive, mine_headers)
 
+def _index_outputs(ctx, units, transitive, mine_headers):
     # Read by cpp_format.sh instead of globbing the units directory, for the
     # same reason as the edit-record manifest: a removed source's unit is never
     # deleted by Bazel and would keep its stale occurrences in the index.

@@ -21,11 +21,12 @@ index="$here/bazel/testdata/index.pb"
 work="${TEST_TMPDIR:-/tmp}/smoke.$$"
 mkdir -p "$work/repo/bazel/testdata"
 cp -L bazel/testdata/demo.h bazel/testdata/demo.cpp bazel/testdata/demo_main.cpp \
-  bazel/testdata/budget.h "$work/repo/bazel/testdata/"
+  bazel/testdata/budget.h bazel/testdata/demo_test.cpp bazel/testdata/demo_testing.h \
+  "$work/repo/bazel/testdata/"
 
 # 1. Import.
 "$import" "$index" --out="$work/index.sqlite" > "$work/import.out"
-grep -q "4 files, 15 symbols" "$work/import.out" || { cat "$work/import.out"; fail "import stats"; }
+grep -q "6 files, 20 symbols" "$work/import.out" || { cat "$work/import.out"; fail "import stats"; }
 [[ $("$import" "$index" --out="$work/index.sqlite" 2>&1 || true) == *"already exists"* ]] \
   || fail "a second import must refuse to overwrite"
 
@@ -55,7 +56,7 @@ url="http://127.0.0.1:$(cat "$work/port")"
 
 # 3. Endpoints.
 "$get" "$url/api/repo" > "$work/repo.json"
-grep -q '"files": *4' "$work/repo.json" || { cat "$work/repo.json"; fail "repo stats"; }
+grep -q '"files": *6' "$work/repo.json" || { cat "$work/repo.json"; fail "repo stats"; }
 grep -q "\"root\": *\"$work/repo\"" "$work/repo.json" || fail "repo root"
 
 "$get" "$url/api/file?path=bazel/testdata/demo.h" > "$work/demo.h"
@@ -81,9 +82,26 @@ grep -q '"line": *12' "$work/sym.json" || { cat "$work/sym.json"; fail "definiti
 grep -q 'bazel/testdata/demo_main.cpp' "$work/refs.json" || { cat "$work/refs.json"; fail "refs lack demo_main.cpp"; }
 grep -q '"line_text": *"  w.item_count_ = 4;"' "$work/refs.json" || { cat "$work/refs.json"; fail "line text"; }
 grep -q 'REFERENCE|DEPENDENT' "$work/refs.json" || fail "the dependent use in the template"
+# Test code (the files of //bazel/testdata:demo_test and :demo_testing, which
+# the aspect marked testonly) comes after every other use, and says so.
+[[ "$(grep -o '"path": *"[^"]*"' "$work/refs.json" | tail -1)" == *demo_test* ]] \
+  || { cat "$work/refs.json"; fail "the uses in tests are not last"; }
+grep -q '"test": *true' "$work/refs.json" || { cat "$work/refs.json"; fail "no file of the refs is marked test"; }
 
 "$get" "$url/api/search?q=item_count" > "$work/search.json"
 grep -q '"name": *"item_count_"' "$work/search.json" || { cat "$work/search.json"; fail "search"; }
+
+# Full text: every file under the root, whether indexed or not.
+grep -q '"text_index": *{[^}]*"files": *"6"' "$work/repo.json" || { cat "$work/repo.json"; fail "repo text_index stats"; }
+grep -q "text index $work/index.sqlite.fts: 6 files .*built in" "$work/server.log" \
+  || { cat "$work/server.log"; fail "the text index was not built"; }
+"$get" "$url/api/text?q=item_count_%20%3D%204" > "$work/text.json"
+grep -q '"path": *"bazel/testdata/demo_main.cpp"' "$work/text.json" || { cat "$work/text.json"; fail "text search path"; }
+grep -q '"text": *"  w.item_count_ = 4;"' "$work/text.json" || { cat "$work/text.json"; fail "text search line"; }
+[[ $("$get" "$url/api/text?q=ITEM_COUNT_%20%3D%204") != *'"files"'* ]] || fail "text search ignored case"
+"$get" "$url/api/text?q=ITEM_COUNT_%20%3D%204&case=insensitive" | grep -q 'demo_main.cpp' \
+  || fail "case-insensitive text search"
+"$get" "$url/api/text?q=" > /dev/null 2>&1 && fail "an empty text query was answered"
 
 "$get" "$url/api/files?prefix=bazel/testdata" > "$work/files.json"
 grep -q '"name": *"demo_main.cpp"' "$work/files.json" || fail "file list"

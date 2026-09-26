@@ -27,7 +27,8 @@ CREATE TABLE files(
   path TEXT NOT NULL UNIQUE,
   kind INTEGER NOT NULL,
   dir TEXT NOT NULL,
-  name TEXT NOT NULL);
+  name TEXT NOT NULL,
+  test INTEGER NOT NULL);  -- 1: a testonly target's (index.proto, File)
 CREATE TABLE dirs(
   path TEXT PRIMARY KEY,
   parent TEXT NOT NULL,
@@ -238,7 +239,8 @@ auto ImportIndex(const cpp_index::Index& index, sqlite3* raw,
   uint32_t files = 0;
   {
     Statement file = prepare(
-        "INSERT INTO files(id, path, kind, dir, name) VALUES(?,?,?,?,?)");
+        "INSERT INTO files(id, path, kind, dir, name, test) "
+        "VALUES(?,?,?,?,?,?)");
     Statement dir =
         prepare("INSERT OR IGNORE INTO dirs(path, parent, name) VALUES(?,?,?)");
     std::unordered_set<std::string> seen_dirs;
@@ -252,6 +254,10 @@ auto ImportIndex(const cpp_index::Index& index, sqlite3* raw,
       file.BindInt(3, f.kind());
       file.BindText(4, d);
       file.BindText(5, name);
+      file.BindInt(6, std::any_of(f.attributes().begin(), f.attributes().end(),
+                                  [](const cpp_index::Attribute& a) {
+                                    return a.key() == "testonly";
+                                  }));
       run(file);
       // Every ancestor: "a/b/c" -> "a" (parent ""), "a/b" (parent "a");
       // "/usr/x" -> "/" (parent ""), "/usr" (parent "/").

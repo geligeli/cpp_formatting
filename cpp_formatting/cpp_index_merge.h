@@ -79,8 +79,9 @@ auto roleNames(uint32_t Roles) -> std::string;
 // ---------------------------------------------------------------------------
 
 /// Reads a unit or an index (either message, in binary form) from \p Path
-/// into a unit.  Prints a diagnostic and returns false when the file cannot be
-/// read or parsed.
+/// into a unit -- or, when \p Path ends in `.txtpb`, a unit in text form.
+/// Prints a diagnostic and returns false when the file cannot be read or
+/// parsed.
 auto readUnit(llvm::StringRef Path, cpp_index::IndexUnit& Out) -> bool;
 
 /// Writes \p Message to \p Path (`-` for stdout) in the given format.  Prints

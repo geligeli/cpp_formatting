@@ -24,7 +24,7 @@ namespace code_browser {
 
 // Bumped whenever the tables change; a database with another version is
 // refused by the reader and re-imported by the server.
-inline constexpr int kSchemaVersion = 1;
+inline constexpr int kSchemaVersion = 2;  // 2: files.test
 
 // What the database remembers about the index it came from.
 struct ImportOptions {

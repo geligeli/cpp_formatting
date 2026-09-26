@@ -32,6 +32,17 @@ message RepoInfo {
   string db_path = 5;
   string index_etag = 6;
   IndexStats stats = 7;
+  TextIndexInfo text_index = 8;  // absent when full-text search is off
+}
+
+// The full-text index (see /api/text): every text file under the root.
+message TextIndexInfo {
+  string path = 1;
+  uint64 files = 2;         // indexed
+  uint64 skipped = 3;       // binary or unreadable
+  uint64 corpus_bytes = 4;
+  uint64 file_bytes = 5;    // the index on disk
+  string built_at = 6;      // RFC 3339 UTC
 }
 
 message TreeEntry {
@@ -169,6 +180,10 @@ message FileReferences {
   int32 file_id = 2;
   cpp_index.FileKind kind = 3;
   repeated Reference refs = 4;
+  // Test code: the file of a testonly Bazel target (a *_test rule, or a
+  // library only tests may use), as the index aspect recorded it.  The files
+  // of tests come after all the others, on every page.
+  bool test = 5;
 }
 
 message References {
@@ -200,4 +215,44 @@ message OccurrencesAt {
   repeated Span spans = 3;
   repeated SymbolSummary symbols = 4;
   repeated Unresolved unresolved = 5;
+}
+
+// /api/text: the lines of the checkout that contain `query` exactly (or
+// ignoring ASCII case), by path, then line.  `text` is the line, or a part of
+// it around the first match when the line is long: it starts at byte column
+// `text_offset` (0-based) and is cut short when `clipped_end`.  Bytes that are
+// not UTF-8 read as '?', so the spans' byte offsets into `text` hold.
+message TextSpan {
+  uint32 begin = 1;
+  uint32 end = 2;
+}
+
+message TextLine {
+  uint32 line = 1;    // 1-based
+  uint32 column = 2;  // 1-based byte column of the first match
+  string text = 3;
+  uint32 text_offset = 4;
+  bool clipped_end = 5;
+  repeated TextSpan spans = 6;  // bytes into `text`
+}
+
+message TextFile {
+  string path = 1;
+  int32 file_id = 2;            // -1 when the symbol index lacks the file
+  cpp_index.FileKind kind = 3;  // FILE_KIND_UNSPECIFIED likewise
+  repeated TextLine lines = 4;
+}
+
+message TextSearchResults {
+  string query = 1;
+  bool case_sensitive = 2;
+  uint64 total_matches = 3;
+  uint64 total_lines = 4;
+  uint64 files_matched = 5;
+  // Too many matches to look at them all: the counts and the lines cover a
+  // subset (and case-insensitively, total_matches is still exact).
+  bool truncated = 6;
+  uint32 offset = 7;       // in lines
+  uint32 next_offset = 8;  // 0: no more
+  repeated TextFile files = 9;
 }

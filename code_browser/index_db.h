@@ -25,6 +25,7 @@ struct FileRow {
   int32_t id = -1;
   std::string path;
   cpp_index::FileKind kind = cpp_index::FILE_KIND_UNSPECIFIED;
+  bool test = false;  // owned by a testonly Bazel target
 };
 
 struct DirEntry {
@@ -154,7 +155,8 @@ class IndexDb {
   // Symbols.
   auto Symbol(int32_t id) const -> std::optional<SymbolRow>;
   auto SymbolByUsr(std::string_view usr) const -> std::optional<SymbolRow>;
-  // Sorted by (file, begin); `q.offset`/`q.limit` page it.
+  // Sorted by (file, begin), the files of tests (FileRow::test) after all
+  // the others; `q.offset`/`q.limit` page it.
   auto SymbolOccurrences(int32_t symbol, const RefQuery& q) const
       -> std::vector<OccRow>;
   auto CountSymbolOccurrences(int32_t symbol, const RefQuery& q) const

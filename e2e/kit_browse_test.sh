@@ -35,7 +35,8 @@
 #     index.pb is left alone and its database stays current;
 #   * the launched server serves *the consumer's checkout*: /api/repo names it
 #     as root, /api/file returns its bytes, and a cross-target reference
-#     (geometry.cpp -> a member declared in shapes.h) is in the index;
+#     (geometry.cpp -> a member declared in shapes.h) is in the index, and
+#     the cc_test's file is marked `testonly` (Bazel's word for test code);
 #   * neither loads the index's second producer, for .proto files: it is an
 #     aspect in a file of its own, the only one in the kit that loads
 #     @protobuf -- a repository the vendored consumer does not have -- and the
@@ -239,6 +240,17 @@ check_consumer() {  # <flavor>
     || { tail -20 "$log" >&2; fail "[$flavor] the missing translation unit was not reported"; }
   grep -q "cpp_format: wrote $ws/index.pb" "$log" || fail "[$flavor] the index was not written"
   grep -q "code_browser: importing" "$log" || fail "[$flavor] the first run did not import the index"
+  # Test code is what Bazel says: shapes_test.cpp (a cc_test's) carries the
+  # aspect's `testonly` attribute, shapes.h (the library under test) does not.
+  "$TOOL" --dump-index --format=text "$ws/index.pb" > "$WORK/$flavor.index.txt"
+  attributes_of() {
+    awk -v p="path: \"mini/$1\"" 'index($0, p) {f = 1} f && /^}/ {exit} f' "$WORK/$flavor.index.txt"
+  }
+  attributes_of shapes_test.cpp | grep -q 'value: "cc_test"' \
+    || fail "[$flavor] shapes_test.cpp is not marked testonly in the index"
+  if attributes_of shapes.h | grep -q testonly; then
+    fail "[$flavor] shapes.h is marked testonly"
+  fi
   # No proto_library here, so the .proto producer's aspect was never named,
   # and its .bzl is the only thing in the kit that loads @protobuf.  The
   # vendored flavor is what pins that: this consumer has no repository called

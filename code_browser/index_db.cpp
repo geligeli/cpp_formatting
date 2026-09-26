@@ -68,9 +68,9 @@ enum Query {
 
 constexpr const char* kSql[kNumQueries] = {
     /*kFileIdOf*/ "SELECT id FROM files WHERE path = ?",
-    /*kFile*/ "SELECT path, kind FROM files WHERE id = ?",
+    /*kFile*/ "SELECT path, kind, test FROM files WHERE id = ?",
     /*kFilesNamed*/
-    "SELECT id, path, kind FROM files WHERE name = ? ORDER BY path",
+    "SELECT id, path, kind, test FROM files WHERE name = ? ORDER BY path",
     /*kListDirs*/ "SELECT path, name FROM dirs WHERE parent = ? ORDER BY name",
     /*kListFiles*/
     "SELECT id, path, name, kind FROM files WHERE dir = ? ORDER BY name",
@@ -100,7 +100,9 @@ constexpr const char* kSql[kNumQueries] = {
     /*kSymbolOccurrences*/
     "SELECT id, file, begin, end, symbol, roles, macro FROM occurrences "
     "WHERE symbol = ?1 AND (?2 = 0 OR (roles & ?2) != 0) AND (roles & ?3) = 0 "
-    "AND (?4 < 0 OR file = ?4) ORDER BY file, begin, end LIMIT ?5 OFFSET ?6",
+    "AND (?4 < 0 OR file = ?4) ORDER BY "
+    "(SELECT test FROM files WHERE files.id = file), file, begin, end "
+    "LIMIT ?5 OFFSET ?6",
     /*kCountSymbolOccurrences*/
     "SELECT COUNT(*) FROM occurrences "
     "WHERE symbol = ?1 AND (?2 = 0 OR (roles & ?2) != 0) AND (roles & ?3) = 0 "
@@ -112,7 +114,9 @@ constexpr const char* kSql[kNumQueries] = {
     "WHERE symbol IN (SELECT ?1 UNION SELECT symbol FROM symbol_relations "
     "WHERE target = ?1 AND kind = 100) "
     "AND (?2 = 0 OR (roles & ?2) != 0) AND (roles & ?3) = 0 "
-    "AND (?4 < 0 OR file = ?4) ORDER BY file, begin, end LIMIT ?5 OFFSET ?6",
+    "AND (?4 < 0 OR file = ?4) ORDER BY "
+    "(SELECT test FROM files WHERE files.id = file), file, begin, end "
+    "LIMIT ?5 OFFSET ?6",
     /*kCountGeneratedOccurrences*/
     "SELECT COUNT(*) FROM occurrences "
     "WHERE symbol IN (SELECT ?1 UNION SELECT symbol FROM symbol_relations "
@@ -336,6 +340,7 @@ auto IndexDb::File(int32_t id) const -> std::optional<FileRow> {
   f.id = id;
   f.path = std::string(s.ColumnText(0));
   f.kind = static_cast<cpp_index::FileKind>(s.ColumnInt(1));
+  f.test = s.ColumnInt(2) != 0;
   return f;
 }
 
@@ -350,6 +355,7 @@ auto IndexDb::FilesNamed(std::string_view name) const -> std::vector<FileRow> {
     f.id = static_cast<int32_t>(s.ColumnInt(0));
     f.path = std::string(s.ColumnText(1));
     f.kind = static_cast<cpp_index::FileKind>(s.ColumnInt(2));
+    f.test = s.ColumnInt(3) != 0;
     out.push_back(std::move(f));
   }
   return out;
